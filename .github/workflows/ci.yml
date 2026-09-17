@@ -89,6 +89,9 @@ jobs:
           go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
           go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
 
+      - name: Download modules
+        run: go mod download
+
       - name: Staticcheck
         run: staticcheck ./...
 

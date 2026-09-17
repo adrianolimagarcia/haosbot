@@ -83,7 +83,18 @@ type Bus struct {
 }
 
 type subscription struct {
-	active  bool
+	// active is atomic rather than a plain bool, and that is load-bearing.
+	//
+	// Publish must consult this flag once per handler at CALL time to match the
+	// reference: queue.py:104-107 checks `active` inside the entry closure, so a
+	// handler that unsubscribes a peer suppresses that peer for the dispatch
+	// already in progress. Reading a plain bool there races with the
+	// unsubscribe closure, which clears it under b.mu; an atomic load keeps the
+	// reference's semantics without re-taking b.mu for every handler.
+	//
+	// atomic.Bool must not be copied. b.handlers holds *subscription and every
+	// use goes through that pointer, so no subscription value is ever copied.
+	active  atomic.Bool
 	handler EventHandler
 }
 
@@ -312,7 +323,8 @@ func (b *Bus) OutboundSize() int {
 // Subscribe registers an ordered, synchronously-invoked handler and returns an
 // idempotent unsubscribe function. Mirrors MessageBus.subscribe.
 func (b *Bus) Subscribe(handler EventHandler) func() {
-	sub := &subscription{active: true, handler: handler}
+	sub := &subscription{handler: handler}
+	sub.active.Store(true)
 	b.mu.Lock()
 	b.handlers = append(b.handlers, sub)
 	b.mu.Unlock()
@@ -322,7 +334,7 @@ func (b *Bus) Subscribe(handler EventHandler) func() {
 		once.Do(func() {
 			b.mu.Lock()
 			defer b.mu.Unlock()
-			sub.active = false
+			sub.active.Store(false)
 			for i, h := range b.handlers {
 				if h == sub {
 					b.handlers = append(b.handlers[:i], b.handlers[i+1:]...)
@@ -338,32 +350,38 @@ func (b *Bus) Subscribe(handler EventHandler) func() {
 // break delivery to the others; the Python version logs and continues, and
 // this preserves that containment without a logger dependency.
 //
-// The active set is resolved while b.mu is held, and only the handler
-// functions are carried out of the critical section. Reading subscription.active
-// after unlocking raced with the unsubscribe closure, which clears it under the
-// same mutex (see TestConcurrentUnsubscribeAndPublish).
+// Snapshot of the LIST, check of the FLAG — this split is the reference's, and
+// it is deliberate. The reference iterates `list(self._handlers)`
+// (queue.py:120) but each entry re-tests its own `active` flag when it is
+// called (queue.py:104-107). Copying the list under b.mu and then loading each
+// subscription's flag immediately before calling it reproduces both halves:
 //
-// Consequence worth naming: the set of handlers is fixed at snapshot time, so
-// unsubscribing handler B from inside handler A during the same Publish no
-// longer suppresses B in that dispatch. The reference (queue.py:126-134) checks
-// each entry's flag as it is called, so it does suppress B. The difference is
-// only reachable when a subscriber unsubscribes a peer from within a handler;
-// deciding the set up front is what makes the read safe without taking b.mu once
-// per handler, and it keeps registration order and panic isolation intact.
+//   - a handler registered during a dispatch is not in the snapshot, so it is
+//     not called until the next Publish (same as the reference);
+//   - a handler unsubscribed during a dispatch IS in the snapshot, but its flag
+//     is already false when its turn arrives, so it is skipped — the reference
+//     suppresses a peer unsubscribed by an earlier handler, and so does this.
+//
+// Resolving the active set up front instead (the previous revision) closed the
+// data race by copying the handler functions out of the critical section, but
+// it also froze liveness at snapshot time, so a peer unsubscribed mid-dispatch
+// was still called — a divergence from the reference. The flag is an
+// atomic.Bool (see subscription), so the per-handler check needs no lock and
+// does not race with the unsubscribe closure.
 func (b *Bus) Publish(ctx context.Context, event Event) {
 	b.mu.Lock()
-	handlers := make([]EventHandler, 0, len(b.handlers))
-	for _, h := range b.handlers {
-		if h.active {
-			handlers = append(handlers, h.handler)
-		}
-	}
+	subs := make([]*subscription, len(b.handlers))
+	copy(subs, b.handlers)
 	b.mu.Unlock()
 
-	for _, h := range handlers {
+	for _, sub := range subs {
+		// Loaded at call time, deliberately: see the doc comment above.
+		if !sub.active.Load() {
+			continue
+		}
 		func() {
 			defer func() { _ = recover() }()
-			h(ctx, event)
+			sub.handler(ctx, event)
 		}()
 	}
 }

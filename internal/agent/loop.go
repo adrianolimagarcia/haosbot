@@ -42,7 +42,6 @@ func (l *Loop) graphMemoryContext(ctx context.Context, store *micrographrag.Stor
 	return b.String(), nil
 }
 
-// Transcript is the mutable conversation state of one session.
 type Transcript interface {
 	Key() string
 	Messages() []core.Message
@@ -51,12 +50,10 @@ type Transcript interface {
 	Save() error
 }
 
-// TranscriptStore opens transcripts by session key.
 type TranscriptStore interface {
 	Open(key string) (Transcript, error)
 }
 
-// LoopConfig configures an AgentLoop.
 type LoopConfig struct {
 	Bus      *bus.Bus
 	Store    TranscriptStore
@@ -66,28 +63,22 @@ type LoopConfig struct {
 	Runner   *Runner
 
 	ContextWindowTokens int
-
-	Model       string
-	MaxTokens   int
-	Temperature float64
-
-	Workspace        string
-	ProjectWorkspace string
-
-	MaxIterations      int
-	MaxToolResultChars int
+	Model               string
+	MaxTokens           int
+	Temperature         float64
+	Workspace           string
+	ProjectWorkspace    string
+	MaxIterations       int
+	MaxToolResultChars  int
 	ConcurrentTools     bool
 	SequentialTools     bool
 	ReasoningEffort     string
+	IncludeMemory       bool
+	SystemPrompt        string
 
-	IncludeMemory bool
-	SystemPrompt  string
-
-	// GraphMemory is retained for compatibility with tests/single-store callers.
-	// Production multi-session runtimes should provide GraphMemoryForSession so
-	// recall and ingest are physically isolated instead of sharing a global DB.
 	GraphMemory           *micrographrag.Store
 	GraphMemoryForSession func(context.Context, string) (*micrographrag.Store, error)
+	GraphMemoryEnqueue    func(string, string) bool
 	GraphMemoryMaxChars   int
 }
 
@@ -96,7 +87,6 @@ type activeTurn struct {
 	cancel     context.CancelFunc
 }
 
-// Loop consumes inbound messages and produces outbound messages.
 type Loop struct {
 	cfg LoopConfig
 
@@ -212,7 +202,6 @@ func (l *Loop) ProcessMessage(ctx context.Context, msg core.InboundMessage) (*co
 		systemPrompt = l.cfg.Prompt.BuildSystemPrompt(
 			msg.Channel, nil, l.cfg.ProjectWorkspace, l.cfg.IncludeMemory)
 	}
-
 	if graphStore != nil {
 		graphCtx, searchErr := l.graphMemoryContext(ctx, graphStore, msg.Content)
 		if searchErr == nil && graphCtx != "" {
@@ -271,8 +260,12 @@ func (l *Loop) ProcessMessage(ctx context.Context, msg core.InboundMessage) (*co
 		return nil, fmt.Errorf("agent: persist turn: %w", err)
 	}
 
-	if graphStore != nil {
-		content := msg.Content + "\n" + res.FinalContent
+	graphContent := msg.Content + "\n" + res.FinalContent
+	if l.cfg.GraphMemoryEnqueue != nil {
+		_ = l.cfg.GraphMemoryEnqueue(key, graphContent)
+	} else if graphStore != nil {
+		// Compatibility fallback for tests/single-store embedders. Production
+		// runtimes provide GraphMemoryEnqueue and do not create free goroutines.
 		go func(store *micrographrag.Store, sourceKey, text string) {
 			_, _ = store.AddMemory(context.Background(), micrographrag.MemoryInput{
 				Kind:    1,
@@ -280,7 +273,7 @@ func (l *Loop) ProcessMessage(ctx context.Context, msg core.InboundMessage) (*co
 				Title:   "Agent turn " + sourceKey,
 				Content: text,
 			})
-		}(graphStore, key, content)
+		}(graphStore, key, graphContent)
 	}
 
 	content := res.FinalContent

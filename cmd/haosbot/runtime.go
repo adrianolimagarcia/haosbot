@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -14,11 +16,8 @@ import (
 
 	micrographrag "github.com/adrianolimagarcia/micrographrag-go"
 
-	"flag"
-	"github.com/adrianolimagarcia/nanobot-go/internal/api"
-	"net/http"
-
 	"github.com/adrianolimagarcia/nanobot-go/internal/agent"
+	"github.com/adrianolimagarcia/nanobot-go/internal/api"
 	"github.com/adrianolimagarcia/nanobot-go/internal/bus"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
@@ -44,10 +43,6 @@ type agentRuntime struct {
 }
 
 // transcriptStore adapts *session.Store to agent.TranscriptStore.
-//
-// The adapter exists because Store.Open returns the concrete *session.Session
-// while the loop's interface requires the agent.Transcript interface; Go
-// requires the return types to match exactly, so a one-method shim is needed.
 type transcriptStore struct{ s *session.Store }
 
 func (t transcriptStore) Open(key string) (agent.Transcript, error) {
@@ -71,20 +66,11 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		return nil, fmt.Errorf("create workspace %s: %w", workspace, err)
 	}
 
-	// sync_workspace_templates (utils/helpers.py:897-946), called at startup by
-	// every reference entry point (cli/agent.py:154, cli/commands.py:233,385,
-	// cli/gateway_runtime.py:410, cli/webui.py:178) with silent defaulting to
-	// false. It creates the missing workspace files without overwriting user
-	// files, makes skills/, writes an empty memory/history.jsonl and initializes
-	// the memory git store. The port previously did none of this, so a workspace
-	// created by haosbot alone was empty.
 	if _, err := wsbootstrap.SyncTemplates(workspace, false); err != nil {
 		return nil, fmt.Errorf("sync workspace templates: %w", err)
 	}
 
-	// Session storage must live OUTSIDE the agent workspace. The reference
-	// raises RuntimeError when the session root is inside the workspace,
-	// because the agent could otherwise read or corrupt its own transcripts.
+	// Session storage must live OUTSIDE the agent workspace.
 	sessionsRoot := filepath.Join(config.DefaultDataDir(), "sessions")
 	if isWithin(sessionsRoot, workspace) {
 		return nil, fmt.Errorf(
@@ -99,15 +85,26 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		return nil, err
 	}
 
+	execTimeout := time.Duration(cfg.Tools.Exec.Timeout) * time.Second
+	if execTimeout <= 0 {
+		execTimeout = 60 * time.Second
+	}
+
 	registry := tools.NewRegistry()
 	builtin.Register(registry, builtin.Config{
 		Files: builtin.PathPolicy{Workspace: workspace, AllowedDir: workspace},
 		Exec: builtin.ExecOptions{
 			Workspace:           workspace,
 			RestrictToWorkspace: true,
-			DefaultTimeout:      60 * time.Second,
+			DefaultTimeout:      execTimeout,
 			MaxTimeout:          600 * time.Second,
+			DenyPatterns:        append([]string(nil), cfg.Tools.Exec.DenyPatterns...),
 		},
+		SSRFWhitelist:       append([]string(nil), cfg.Tools.SSRFWhitelist...),
+		EnforceCapabilities: true,
+		EnableFiles:         cfg.Tools.File.Enable,
+		EnableExec:          cfg.Tools.Exec.Enable,
+		EnableNetwork:       cfg.Tools.Web.Enable,
 	})
 
 	messageBus := bus.New(bus.Options{})
@@ -166,21 +163,11 @@ func (r *agentRuntime) Close() {
 }
 
 // resolveProvider picks the provider and model from config.
-//
-// This is a deliberately small subset of the reference's router: it honours an
-// explicit provider when configured, otherwise it infers the provider from the
-// "provider/model" prefix, and finally falls back to the OpenAI-compatible
-// endpoint. Providers beyond OpenAI-compatible chat completions are NOT
-// implemented — see docs/COMPATIBILITY.md.
 func resolveProvider(cfg *config.Config) (provider.Provider, string, error) {
 	d := cfg.Agents.Defaults
 	model := d.Model
 	providerName := strings.TrimSpace(d.Provider)
 
-	// The reference model string is "<provider>/<model>"; the provider part is
-	// a routing prefix and must NOT be sent as part of the model name.
-	// Config.get_provider (config/schema.py) matches on that prefix, and the
-	// provider receives only the remainder.
 	prefix, rest := "", model
 	if idx := strings.Index(model, "/"); idx > 0 {
 		prefix, rest = model[:idx], model[idx+1:]
@@ -192,8 +179,6 @@ func resolveProvider(cfg *config.Config) (provider.Provider, string, error) {
 			providerName = "openai"
 		}
 	}
-	// Strip the prefix whenever it names the provider we resolved, so
-	// "openai/gpt-4o" sends model "gpt-4o".
 	if prefix != "" && strings.EqualFold(prefix, providerName) {
 		model = rest
 	}
@@ -236,8 +221,6 @@ func providerConfigFor(cfg *config.Config, name string) (config.ProviderConfig, 
 	case "custom":
 		return p.Custom, nil
 	default:
-		// Unknown names are treated as OpenAI-compatible when an apiBase is
-		// present, which is how the reference handles user-defined providers.
 		return config.ProviderConfig{}, fmt.Errorf(
 			"provider %q is not supported by this port (only OpenAI-compatible "+
 				"chat completions are implemented); see docs/COMPATIBILITY.md", name)
@@ -337,14 +320,10 @@ func cmdChat(args []string) error {
 }
 
 // cmdGateway runs the loop as a service until interrupted.
-//
-// This is the minimal gateway: it drains the bus and dispatches to the loop.
-// Channels (Telegram, Discord, ...) are NOT implemented, so in practice only
-// locally published messages are processed.
 func cmdGateway(args []string) error {
 	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
 	hostFlag := fs.String("host", "", "HTTP gateway host/IP to bind (defaults to config api.host or 127.0.0.1)")
-	portFlag := fs.String("port", "", "HTTP gateway port (defaults to config api.port or 8765)")
+	portFlag := fs.String("port", "", "HTTP gateway port (defaults to config api.port or 8900)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -377,7 +356,7 @@ func cmdGateway(args []string) error {
 		host = *hostFlag
 	}
 
-	port := "8765"
+	port := "8900"
 	if cfg.API.Port > 0 {
 		port = fmt.Sprintf("%d", cfg.API.Port)
 	}
@@ -388,7 +367,7 @@ func cmdGateway(args []string) error {
 	addr := fmt.Sprintf("%s:%s", host, port)
 	fmt.Printf("haosbot %s gateway starting HTTP server on http://%s (endpoints: /v1/chat/completions, /v1/models, /health)\n", version, addr)
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
 		if err := apiServer.Start(addr); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
@@ -412,9 +391,6 @@ func cmdGateway(args []string) error {
 // helpers
 // ---------------------------------------------------------------------------
 
-// expandTilde resolves a leading "~" to the user home directory, matching
-// nanobot.config.paths.expand_user. A bare "~" or "~/..." is expanded; "~user"
-// is deliberately NOT expanded (the reference does not either).
 func expandTilde(path string) (string, error) {
 	if path == "" {
 		return config.DefaultWorkspace(), nil
@@ -432,7 +408,6 @@ func expandTilde(path string) (string, error) {
 	return filepath.Join(home, path[2:]), nil
 }
 
-// isWithin reports whether child is inside parent.
 func isWithin(child, parent string) bool {
 	rel, err := filepath.Rel(parent, child)
 	if err != nil {

@@ -26,6 +26,8 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools/builtin"
 	wsbootstrap "github.com/adrianolimagarcia/nanobot-go/internal/workspace"
+
+	"strconv"
 )
 
 type agentRuntime struct {
@@ -364,7 +366,23 @@ func cmdGateway(args []string) error {
 	}
 
 	addr := fmt.Sprintf("%s:%s", host, port)
-	fmt.Printf("haosbot %s gateway starting HTTP server on http://%s (endpoints: /v1/chat/completions, /v1/models, /health)\n", version, addr)
+	fmt.Printf("haosbot %s gateway starting HTTP server on http://%s (endpoints: /v1/chat/completions, /v1/models, /health, /readyz, /a2a)\n", version, addr)
+
+	// Publish the EFFECTIVE address back into the config before the server
+	// starts. --host/--port override cfg.API for the listener, but the A2A agent
+	// card is built from cfg.API (internal/a2a/handler.go reads cfg.API.Host and
+	// cfg.API.Port), so without this a gateway started as
+	//     haosbot gateway --port 41877
+	// listened on 41877 while advertising http://127.0.0.1:8900/a2a — A2A
+	// discovery pointed every peer at a port nothing was listening on. Observed
+	// before this fix: card url = http://127.0.0.1:8900/a2a for a server bound to
+	// 127.0.0.1:41877. api.NewServer above stored the same *config.Config, and
+	// a2a.NewHandler runs inside apiServer.Start below, so writing here is seen
+	// by the card.
+	cfg.API.Host = host
+	if n, convErr := strconv.Atoi(port); convErr == nil {
+		cfg.API.Port = n
+	}
 
 	errCh := make(chan error, 2)
 	go func() {

@@ -122,6 +122,30 @@ func DefaultConfigPath() string {
 // DefaultDataDir returns the instance-level runtime data directory.
 func DefaultDataDir() string { return parentDir(DefaultConfigPath()) }
 
+// DataDirCandidates returns the candidate instance data directories in
+// preference order: the branded ~/.haosbot first, then a legacy ~/.nanobot.
+//
+// This is the same rule DefaultConfigPath and DefaultWorkspace implement, made
+// available to callers that probe a subpath other than config.json or
+// workspace/. Those two helpers decide from the subpath itself, precisely so a
+// legacy install is still found when the branded root exists but is empty;
+// DefaultDataDir, which decides from the data directory alone, cannot express
+// that. The minimal CPython runtime used by the python_exec tool
+// (<data-dir>/python-min/bin/python3, documented in MANUAL.md §8 as
+// ~/.haosbot/python-min/) is such a caller: on a machine whose interpreter was
+// built before the rebrand, under ~/.nanobot, a fresh ~/.haosbot would otherwise
+// hide the interpreter that does exist.
+//
+// The reference has no equivalent helper — it has no ~/.haosbot notion at all —
+// so this is the port's own branding rule, kept in one place.
+func DataDirCandidates() []string {
+	home := homeDir()
+	return []string{
+		filepath.Join(home, ".haosbot"),
+		filepath.Join(home, ".nanobot"),
+	}
+}
+
 // runtimeSubdir returns a named runtime subdirectory under the data dir.
 func runtimeSubdir(name string) string { return filepath.Join(DefaultDataDir(), name) }
 

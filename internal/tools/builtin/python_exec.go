@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
 )
 
@@ -45,6 +46,33 @@ func (t *PythonExecTool) Parameters() json.RawMessage {
 	return t.params
 }
 
+// pythonMinBin returns the interpreter used to run python_exec snippets.
+//
+// The minimal CPython runtime used by python_exec lives under
+// <data-dir>/python-min/bin/python3, and the data directory follows the
+// project's branding rule: prefer ~/.haosbot, fall back to a legacy ~/.nanobot
+// (internal/config/paths.go). The Python reference has no minimal-CPython
+// runtime — `grep -rn "python-min" upstream/nanobot` finds nothing — so this
+// tool is a Go-port addition and MANUAL.md §8 is the only statement of the path:
+// ~/.haosbot/python-min/. (scripts/build_cpython_min.sh still writes to the
+// legacy ~/.nanobot prefix; that script is outside this change, and the fallback
+// below keeps such an install working.)
+//
+// The candidates are probed in order rather than resolved through
+// config.DefaultDataDir() alone, because that helper decides from the data
+// directory and would hide a legacy ~/.nanobot/python-min on a machine that also
+// has a (fresh, interpreter-less) ~/.haosbot. Only when no candidate holds an
+// interpreter does this fall back to the system python3.
+func pythonMinBin() string {
+	for _, dir := range config.DataDirCandidates() {
+		pyBin := filepath.Join(dir, "python-min", "bin", "python3")
+		if _, err := os.Stat(pyBin); err == nil {
+			return pyBin
+		}
+	}
+	return "python3"
+}
+
 func (t *PythonExecTool) Execute(ctx context.Context, args json.RawMessage) (tools.Result, error) {
 	var params struct {
 		Code    string `json:"code"`
@@ -65,13 +93,7 @@ func (t *PythonExecTool) Execute(ctx context.Context, args json.RawMessage) (too
 	subCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Locate minimal python or fallback to system python3
-	pyBin := filepath.Join(os.Getenv("HOME"), ".nanobot", "python-min", "bin", "python3")
-	if _, err := os.Stat(pyBin); err != nil {
-		pyBin = "python3"
-	}
-
-	cmd := exec.CommandContext(subCtx, pyBin, "-c", params.Code)
+	cmd := exec.CommandContext(subCtx, pythonMinBin(), "-c", params.Code)
 	if t.workspace != "" {
 		cmd.Dir = t.workspace
 	}

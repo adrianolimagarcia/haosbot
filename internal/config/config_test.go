@@ -1332,6 +1332,83 @@ func TestWorkspacePathExpandsTilde(t *testing.T) {
 	}
 }
 
+// TestWorkspacePathFallsBackToDefault covers the "ghost workspace": with an
+// unset (empty) configured workspace, WorkspacePath() used to return the empty
+// string, so callers received a path that does not exist instead of the real
+// default workspace. cmd/haosbot/runtime.go:369-371 already falls back to
+// config.DefaultWorkspace() for exactly this case; WorkspacePath() must agree.
+func TestWorkspacePathFallsBackToDefault(t *testing.T) {
+	t.Run("empty falls back to the branded default", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+
+		cfg := mustLoad(t, `{"agents":{"defaults":{"workspace":""}}}`)
+		if cfg.Agents.Defaults.Workspace != "" {
+			t.Fatalf("fixture: configured workspace = %q, want the empty value", cfg.Agents.Defaults.Workspace)
+		}
+		if got, want := cfg.WorkspacePath(), filepath.Join(home, ".haosbot", "workspace"); got != want {
+			t.Errorf("WorkspacePath = %q, want the default workspace %q", got, want)
+		}
+	})
+
+	t.Run("empty falls back to the legacy default when only that exists", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		if err := os.MkdirAll(filepath.Join(home, ".nanobot", "workspace"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := mustLoad(t, `{"agents":{"defaults":{"workspace":""}}}`)
+		if got, want := cfg.WorkspacePath(), filepath.Join(home, ".nanobot", "workspace"); got != want {
+			t.Errorf("WorkspacePath = %q, want the legacy default workspace %q", got, want)
+		}
+	})
+
+	// A zero-value Config (constructed programmatically, not loaded) has an
+	// empty workspace for the same reason.
+	t.Run("zero-value config falls back too", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+
+		cfg := &Config{}
+		if got, want := cfg.WorkspacePath(), filepath.Join(home, ".haosbot", "workspace"); got != want {
+			t.Errorf("WorkspacePath = %q, want the default workspace %q", got, want)
+		}
+	})
+
+	t.Run("explicitly configured workspace is returned unchanged", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		// The branded default workspace exists, and must NOT win over an
+		// explicitly configured path.
+		if err := os.MkdirAll(filepath.Join(home, ".haosbot", "workspace"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, tc := range []struct{ configured, want string }{
+			{"~/custom", filepath.Join(home, "custom")},
+			{"/srv/agent-ws", "/srv/agent-ws"},
+			{"relative/ws", "relative/ws"},
+			{"~/.nanobot/workspace", filepath.Join(home, ".nanobot", "workspace")},
+		} {
+			cfg := mustLoad(t, `{"agents":{"defaults":{"workspace":"`+tc.configured+`"}}}`)
+			if got := cfg.WorkspacePath(); got != tc.want {
+				t.Errorf("WorkspacePath(%q) = %q, want %q", tc.configured, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("tilde is expanded", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+
+		cfg := mustLoad(t, `{"agents":{"defaults":{"workspace":"~"}}}`)
+		if got := cfg.WorkspacePath(); got != home {
+			t.Errorf("WorkspacePath(~) = %q, want %q", got, home)
+		}
+	})
+}
+
 // TestLoadAcceptsTildePath checks that Load and Save expand a leading "~".
 func TestLoadAcceptsTildePath(t *testing.T) {
 	t.Setenv("TZ", "UTC")

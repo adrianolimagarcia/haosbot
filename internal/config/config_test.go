@@ -1266,6 +1266,27 @@ func TestPathHelpers(t *testing.T) {
 		}
 	})
 
+	// A legacy install that never saved a config file but HAS runtime data must
+	// still be found. Keying the fallback on config.json alone sent the port to an
+	// empty ~/.haosbot and hid cli-apps/, plugins/, sessions/ and media/ — the
+	// compat skills fixture is exactly this shape, and it silently disabled the
+	// CLI-app skill aliases.
+	t.Run("legacy data dir without config.json is still found", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		legacy := filepath.Join(home, ".nanobot")
+		if err := os.MkdirAll(filepath.Join(legacy, "cli-apps"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		if got, want := DefaultDataDir(), legacy; got != want {
+			t.Errorf("DefaultDataDir = %q, want the legacy data dir %q", got, want)
+		}
+		if got, want := DefaultConfigPath(), filepath.Join(legacy, "config.json"); got != want {
+			t.Errorf("DefaultConfigPath = %q, want %q", got, want)
+		}
+	})
+
 	t.Run("both present prefers ~/.haosbot", func(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("HOME", home)

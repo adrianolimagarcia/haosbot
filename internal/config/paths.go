@@ -93,20 +93,28 @@ func resolvePath(path string) string {
 func parentDir(path string) string { return filepath.Dir(path) }
 
 // DefaultConfigPath returns the configuration file path.
-// Prefers ~/.haosbot/config.json if it exists or if ~/.haosbot/ exists;
-// otherwise falls back to ~/.nanobot/config.json for backward compatibility.
+//
+// The rule is "prefer ~/.haosbot, fall back to a legacy ~/.nanobot
+// installation". The fallback deliberately keys on the DIRECTORY existing and
+// not only on config.json: a legacy install can hold sessions/, cron/, media/,
+// plugins/ and cli-apps/ under ~/.nanobot without ever having saved a config
+// file, and keying on config.json alone sent the port to an empty ~/.haosbot
+// and lost every one of those directories. DefaultWorkspace already keyed on the
+// directory, so this also makes the data dir consistent with the workspace.
 func DefaultConfigPath() string {
-	haosCfg := filepath.Join(homeDir(), ".haosbot", "config.json")
+	home := homeDir()
+	haosDir := filepath.Join(home, ".haosbot")
+	nanoDir := filepath.Join(home, ".nanobot")
+	haosCfg := filepath.Join(haosDir, "config.json")
+
 	if _, err := os.Stat(haosCfg); err == nil {
 		return haosCfg
 	}
-	haosDir := filepath.Join(homeDir(), ".haosbot")
 	if _, err := os.Stat(haosDir); err == nil {
 		return haosCfg
 	}
-	nanoCfg := filepath.Join(homeDir(), ".nanobot", "config.json")
-	if _, err := os.Stat(nanoCfg); err == nil {
-		return nanoCfg
+	if _, err := os.Stat(nanoDir); err == nil {
+		return filepath.Join(nanoDir, "config.json")
 	}
 	return haosCfg
 }

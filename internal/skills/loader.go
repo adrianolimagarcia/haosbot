@@ -267,7 +267,12 @@ func (l *Loader) entriesFromDir(base, source string, skip map[string]bool) []Ski
 			continue
 		}
 		skillFile := pyJoin(base, name, "SKILL.md")
-		if fileInfo, fileErr := os.Stat(skillFile); fileErr != nil || fileInfo.IsDir() {
+		// The reference tests `skill_file.exists()` only, and pathlib's exists()
+		// is TRUE for a directory. Skipping a non-regular SKILL.md therefore made
+		// the skill vanish from the listing entirely, where the reference lists it
+		// and only fails when it READS it. Keeping the entry lets the read error
+		// surface through LoadSkillStrict instead of being silently swallowed.
+		if _, fileErr := os.Stat(skillFile); fileErr != nil {
 			continue
 		}
 		out = append(out, Skill{Name: name, Path: skillFile, Source: source})

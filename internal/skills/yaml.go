@@ -551,7 +551,7 @@ func (p *yamlParser) parseNode(indent int) (any, error) {
 	// A bare scalar document ("null", "just a string"): no mapping key, no
 	// sequence entry. PyYAML resolves it with the implicit resolvers
 	// (yaml.safe_load("null") is None, "just a string" stays a string).
-	if _, _, ok := splitMappingKey(ln.text); !ok {
+	if _, _, _, ok := splitMappingKey(ln.text); !ok {
 		p.pos++
 		return p.parseInlineScalar(ln.text, indent, ln.num)
 	}
@@ -568,6 +568,14 @@ func isSequenceEntry(text string) bool {
 
 func (p *yamlParser) parseMapping(indent int) (any, error) {
 	out := map[string]any{}
+	// Python dicts key on EQUALITY, not on the rendered spelling, so two keys
+	// that compare equal are ONE entry: the first spelling is kept and the last
+	// value wins. `1: one` followed by `true: yes` therefore yields {1: True}
+	// (hash(1) == hash(True) and 1 == True), which parse_skill_metadata then
+	// renders as {"1": true}. Keying on the rendered string instead produced two
+	// entries where the reference produced one. resolvedKeys tracks the values
+	// behind each rendered key so the collision can be detected.
+	resolvedKeys := []any{}
 	// Merge-key bookkeeping. PyYAML's SafeConstructor.flatten_mapping applies
 	// `<<` entries AFTER the explicit keys of the SAME mapping, so an explicit
 	// key always wins over a merged one, and a later `<<` wins over an earlier
@@ -595,7 +603,7 @@ func (p *yamlParser) parseMapping(indent int) (any, error) {
 			// parseValue already consumed.
 			return nil, yamlErr("line %d: unexpected block sequence entry", ln.num)
 		}
-		key, rest, ok := splitMappingKey(ln.text)
+		key, resolvedKey, rest, ok := splitMappingKey(ln.text)
 		if !ok {
 			return nil, yamlErr("line %d: could not find expected ':'", ln.num)
 		}
@@ -613,10 +621,78 @@ func (p *yamlParser) parseMapping(indent int) (any, error) {
 			continue
 		}
 		// PyYAML's SafeLoader silently keeps the last of duplicate keys.
-		out[key] = value
+		if slot := pyKeyIndex(resolvedKeys, resolvedKey); slot >= 0 {
+			// Same Python key: keep the FIRST spelling, take the LAST value.
+			// Writing through the stored spelling is what prevents the second
+			// spelling from appearing as an extra entry.
+			out[pyStr(resolvedKeys[slot])] = value
+		} else {
+			resolvedKeys = append(resolvedKeys, resolvedKey)
+			out[key] = value
+		}
 	}
 	applyYAMLMerges(out, merges)
 	return out, nil
+}
+
+// pyKeyIndex returns the index of the entry in keys that is the same PYTHON dict
+// key as want, or -1.
+func pyKeyIndex(keys []any, want any) int {
+	for i, key := range keys {
+		if pyKeyEqual(key, want) {
+			return i
+		}
+	}
+	return -1
+}
+
+// pyKeyEqual reports whether two resolved YAML keys are the same Python dict key.
+//
+// Python hashes and compares keys by VALUE, and bool is a subclass of int, so
+// True == 1, False == 0 and 1 == 1.0 all collide while a string never collides
+// with a number. Two NaNs stay distinct, matching PyYAML, which constructs a
+// fresh float per scalar so identity never rescues them.
+func pyKeyEqual(a, b any) bool {
+	ai, aIsInt := a.(int64)
+	bi, bIsInt := b.(int64)
+	if aIsInt && bIsInt {
+		return ai == bi
+	}
+	an, aIsNum := pyNumericKey(a)
+	bn, bIsNum := pyNumericKey(b)
+	if aIsNum || bIsNum {
+		if !aIsNum || !bIsNum {
+			return false
+		}
+		return an == bn
+	}
+	switch av := a.(type) {
+	case nil:
+		return b == nil
+	case string:
+		bv, ok := b.(string)
+		return ok && av == bv
+	}
+	return false
+}
+
+// pyNumericKey renders v as a Python number for key comparison. bool is an int
+// subclass in Python, so True and 1 are the same key.
+func pyNumericKey(v any) (float64, bool) {
+	switch t := v.(type) {
+	case bool:
+		if t {
+			return 1, true
+		}
+		return 0, true
+	case int64:
+		return float64(t), true
+	case int:
+		return float64(t), true
+	case float64:
+		return t, true
+	}
+	return 0, false
 }
 
 // applyYAMLMerges folds `<<` merge sources into the mapping. Explicit keys set
@@ -632,39 +708,52 @@ func applyYAMLMerges(out map[string]any, merges []map[string]any) {
 	}
 }
 
-// splitMappingKey splits "key: value" into ("key", "value", true). Quoted keys
-// and plain keys are both handled; a plain key cannot contain ": ".
-func splitMappingKey(text string) (string, string, bool) {
+// splitMappingKey splits "key: value" into (key, resolvedKey, value, true).
+//
+// key is the RENDERED key, i.e. Python's str() of the resolved value, which is
+// what the resulting dict is keyed by. resolvedKey is that value BEFORE
+// rendering, and callers that build a Python dict need it to reproduce Python's
+// key-equality rules (see pyKeyEqual). Quoted keys and plain keys are both
+// handled; a plain key cannot contain ": ".
+func splitMappingKey(text string) (string, any, string, bool) {
 	if text == "" {
-		return "", "", false
+		return "", nil, "", false
 	}
 	if text[0] == '"' || text[0] == '\'' {
 		key, n, err := scanQuoted(text, 0)
 		if err != nil {
-			return "", "", false
+			return "", nil, "", false
 		}
 		rest := strings.TrimLeft(text[n:], " ")
 		if !strings.HasPrefix(rest, ":") {
-			return "", "", false
+			return "", nil, "", false
 		}
-		return key, strings.TrimLeft(rest[1:], " "), true
+		return key, key, strings.TrimLeft(rest[1:], " "), true
 	}
 	for i := 0; i < len(text); i++ {
 		c := text[i]
 		if c == '#' && i > 0 && (text[i-1] == ' ' || text[i-1] == '\t') {
-			return "", "", false
+			return "", nil, "", false
 		}
 		if c != ':' {
 			continue
 		}
 		if i+1 == len(text) {
-			return resolvePlainKey(text[:i]), "", true
+			resolved := resolvePlainKeyValue(text[:i])
+			return pyStr(resolved), resolved, "", true
 		}
 		if text[i+1] == ' ' || text[i+1] == '\t' {
-			return resolvePlainKey(text[:i]), strings.TrimLeft(text[i+1:], " \t"), true
+			resolved := resolvePlainKeyValue(text[:i])
+			return pyStr(resolved), resolved, strings.TrimLeft(text[i+1:], " \t"), true
 		}
 	}
-	return "", "", false
+	return "", nil, "", false
+}
+
+// resolvePlainKeyValue applies YAML implicit typing to an unquoted mapping key
+// WITHOUT rendering it, so the caller can compare it with Python's key equality.
+func resolvePlainKeyValue(raw string) any {
+	return resolveScalar(strings.TrimRight(raw, " \t"))
 }
 
 // resolvePlainKey applies YAML implicit typing to an unquoted mapping key and
@@ -939,7 +1028,7 @@ func (p *yamlParser) parsePlainScalar(first string, keyIndent int) (any, error) 
 		// ("mapping values are not allowed here", verified); leaving the line
 		// unconsumed makes the enclosing parseMapping report the indentation
 		// instead of silently folding it into the scalar.
-		if _, _, isEntry := splitMappingKey(text); isEntry {
+		if _, _, _, isEntry := splitMappingKey(text); isEntry {
 			p.pos = save
 			break
 		}
@@ -1005,7 +1094,7 @@ func (p *yamlParser) parseSequence(indent int) (any, error) {
 		// Compact notation: "- key: value" starts a mapping whose indentation
 		// is the column at which the item text begins. Rewriting the line in
 		// place lets the ordinary mapping parser take over.
-		if key, _, ok := splitMappingKey(rest); ok && key != "" {
+		if key, _, _, ok := splitMappingKey(rest); ok && key != "" {
 			column := ln.indent + 1 + (len(after) - len(rest))
 			p.lines[p.pos].indent = column
 			p.lines[p.pos].text = rest

@@ -341,6 +341,15 @@ func TestYAMLSubsetKnownValues(t *testing.T) {
 		{"sexagesimal leading zero is a string", "t: 0:30", `{"t": "0:30"}`},
 		{"sexagesimal bad component is a string", "t: 1:99", `{"t": "1:99"}`},
 		{"sexagesimal out of range is a string", "t: 1:60", `{"t": "1:60"}`},
+		// Python dicts key on EQUALITY: bool is an int subclass, so True == 1 and
+		// False == 0 are the SAME key, and int 1 == float 1.0. The first spelling
+		// survives and the last value wins. All five expectations below were
+		// produced by running PyYAML 6.0.3.
+		{"key collision int and bool", "1: one\ntrue: yes\n", `{"1": true}`},
+		{"key collision int and float", "1: a\n1.0: b\n", `{"1": "b"}`},
+		{"key collision zero and false", "0: a\nfalse: b\n", `{"0": "b"}`},
+		{"string key does not collide with an int", "a: 1\n1: b\n", `{"1": "b", "a": 1}`},
+		{"distinct int keys stay distinct", "1: a\n2: b\n", `{"1": "a", "2": "b"}`},
 		// A flow collection may span lines. parseFlowValue advanced p.pos BEFORE
 		// appending the line it was looking at, so it dropped the first
 		// continuation line and left p.pos inside the collection — the caller then

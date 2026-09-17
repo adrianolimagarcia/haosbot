@@ -33,10 +33,12 @@ type projectionManager struct {
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 	workers      int
+	poll         time.Duration
+	obsidian     bool
 	closed       sync.Once
 }
 
-func newProjectionManager(fabric *memoryfabric.Store, graphPool *graphStorePool, obsidianDir string, workers int, metrics *observability.Registry) (*projectionManager, error) {
+func newProjectionManager(fabric *memoryfabric.Store, graphPool *graphStorePool, obsidianDir string, workers int, poll time.Duration, obsidian bool, metrics *observability.Registry) (*projectionManager, error) {
 	if fabric == nil {
 		return nil, errors.New("projection manager: memory fabric is required")
 	}
@@ -46,6 +48,9 @@ func newProjectionManager(fabric *memoryfabric.Store, graphPool *graphStorePool,
 	if workers <= 0 {
 		workers = defaultProjectionWorkers
 	}
+	if poll <= 0 {
+		poll = defaultProjectionPoll
+	}
 	if strings.TrimSpace(obsidianDir) == "" {
 		return nil, errors.New("projection manager: Obsidian directory is required")
 	}
@@ -53,13 +58,16 @@ func newProjectionManager(fabric *memoryfabric.Store, graphPool *graphStorePool,
 		return nil, fmt.Errorf("projection manager: create Obsidian directory: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	m := &projectionManager{fabric: fabric, graphPool: graphPool, obsidianDir: obsidianDir, metrics: metrics, ctx: ctx, cancel: cancel, workers: workers}
+	m := &projectionManager{fabric: fabric, graphPool: graphPool, obsidianDir: obsidianDir, metrics: metrics, ctx: ctx, cancel: cancel, workers: workers, poll: poll, obsidian: obsidian}
 	m.wg.Add(1)
 	go m.statsLoop()
 	for i := 0; i < workers; i++ {
-		m.wg.Add(2)
+		m.wg.Add(1)
 		go m.worker(memoryfabric.ProjectionGraph, m.processGraph)
-		go m.worker(memoryfabric.ProjectionObsidian, m.processObsidian)
+		if obsidian {
+			m.wg.Add(1)
+			go m.worker(memoryfabric.ProjectionObsidian, m.processObsidian)
+		}
 	}
 	m.refreshStats()
 	return m, nil
@@ -88,7 +96,7 @@ func (m *projectionManager) refreshStats() {
 }
 
 // EnqueueWithIDError is the agent loop's memory callback. The canonical record
-// and both projection jobs become durable before this method returns.
+// and the enabled projection jobs become durable before this method returns.
 func (m *projectionManager) EnqueueWithIDError(jobID, sessionKey, content string) error {
 	if err := m.fabric.AppendTurn(context.Background(), jobID, sessionKey, content); err != nil {
 		if m.metrics != nil { m.metrics.IncEnqueueRejected() }
@@ -117,11 +125,11 @@ func (m *projectionManager) worker(projection string, process func(context.Conte
 		job, ok, err := m.fabric.Claim(m.ctx, projection)
 		if err != nil {
 			if m.ctx.Err() != nil { return }
-			time.Sleep(defaultProjectionPoll)
+			time.Sleep(m.poll)
 			continue
 		}
 		if !ok {
-			time.Sleep(defaultProjectionPoll)
+			time.Sleep(m.poll)
 			continue
 		}
 		if m.metrics != nil { m.metrics.IncClaims() }

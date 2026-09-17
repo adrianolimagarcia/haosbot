@@ -109,6 +109,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	// gateway.maxOutboundQueue, which default to a non-zero cap. The reference
 	// runs these queues unbounded; see internal/config/bus.go.
 	messageBus := bus.New(cfg.BusOptions())
+	profile := resolveResourceProfile()
 	graphEmbedder, err := resolveGraphEmbedder(context.Background())
 	if err != nil {
 		messageBus.Close()
@@ -118,12 +119,18 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	metrics := observability.New()
 	metrics.SetVectorEnabled(graphEmbedder != nil)
 	metrics.SetEmbedderLoaded(graphEmbedder != nil)
-	profile := resolveResourceProfile()
 	memoryFabric, err := memoryfabric.Open(context.Background(), memoryfabric.Config{
 		Path: filepath.Join(config.DefaultDataDir(), "memory-fabric.db"),
 		CacheKB: profile.MemoryCacheKB,
 		MaxPending: profile.MemoryMaxPending,
+		MaxPendingBytes: profile.MemoryMaxPendingBytes,
+		MaxContentBytes: profile.MemoryMaxContentBytes,
+		MaxDiskBytes: profile.FutureDiskBytes,
 		MaxAttempts: 8,
+		Projections: func() []string {
+			if profile.ObsidianEnabled { return []string{memoryfabric.ProjectionGraph, memoryfabric.ProjectionObsidian} }
+			return []string{memoryfabric.ProjectionGraph}
+		}(),
 	})
 	if err != nil {
 		_ = graphPool.Close()
@@ -136,7 +143,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("migrate legacy GraphRAG outbox: %w", err)
 	}
-	projections, err := newProjectionManager(memoryFabric, graphPool, filepath.Join(config.DefaultDataDir(), "obsidian-memory"), profile.ProjectionWorkers, metrics)
+	projections, err := newProjectionManager(memoryFabric, graphPool, filepath.Join(config.DefaultDataDir(), "obsidian-memory"), profile.ProjectionWorkers, time.Duration(profile.ProjectionPollMs)*time.Millisecond, profile.ObsidianEnabled, metrics)
 	if err != nil {
 		_ = memoryFabric.Close()
 		_ = graphPool.Close()

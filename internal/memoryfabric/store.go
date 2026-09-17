@@ -32,6 +32,9 @@ const (
 	defaultLease       = 2 * time.Minute
 	defaultMaxAttempts = 8
 	defaultMaxPending  = 512
+	defaultMaxPendingBytes int64 = 4 * 1024 * 1024
+	defaultMaxContentBytes = 64 * 1024
+	defaultMaxDiskBytes int64 = 200 * 1024 * 1024
 )
 
 type Config struct {
@@ -39,8 +42,12 @@ type Config struct {
 	BusyTimeout time.Duration
 	CacheKB     int
 	MaxPending  int
+	MaxPendingBytes int64
+	MaxContentBytes int
+	MaxDiskBytes int64
 	MaxAttempts int
 	Lease       time.Duration
+	Projections []string
 }
 
 type Record struct {
@@ -72,8 +79,12 @@ type Store struct {
 	db          *sql.DB
 	path        string
 	maxPending  int
+	maxPendingBytes int64
+	maxContentBytes int
+	maxDiskBytes int64
 	maxAttempts int
 	lease       time.Duration
+	projections []string
 	closeOnce   sync.Once
 }
 
@@ -90,6 +101,15 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	if cfg.MaxPending <= 0 {
 		cfg.MaxPending = defaultMaxPending
 	}
+	if cfg.MaxPendingBytes <= 0 {
+		cfg.MaxPendingBytes = defaultMaxPendingBytes
+	}
+	if cfg.MaxContentBytes <= 0 {
+		cfg.MaxContentBytes = defaultMaxContentBytes
+	}
+	if cfg.MaxDiskBytes <= 0 {
+		cfg.MaxDiskBytes = defaultMaxDiskBytes
+	}
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = defaultMaxAttempts
 	}
@@ -105,7 +125,11 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	s := &Store{db: db, path: cfg.Path, maxPending: cfg.MaxPending, maxAttempts: cfg.MaxAttempts, lease: cfg.Lease}
+	projections := append([]string(nil), cfg.Projections...)
+	if len(projections) == 0 {
+		projections = []string{ProjectionGraph, ProjectionObsidian}
+	}
+	s := &Store{db: db, path: cfg.Path, maxPending: cfg.MaxPending, maxPendingBytes: cfg.MaxPendingBytes, maxContentBytes: cfg.MaxContentBytes, maxDiskBytes: cfg.MaxDiskBytes, maxAttempts: cfg.MaxAttempts, lease: cfg.Lease, projections: projections}
 	for _, pragma := range []string{
 		"PRAGMA foreign_keys=ON",
 		fmt.Sprintf("PRAGMA busy_timeout=%d", cfg.BusyTimeout.Milliseconds()),
@@ -175,6 +199,9 @@ func (s *Store) AppendTurn(ctx context.Context, recordID, sessionKey, content st
 	if strings.TrimSpace(content) == "" {
 		return errors.New("memoryfabric: content is empty")
 	}
+	if s.maxContentBytes > 0 && len(content) > s.maxContentBytes {
+		return fmt.Errorf("memoryfabric: content exceeds limit (%d bytes)", s.maxContentBytes)
+	}
 	hash := sha256.Sum256([]byte(content))
 	now := time.Now().UnixMilli()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -184,6 +211,7 @@ func (s *Store) AppendTurn(ctx context.Context, recordID, sessionKey, content st
 	defer tx.Rollback()
 	var existingHash []byte
 	var existingSession string
+	inserted := false
 	err = tx.QueryRowContext(ctx, "SELECT session_key,content_hash FROM memory_records WHERE record_id=?", recordID).Scan(&existingSession, &existingHash)
 	if err == nil {
 		if existingSession != sessionKey || !sameBytes(existingHash, hash[:]) {
@@ -191,14 +219,29 @@ func (s *Store) AppendTurn(ctx context.Context, recordID, sessionKey, content st
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("memoryfabric: check record: %w", err)
-	} else if _, err := tx.ExecContext(ctx, `INSERT INTO memory_records(record_id,session_key,content,content_hash,created_at) VALUES(?,?,?,?,?)`, recordID, sessionKey, content, hash[:], now); err != nil {
-		return fmt.Errorf("memoryfabric: insert record: %w", err)
+	} else {
+		if s.maxDiskBytes > 0 {
+			used, err := diskUsage(s.path)
+			if err != nil {
+				return fmt.Errorf("memoryfabric: inspect disk usage: %w", err)
+			}
+			// This is a conservative admission check. SQLite page/index overhead is
+			// intentionally not estimated precisely; a small margin keeps the
+			// configured disk budget meaningful without a background full scan.
+			if used+int64(len(content))+64*1024 > s.maxDiskBytes {
+				return fmt.Errorf("memoryfabric: disk budget reached (%d bytes)", s.maxDiskBytes)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_records(record_id,session_key,content,content_hash,created_at) VALUES(?,?,?,?,?)`, recordID, sessionKey, content, hash[:], now); err != nil {
+			return fmt.Errorf("memoryfabric: insert record: %w", err)
+		}
+		inserted = true
 	}
 	var pending int64
 	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM memory_outbox WHERE state IN (?,?)", stateQueued, stateRunning).Scan(&pending); err != nil {
 		return fmt.Errorf("memoryfabric: count pending jobs: %w", err)
 	}
-	for _, projection := range []string{ProjectionGraph, ProjectionObsidian} {
+	for _, projection := range s.projections {
 		var exists int
 		if err := tx.QueryRowContext(ctx, "SELECT 1 FROM memory_outbox WHERE job_id=? AND projection=?", recordID, projection).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 			pending++
@@ -207,7 +250,18 @@ func (s *Store) AppendTurn(ctx context.Context, recordID, sessionKey, content st
 	if pending > int64(s.maxPending) {
 		return fmt.Errorf("memoryfabric: outbox capacity reached (%d jobs)", s.maxPending)
 	}
-	for _, projection := range []string{ProjectionGraph, ProjectionObsidian} {
+	var pendingBytes int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(LENGTH(content)),0) FROM memory_records WHERE record_id IN (SELECT DISTINCT record_id FROM memory_outbox WHERE state IN (?,?))`, stateQueued, stateRunning).Scan(&pendingBytes); err != nil {
+		return fmt.Errorf("memoryfabric: count pending bytes: %w", err)
+	}
+	var recordPending bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_outbox WHERE record_id=? AND state IN (?,?))`, recordID, stateQueued, stateRunning).Scan(&recordPending); err != nil {
+		return fmt.Errorf("memoryfabric: check pending record: %w", err)
+	}
+	if inserted && !recordPending && pendingBytes+int64(len(content)) > s.maxPendingBytes {
+		return fmt.Errorf("memoryfabric: outbox byte budget reached (%d bytes)", s.maxPendingBytes)
+	}
+	for _, projection := range s.projections {
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO memory_outbox(job_id,projection,record_id,state,created_at,updated_at) VALUES(?,?,?,?,?,?)`, recordID, projection, recordID, stateQueued, now, now); err != nil {
 			return fmt.Errorf("memoryfabric: enqueue %s projection: %w", projection, err)
 		}
@@ -352,4 +406,19 @@ func retryDelaySeconds(attempt int) int64 {
 	default:
 		return 120
 	}
+}
+
+func diskUsage(path string) (int64, error) {
+	var total int64
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		info, err := os.Stat(path + suffix)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		total += info.Size()
+	}
+	return total, nil
 }

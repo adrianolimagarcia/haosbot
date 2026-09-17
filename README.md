@@ -80,6 +80,28 @@ export NANOBOT_MEMORY_MAX_PENDING=512
 export NANOBOT_MEMORY_CACHE_KB=512
 ```
 
+The optional resources have an incremental budget of 10 MB RAM and 200 MB
+disk. These limits exclude the existing runtime baseline; they are admission
+guards for new memory/projection data, not a hard RSS limit for the whole
+process. The `low` profile reduces optional projection activity and keeps a
+graph-only/FTS fallback:
+
+```bash
+export NANOBOT_RESOURCE_PROFILE=low
+export NANOBOT_OBSIDIAN_PROJECTION=off
+export NANOBOT_PROJECTION_POLL_MS=5000
+```
+
+The default `balanced` profile preserves both projections. The memory fabric
+also enforces bounded pending bytes and record size. Run
+`scripts/benchmark_low_resource.sh` on the target device before enabling
+additional resources; collect RSS, CPU, p95 latency and SQLite/WAL size.
+
+In automatic vector mode, the model and tokenizer together are capped at 8 MB
+on disk as an admission guard, reserving the rest of the incremental budget
+for SQLite, vector buffers and request handling. This is not a hard RSS cap;
+the target-device benchmark remains authoritative.
+
 Graph vector search is enabled only when a local model is present. Put the
 64-dimensional model at `$GO_POTION_HOME/BASE2M/` (`model.safetensors` and
 `tokenizer.json`) and leave `NANOBOT_GRAPH_EMBEDDER=auto`. Use

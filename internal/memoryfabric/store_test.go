@@ -9,10 +9,28 @@ import (
 
 func openTestStore(t *testing.T, maxPending int) *Store {
 	t.Helper()
-	s, err := Open(context.Background(), Config{Path: filepath.Join(t.TempDir(), "memory-fabric.db"), MaxPending: maxPending, Lease: 20 * time.Millisecond})
+	s, err := Open(context.Background(), Config{Path: filepath.Join(t.TempDir(), "memory-fabric.db"), MaxPending: maxPending, MaxPendingBytes: 50 * 1024 * 1024, MaxContentBytes: 256 * 1024, MaxDiskBytes: 50 * 1024 * 1024, Lease: 20 * time.Millisecond})
 	if err != nil { t.Fatal(err) }
 	t.Cleanup(func() { _ = s.Close() })
 	return s
+}
+
+func TestAppendTurnEnforcesContentAndPendingByteBudgets(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(context.Background(), Config{Path: filepath.Join(dir, "memory-fabric.db"), MaxPending: 8, MaxPendingBytes: 8, MaxContentBytes: 4, MaxDiskBytes: 50 * 1024 * 1024})
+	if err != nil { t.Fatal(err) }
+	defer s.Close()
+	if err := s.AppendTurn(context.Background(), "too-large", "session-1", "12345"); err == nil { t.Fatal("expected content limit") }
+	if err := s.AppendTurn(context.Background(), "one", "session-1", "1234"); err != nil { t.Fatal(err) }
+	if err := s.AppendTurn(context.Background(), "two", "session-1", "1234"); err == nil { t.Fatal("expected pending byte limit") }
+}
+
+func TestAppendTurnSupportsGraphOnlyResourceProfile(t *testing.T) {
+	s, err := Open(context.Background(), Config{Path: filepath.Join(t.TempDir(), "memory-fabric.db"), MaxPending: 8, MaxPendingBytes: 1024, MaxContentBytes: 1024, MaxDiskBytes: 50 * 1024 * 1024, Projections: []string{ProjectionGraph}})
+	if err != nil { t.Fatal(err) }
+	defer s.Close()
+	if err := s.AppendTurn(context.Background(), "graph-only", "session-1", "hello"); err != nil { t.Fatal(err) }
+	if _, ok, err := s.Claim(context.Background(), ProjectionObsidian); err != nil || ok { t.Fatalf("unexpected Obsidian job: ok=%v err=%v", ok, err) }
 }
 
 func TestAppendTurnIsAtomicAndIdempotent(t *testing.T) {

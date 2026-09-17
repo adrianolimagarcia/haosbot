@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"sync"
 	"time"
 
@@ -183,10 +184,23 @@ func (g *graphIndexer) index(job graphIndexJob) error {
 		return err
 	}
 	defer release()
+	source := "haosbot/session/" + job.sessionKey
+	title := "Agent turn " + job.ID
+	// ACK can be lost after AddMemory commits. The deterministic source/title
+	// pair makes the replay itself idempotent before another document is added.
+	var existing int64
+	lookupErr := store.DB().QueryRowContext(ctx,
+		"SELECT id FROM documents WHERE source=? AND title=? LIMIT 1", source, title).Scan(&existing)
+	if lookupErr == nil {
+		return nil
+	}
+	if lookupErr != sql.ErrNoRows {
+		return lookupErr
+	}
 	_, err = store.AddMemory(ctx, micrographrag.MemoryInput{
 		Kind:    1,
-		Source:  "haosbot/session/" + job.sessionKey,
-		Title:   "Agent turn " + job.ID,
+		Source:  source,
+		Title:   title,
 		Content: job.content,
 	})
 	return err

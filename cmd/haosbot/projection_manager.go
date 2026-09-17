@@ -135,7 +135,9 @@ func (m *projectionManager) worker(projection string, process func(context.Conte
 			continue
 		}
 		if retryErr := m.fabric.Retry(context.Background(), projection, job.ID, err); retryErr != nil {
-			err = errors.Join(err, retryErr)
+			// The original projection error is already durable in the job row;
+			// keep the worker alive even if recording the retry also fails.
+			_ = retryErr
 		}
 		if job.Attempts >= 8 {
 			if m.metrics != nil { m.metrics.IncProjectionDead() }

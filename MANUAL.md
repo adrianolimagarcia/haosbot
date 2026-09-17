@@ -129,7 +129,7 @@ No objeto `"api"` do `config.json`, configure a chave `"apiKey"`:
 
 O gateway inicia um servidor HTTP nativo com os seguintes endpoints:
 
-- **`GET /health`**: Retorna `{"status":"ok","runtime":"haosbot-go"}`.
+- **`GET /health`**: Retorna `{"status":"ok","runtime":"haosbot"}`.
 - **`GET /v1/models`**: Lista os modelos configurados.
 - **`POST /v1/chat/completions`**: Recebe requisições no formato padrão OpenAI e despacha o turno para o loop do agente e provedor configurado.
 
@@ -145,7 +145,7 @@ haosbot gateway --port 8900
 O gateway inicia um servidor HTTP nativo com os seguintes endpoints:
 
 - **`GET /`**: Serve a WebUI embutida (Control Center) — abre `http://IP:8900/` no navegador.
-- **`GET /health`**: Retorna `{"status":"ok","runtime":"haosbot-go"}`.
+- **`GET /health`**: Retorna `{"status":"ok","runtime":"haosbot"}`.
 - **`GET /v1/models`**: Lista os modelos configurados.
 - **`POST /v1/chat/completions`**: Recebe requisições no formato padrão OpenAI e despacha o turno para o loop do agente e provedor configurado.
 - **`GET /api/config`**: Lê a configuração atual (`~/.haosbot/config.json`) — usado pelo painel visual.

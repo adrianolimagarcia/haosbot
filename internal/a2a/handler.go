@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/agent"
@@ -66,11 +68,50 @@ type Task struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+// Task retention policy.
+//
+// A2A tasks are transient: a peer submits one, reads the reply, and may poll
+// tasks/get for a short while afterwards. Nothing ever removed an entry, so the
+// store grew without bound — one entry per task, each holding the full input and
+// output text, kept for the life of the process. The policy below bounds it:
+//
+//   - a terminal task (completed/failed) is retained for taskRetentionTTL and
+//     then swept;
+//   - the store is trimmed back below maxRetainedTasks whenever it exceeds that
+//     cap, so a burst that arrives faster than the TTL can expire is bounded
+//     oldest-first even before any TTL elapses. The trim is amortised, so
+//     concurrent publishes can overshoot the cap by the number of tasks being
+//     published at that instant before the next trim pulls the store back;
+//   - sweeping is opportunistic (amortised on publish) rather than ticker
+//     driven, so the handler owns no goroutine and needs no Close;
+//   - the TTL pass runs at most once per taskSweepInterval, so a terminal task
+//     lives at least taskRetentionTTL and at most taskRetentionTTL +
+//     taskSweepInterval (the hard cap can evict it earlier).
+//
+// The values are deliberately not configurable: the reference has no A2A
+// endpoint and the config schema has no key for them, so inventing one would
+// create a second source of truth for a bound whose only job is to stop
+// unbounded growth.
+const (
+	taskRetentionTTL  = 10 * time.Minute
+	taskSweepInterval = time.Minute
+	maxRetainedTasks  = 1024
+	// taskTrimTarget is the low-water mark a cap trim aims for, so a burst costs
+	// one store walk per batch instead of one walk per task.
+	taskTrimTarget = maxRetainedTasks * 7 / 8
+)
+
 // Handler coordinates A2A endpoints and task execution
 type Handler struct {
 	cfg   *config.Config
 	loop  *agent.Loop
 	tasks sync.Map
+
+	// retained counts the live entries in tasks, and lastSweepNanos records the
+	// last TTL pass. Both exist because sync.Map has no length and the cap has
+	// to be enforced without walking the map on every request.
+	retained       atomic.Int64
+	lastSweepNanos atomic.Int64
 }
 
 // defaultAPIPort is the loader's own default for api.port
@@ -84,6 +125,101 @@ func NewHandler(cfg *config.Config, loop *agent.Loop) *Handler {
 	return &Handler{
 		cfg:  cfg,
 		loop: loop,
+	}
+}
+
+// terminal reports whether a task reached a final state.
+func (t Task) terminal() bool {
+	return t.Status == "completed" || t.Status == "failed"
+}
+
+// publish stores an immutable snapshot of task and keeps the store bounded.
+//
+// Snapshots are copies: once published, a *Task is never mutated again. That is
+// what lets handleTaskGet serialise a task without a lock and without ever
+// observing a half-written one (a completed status carrying the previous empty
+// output, or a working status with a stale updatedAt).
+func (h *Handler) publish(task Task) {
+	snapshot := task
+	if _, loaded := h.tasks.Swap(task.ID, &snapshot); !loaded {
+		h.retained.Add(1)
+	}
+	h.sweepTasks(time.Now())
+}
+
+func (h *Handler) sweepTasks(now time.Time) {
+	// The TTL pass walks the whole store, so it runs at most once per interval.
+	// The hard cap below is enforced on every publish regardless.
+	last := h.lastSweepNanos.Load()
+	if last == 0 || now.UnixNano()-last >= int64(taskSweepInterval) {
+		if h.lastSweepNanos.CompareAndSwap(last, now.UnixNano()) {
+			h.evictExpiredTasks(now)
+		}
+	}
+	h.enforceTaskCap()
+}
+
+func (h *Handler) evictExpiredTasks(now time.Time) {
+	h.tasks.Range(func(key, value any) bool {
+		task, ok := value.(*Task)
+		if !ok {
+			return true
+		}
+		if task.terminal() && now.Sub(task.UpdatedAt) > taskRetentionTTL {
+			h.deleteTask(key)
+		}
+		return true
+	})
+}
+
+// enforceTaskCap trims the store back to taskTrimTarget once it exceeds its hard
+// cap, in a single walk: terminal tasks go first, least recently updated first,
+// and in-flight tasks are dropped only when every retained task is still
+// running. A peer that loses its entry simply gets "Task not found" — the
+// response of the send that owns the task is unaffected.
+func (h *Handler) enforceTaskCap() {
+	if h.retained.Load() <= maxRetainedTasks {
+		return
+	}
+
+	type candidate struct {
+		key      any
+		updated  time.Time
+		terminal bool
+	}
+	candidates := make([]candidate, 0, maxRetainedTasks+1)
+	h.tasks.Range(func(key, value any) bool {
+		task, ok := value.(*Task)
+		if !ok {
+			return true
+		}
+		candidates = append(candidates, candidate{key: key, updated: task.UpdatedAt, terminal: task.terminal()})
+		return true
+	})
+
+	slices.SortFunc(candidates, func(a, b candidate) int {
+		if a.terminal != b.terminal {
+			if a.terminal {
+				return -1
+			}
+			return 1
+		}
+		return a.updated.Compare(b.updated)
+	})
+
+	for _, victim := range candidates {
+		if h.retained.Load() <= taskTrimTarget {
+			return
+		}
+		h.deleteTask(victim.key)
+	}
+}
+
+// deleteTask removes an entry, keeping the retained count exact when several
+// sweepers race for the same key.
+func (h *Handler) deleteTask(key any) {
+	if _, loaded := h.tasks.LoadAndDelete(key); loaded {
+		h.retained.Add(-1)
 	}
 }
 
@@ -223,14 +359,16 @@ func (h *Handler) handleTaskSend(ctx context.Context, w http.ResponseWriter, req
 	}
 
 	taskID := fmt.Sprintf("task-%d", time.Now().UnixNano())
-	task := &Task{
+	// task is a local value: every state transition publishes a fresh snapshot,
+	// so the copy a reader holds is never written to again.
+	task := Task{
 		ID:        taskID,
 		Status:    "working",
 		Input:     inputText,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
-	h.tasks.Store(taskID, task)
+	h.publish(task)
 
 	// Execute via Agent Loop if available
 	var finalOutput string
@@ -252,6 +390,7 @@ func (h *Handler) handleTaskSend(ctx context.Context, w http.ResponseWriter, req
 			task.Status = "failed"
 			task.Output = err.Error()
 			task.UpdatedAt = time.Now()
+			h.publish(task)
 			_ = json.NewEncoder(w).Encode(JSONRPCResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
@@ -269,7 +408,10 @@ func (h *Handler) handleTaskSend(ctx context.Context, w http.ResponseWriter, req
 	task.Status = "completed"
 	task.Output = finalOutput
 	task.UpdatedAt = time.Now()
+	h.publish(task)
 
+	// The reply carries the same snapshot that was just published, so the caller
+	// and a concurrent tasks/get can never disagree about this task id.
 	_ = json.NewEncoder(w).Encode(JSONRPCResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,

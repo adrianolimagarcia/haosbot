@@ -324,7 +324,7 @@ func cmdChat(args []string) error {
 func cmdGateway(args []string) error {
 	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
 	hostFlag := fs.String("host", "", "HTTP gateway host/IP to bind (defaults to config api.host or 127.0.0.1)")
-	portFlag := fs.String("port", "", "HTTP gateway port (defaults to config api.port or 8765)")
+	portFlag := fs.String("port", "", "HTTP gateway port (defaults to config api.port or 8900)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -357,7 +357,7 @@ func cmdGateway(args []string) error {
 		host = *hostFlag
 	}
 
-	port := "8765"
+	port := "8900"
 	if cfg.API.Port > 0 {
 		port = fmt.Sprintf("%d", cfg.API.Port)
 	}

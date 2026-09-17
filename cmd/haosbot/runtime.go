@@ -110,7 +110,8 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	// runs these queues unbounded; see internal/config/bus.go.
 	messageBus := bus.New(cfg.BusOptions())
 	profile := resolveResourceProfile()
-	graphEmbedder, err := resolveGraphEmbedder(context.Background())
+	graphModeExplicit := strings.TrimSpace(os.Getenv(graphEmbedderModeEnv)) != ""
+	graphEmbedder, err := resolveGraphEmbedder(context.Background(), profile.Name != "low" || graphModeExplicit)
 	if err != nil {
 		messageBus.Close()
 		return nil, fmt.Errorf("load GraphRAG embedder: %w", err)

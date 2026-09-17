@@ -15,13 +15,17 @@ const maxAutoEmbedderBytes int64 = 8 * 1024 * 1024
 
 // resolveGraphEmbedder never downloads a model in auto mode. Operators can
 // choose "potion" to allow the dependency's normal model resolution, or
-// "off" to force lexical+graph retrieval.
-func resolveGraphEmbedder(ctx context.Context) (micrographrag.Embedder, error) {
+// "off" to force lexical+graph retrieval. Low-resource mode passes
+// autoAllowed=false, making vector retrieval an explicit opt-in there.
+func resolveGraphEmbedder(ctx context.Context, autoAllowed bool) (micrographrag.Embedder, error) {
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv(graphEmbedderModeEnv)))
 	if mode == "off" || mode == "disabled" {
 		return nil, nil
 	}
 	if mode == "" || mode == "auto" {
+		if !autoAllowed {
+			return nil, nil
+		}
 		home := strings.TrimSpace(os.Getenv("GO_POTION_HOME"))
 		if home == "" {
 			return nil, nil

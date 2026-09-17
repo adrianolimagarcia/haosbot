@@ -682,7 +682,15 @@ def dump_py_str() -> list[dict]:
 
 
 async def main() -> dict:
-    work = Path(tempfile.mkdtemp(prefix="channels-diff-", dir=ROOT / ".tools" / "tmp"))
+    # mkdtemp(dir=...) requires the PARENT to exist, and this one did not on a
+    # clean checkout: CI creates .tools/venv but never .tools/tmp, so every test
+    # in this file failed there with
+    #     FileNotFoundError: ... '/home/runner/work/haosbot/haosbot/.tools/tmp/channels-diff-XXXX'
+    # while passing on a developer machine only because .tools/tmp happened to
+    # exist there from earlier runs. Create it rather than assume it.
+    scratch = ROOT / ".tools" / "tmp"
+    scratch.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="channels-diff-", dir=scratch))
     try:
         doc = {
             "upstream_commit": "1bb712d3488915ca4ed9ccc1a93067ff722f5ab9",

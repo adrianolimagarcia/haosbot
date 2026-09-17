@@ -1,0 +1,112 @@
+/*
+ * Hand-written styles for the Haosbot control center.
+ *
+ * Loaded after tailwind.css, which is generated from index.html, app.js and
+ * hardening.js (see tailwind.config.js). The utility classes used by the page
+ * are the same ones the previous cdn.tailwindcss.com build provided; only the
+ * delivery changed, so the layout is unchanged.
+ *
+ * This file also styles the markup produced by the server-side Markdown
+ * renderer (internal/api/markdown.go): h1-h6, p, ul, ol, li, blockquote, pre,
+ * code, a, hr, strong, em.
+ */
+
+/* The inline SVG sprite is a definition container, never rendered itself. */
+.icon-sprite {
+  display: none;
+}
+
+/*
+ * Replaces Font Awesome's font glyphs. Tailwind's preflight makes bare <svg>
+ * elements block-level, so the display/vertical-align of the old <i> glyphs is
+ * restored here.
+ */
+.icon {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.125em;
+  fill: currentColor;
+  flex-shrink: 0;
+}
+
+:root {
+  --bg-main: #ffffff;
+  --bg-sidebar: #fbfbfb;
+  --border-color: #eaeaea;
+  --text-main: #1f2328;
+  --text-muted: #656d76;
+  --card-bg: #f6f8fa;
+}
+
+body {
+  background-color: var(--bg-main);
+  color: var(--text-main);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.sidebar {
+  background-color: var(--bg-sidebar);
+  border-right: 1px solid var(--border-color);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  border: 1px solid #e5e7eb;
+  background-color: #f9fafb;
+}
+
+/* Prose styling */
+.prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 {
+  color: #111827;
+  font-weight: 700;
+  margin-top: 1.2rem;
+  margin-bottom: 0.6rem;
+}
+.prose h3 { font-size: 1.25rem; }
+.prose h4 { font-size: 1.05rem; }
+.prose h5 { font-size: 0.95rem; }
+.prose h6 { font-size: 0.9rem; }
+.prose p { margin-bottom: 0.75rem; line-height: 1.625; color: #1f2937; }
+.prose ul { list-style-type: disc; padding-left: 1.25rem; margin-bottom: 0.75rem; }
+.prose ol { list-style-type: decimal; padding-left: 1.25rem; margin-bottom: 0.75rem; }
+.prose li { margin-bottom: 0.35rem; }
+.prose a { color: #0969da; text-decoration: underline; }
+.prose blockquote {
+  border-left: 3px solid #e5e7eb;
+  padding-left: 0.75rem;
+  margin: 0.75rem 0;
+  color: #4b5563;
+}
+.prose hr {
+  border: 0;
+  border-top: 1px solid #e5e7eb;
+  margin: 1rem 0;
+}
+.prose code {
+  background-color: #f3f4f6;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.85em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #1f2937;
+}
+.prose pre {
+  background-color: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 1rem;
+  overflow-x: auto;
+  margin: 0.75rem 0;
+}
+.prose pre code {
+  background-color: transparent;
+  padding: 0;
+  font-size: 0.85rem;
+  color: #1f2937;
+}

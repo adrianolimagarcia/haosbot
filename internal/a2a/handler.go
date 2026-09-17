@@ -73,6 +73,13 @@ type Handler struct {
 	tasks sync.Map
 }
 
+// defaultAPIPort is the loader's own default for api.port
+// (internal/config/schema.go defaultConfigSkeleton, 8900), resolved once and
+// lazily. Taking it from the same source the loader uses — instead of a private
+// literal — is what stops the fallback from drifting from the port the gateway
+// actually binds and advertising an unreachable URL.
+var defaultAPIPort = sync.OnceValue(func() int { return config.DefaultConfig().API.Port })
+
 func NewHandler(cfg *config.Config, loop *agent.Loop) *Handler {
 	return &Handler{
 		cfg:  cfg,
@@ -101,7 +108,7 @@ func (h *Handler) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 	}
 	port := h.cfg.API.Port
 	if port <= 0 {
-		port = 8765
+		port = defaultAPIPort()
 	}
 
 	card := AgentCard{
@@ -157,7 +164,7 @@ func (h *Handler) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Method {
 	case "tasks/send", "tasks/create":
-		h.handleTaskSend(w, req)
+		h.handleTaskSend(r.Context(), w, req)
 	case "tasks/get":
 		h.handleTaskGet(w, req)
 	default:
@@ -169,7 +176,27 @@ func (h *Handler) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) handleTaskSend(w http.ResponseWriter, req JSONRPCRequest) {
+// requestTimeout is the upper bound applied to one A2A task.
+//
+// It mirrors the reference's per-request bound, `api.timeout`
+// (config/schema.py:338 "Per-request timeout in seconds", default 120.0), which
+// the reference applies to every API request (api/server.py:478-494). The
+// default is therefore the 120s this handler used to hardcode.
+func (h *Handler) requestTimeout() time.Duration {
+	const fallback = 120 * time.Second
+	if h == nil || h.cfg == nil || h.cfg.API.Timeout <= 0 {
+		return fallback
+	}
+	return time.Duration(float64(h.cfg.API.Timeout) * float64(time.Second))
+}
+
+// handleTaskSend runs one task. ctx is the INCOMING REQUEST's context: deriving
+// the task from context.Background() meant a client that disconnected (or a
+// proxy that timed out) left the agent calling the model and holding its
+// concurrency slot until the bound elapsed, and broke cancellation
+// propagation. The bound is kept, so a peer that stays connected still cannot
+// pin a task open forever.
+func (h *Handler) handleTaskSend(ctx context.Context, w http.ResponseWriter, req JSONRPCRequest) {
 	var params struct {
 		Message struct {
 			Text string `json:"text"`
@@ -217,7 +244,7 @@ func (h *Handler) handleTaskSend(w http.ResponseWriter, req JSONRPCRequest) {
 			Metadata:  map[string]any{"source": "a2a_protocol"},
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, h.requestTimeout())
 		defer cancel()
 
 		out, err := h.loop.ProcessMessage(ctx, inbound)

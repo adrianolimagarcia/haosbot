@@ -95,7 +95,7 @@ Exemplo de configuração completa em `~/.haosbot/config.json`:
   },
   "api": {
     "host": "127.0.0.1",
-    "port": 8765,
+    "port": 8900,
     "apiKey": "seu-token-secreto-para-proteger-o-haosbot"
   }
 }
@@ -144,7 +144,7 @@ haosbot gateway --port 8900
 
 O gateway inicia um servidor HTTP nativo com os seguintes endpoints:
 
-- **`GET /`**: Serve a WebUI embutida (Control Center) — abre `http://IP:8765/` no navegador.
+- **`GET /`**: Serve a WebUI embutida (Control Center) — abre `http://IP:8900/` no navegador.
 - **`GET /health`**: Retorna `{"status":"ok","runtime":"haosbot-go"}`.
 - **`GET /v1/models`**: Lista os modelos configurados.
 - **`POST /v1/chat/completions`**: Recebe requisições no formato padrão OpenAI e despacha o turno para o loop do agente e provedor configurado.
@@ -176,12 +176,12 @@ haosbot gateway --port 8900
 
 Para expor na rede (ex: IP Tailscale):
 ```bash
-haosbot gateway --host 100.76.224.27 --port 8765
+haosbot gateway --host 100.76.224.27 --port 8900
 ```
 ## 6. Integração com a WebUI
 
 Para conectar uma interface gráfica (como a WebUI React/TypeScript do haosbot):
-1. Configure o cliente da WebUI para se conectar à URL do gateway (ex: `http://localhost:8765`).
+1. Configure o cliente da WebUI para se conectar à URL do gateway (ex: `http://localhost:8900`).
 2. Se configurou `api.apiKey`, insira o mesmo token na tela de configuração da WebUI.
 3. A WebUI enviará as mensagens diretamente para `/v1/chat/completions` e receberá as respostas processadas.
 
@@ -231,7 +231,7 @@ Ao iniciar `haosbot gateway`, o canal do Telegram fará polling de mensagens e r
 
 - `haosbot version`: Mostra a versão do haosbot-go, versão do compilador Go e commit de compatibilidade.
 - `haosbot paths`: Exibe o mapeamento e o status de existência dos diretórios em `~/.haosbot/`.
-- `haosbot gateway [--port 8765]`: Inicia o runtime de serviço, o servidor HTTP e os canais em background.
+- `haosbot gateway [--port 8900]`: Inicia o runtime de serviço, o servidor HTTP e os canais em background.
 - `haosbot chat`: Inicia uma sessão de chat interativa via terminal.
 - `haosbot run "<mensagem>"`: Executa um turno único e imprime a resposta no terminal.
 
@@ -256,14 +256,14 @@ O **haosbot-go** implementa a especificação oficial do protocolo [Agent2Agent 
 ### A. Discovery de Agente (`GET /.well-known/agent-card.json`)
 Qualquer agente ou orquestrador na rede pode descobrir o haosbot consultando:
 ```bash
-curl http://100.76.224.27:8765/.well-known/agent-card.json
+curl http://100.76.224.27:8900/.well-known/agent-card.json
 ```
 Retorna metadados do agente, URL de transporte e as skills anunciadas (`exec`, `python_exec`, `file_ops`).
 
 ### B. Execução de Tarefas A2A (`POST /a2a` via JSON-RPC 2.0)
 Agentes externos podem delegar tarefas para o haosbot usando JSON-RPC 2.0 padrão:
 ```bash
-curl -X POST http://100.76.224.27:8765/a2a \
+curl -X POST http://100.76.224.27:8900/a2a \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",

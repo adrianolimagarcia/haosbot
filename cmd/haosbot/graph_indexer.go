@@ -170,9 +170,18 @@ func (g *graphIndexer) worker() {
 	}
 }
 
+func (g *graphIndexer) setProcess(process func(context.Context, graphIndexJob) error) {
+	g.mu.Lock()
+	g.process = process
+	g.mu.Unlock()
+}
+
 func (g *graphIndexer) index(job graphIndexJob) error {
-	if g.process != nil {
-		return g.process(g.ctx, job)
+	g.mu.Lock()
+	process := g.process
+	g.mu.Unlock()
+	if process != nil {
+		return process(g.ctx, job)
 	}
 	if g.pool == nil {
 		return context.Canceled

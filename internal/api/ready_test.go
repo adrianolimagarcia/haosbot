@@ -7,6 +7,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -71,9 +74,23 @@ func (s *readyStore) Open(key string) (agent.Transcript, error) {
 	return t, nil
 }
 
-// newReadyLoop builds a REAL agent.Loop, so the readiness gate is driven by the
-// same object the gateway attaches in production rather than by a placeholder.
-func newReadyLoop(t *testing.T) *agent.Loop {
+// readyRuntime is the runtime a healthy gateway actually has: a real agent loop
+// draining a real bus, a provider, a loaded config, and a writable data
+// directory. /readyz gates on all of them, so the tests wire them the way
+// cmd/haosbot/runtime.go does instead of leaving the new handles unset.
+type readyRuntime struct {
+	server  *Server
+	bus     *bus.Bus
+	loop    *agent.Loop
+	dataDir string
+}
+
+func newReadyRuntime(t *testing.T) *readyRuntime {
+	t.Helper()
+	return newReadyRuntimeWithConfig(t, config.DefaultConfig())
+}
+
+func newReadyRuntimeWithConfig(t *testing.T, cfg *config.Config) *readyRuntime {
 	t.Helper()
 
 	messageBus := bus.New(bus.Options{})
@@ -89,7 +106,59 @@ func newReadyLoop(t *testing.T) *agent.Loop {
 	if err != nil {
 		t.Fatalf("build agent loop: %v", err)
 	}
-	return loop
+
+	// The real consumer goroutine, exactly as the gateway starts it.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = loop.Run(ctx) }()
+
+	// A probe that arrives before the loop goroutine has entered ConsumeInbound
+	// is genuinely not ready, so wait for the attachment instead of racing it.
+	deadline := time.Now().Add(5 * time.Second)
+	for !messageBus.HasConsumer() {
+		if time.Now().After(deadline) {
+			t.Fatal("the agent loop never attached to the bus")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	dataDir := t.TempDir()
+	s := NewServer(cfg, readyProvider{}, loop)
+	s.SetBus(messageBus)
+	s.SetDataDir(dataDir)
+
+	return &readyRuntime{server: s, bus: messageBus, loop: loop, dataDir: dataDir}
+}
+
+// newIdleLoop builds a loop around a fresh bus WITHOUT starting Run, which is
+// the state the bus gate exists to catch.
+func newIdleLoop(t *testing.T) (*agent.Loop, *bus.Bus) {
+	t.Helper()
+
+	messageBus := bus.New(bus.Options{})
+	t.Cleanup(messageBus.Close)
+
+	loop, err := agent.NewLoop(agent.LoopConfig{
+		Bus:          messageBus,
+		Store:        &readyStore{},
+		Provider:     readyProvider{},
+		Workspace:    t.TempDir(),
+		SystemPrompt: "TEST SYSTEM PROMPT",
+	})
+	if err != nil {
+		t.Fatalf("build agent loop: %v", err)
+	}
+	return loop, messageBus
+}
+
+// reasonFor returns the reason whose text starts with "check: ".
+func reasonFor(body readyzBody, check string) string {
+	for _, reason := range body.Reasons {
+		if strings.HasPrefix(reason, check+": ") {
+			return reason
+		}
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -205,13 +274,27 @@ func TestReadyzReportsUnavailableWhileRuntimeIsIncomplete(t *testing.T) {
 	if got := body.Checks["agentLoop"]; got != "missing" {
 		t.Fatalf("/readyz checks.agentLoop=%q want \"missing\": %s", got, raw)
 	}
+	// The bus and data-directory gates are "missing" too: this server was built
+	// without SetBus/SetDataDir, and a gate the server cannot evaluate must fail
+	// closed rather than pass by default.
+	if got := body.Checks["bus"]; got != "missing" {
+		t.Fatalf("/readyz checks.bus=%q want \"missing\" (no bus was attached): %s", got, raw)
+	}
+	if got := body.Checks["dataDir"]; got != "missing" {
+		t.Fatalf("/readyz checks.dataDir=%q want \"missing\" (no data directory was recorded): %s", got, raw)
+	}
 	if len(body.Reasons) == 0 {
 		t.Fatalf("/readyz reported not-ready without a reason: %s", raw)
+	}
+	for _, gate := range []string{"provider", "agentLoop", "bus", "dataDir"} {
+		if reason := reasonFor(body, gate); reason == "" {
+			t.Fatalf("/readyz did not name the failing check %q in its reasons: %s", gate, raw)
+		}
 	}
 }
 
 func TestReadyzReportsReadyWhenRuntimeIsAttached(t *testing.T) {
-	s := NewServer(config.DefaultConfig(), readyProvider{}, newReadyLoop(t))
+	s := newReadyRuntime(t).server
 	base := startGateway(t, s)
 
 	status, body, raw := getJSON(t, base+"/readyz")
@@ -224,7 +307,7 @@ func TestReadyzReportsReadyWhenRuntimeIsAttached(t *testing.T) {
 	if body.Status != "ok" {
 		t.Fatalf("/readyz status=%q want \"ok\": %s", body.Status, raw)
 	}
-	for _, gate := range []string{"config", "provider", "agentLoop", "process"} {
+	for _, gate := range []string{"config", "provider", "agentLoop", "process", "bus", "dataDir"} {
 		if got := body.Checks[gate]; got != "ok" {
 			t.Fatalf("/readyz checks.%s=%q want \"ok\": %s", gate, got, raw)
 		}
@@ -261,7 +344,7 @@ func TestReadyzIsSeparateFromLiveness(t *testing.T) {
 func TestReadyzIsReachableWithoutCredentials(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.API.APIKey = "secret"
-	s := NewServer(cfg, readyProvider{}, newReadyLoop(t))
+	s := newReadyRuntimeWithConfig(t, cfg).server
 	base := startGateway(t, s)
 
 	status, _, raw := getJSON(t, base+"/readyz")
@@ -283,7 +366,7 @@ func TestReadyzIsReachableWithoutCredentials(t *testing.T) {
 // loop goroutine is really consuming the bus, whether channels finished
 // connecting, ...). Taking the gateway out of rotation must show up immediately.
 func TestReadyzReflectsProcessOwnerGate(t *testing.T) {
-	s := NewServer(config.DefaultConfig(), readyProvider{}, newReadyLoop(t))
+	s := newReadyRuntime(t).server
 	base := startGateway(t, s)
 
 	if status, _, raw := getJSON(t, base+"/readyz"); status != http.StatusOK {
@@ -309,4 +392,235 @@ func TestReadyzReflectsProcessOwnerGate(t *testing.T) {
 	if !s.Ready() {
 		t.Fatal("Server.Ready() reports not-ready after SetReady(true)")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Gate: the message bus
+// ---------------------------------------------------------------------------
+
+// A closed bus is out of service: every publish returns ErrClosed and the loop
+// that was draining it has already returned, so channel messages cannot reach
+// the agent at all.
+func TestReadyzReportsNotReadyWhenTheBusIsClosed(t *testing.T) {
+	rt := newReadyRuntime(t)
+	base := startGateway(t, rt.server)
+
+	if status, _, raw := getJSON(t, base+"/readyz"); status != http.StatusOK {
+		t.Fatalf("/readyz status=%d want 200 while the bus is open: %s", status, raw)
+	}
+
+	// Real failure injection: close the bus the server actually holds.
+	rt.bus.Close()
+
+	status, body, raw := getJSON(t, base+"/readyz")
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz status=%d want 503 after the bus was closed: %s", status, raw)
+	}
+	if got := body.Checks["bus"]; got != "closed" {
+		t.Fatalf("/readyz checks.bus=%q want \"closed\": %s", got, raw)
+	}
+	if reason := reasonFor(body, "bus"); reason == "" {
+		t.Fatalf("/readyz did not name the failing check in its reasons: %s", raw)
+	}
+	// The other gates are independent and still healthy.
+	if got := body.Checks["dataDir"]; got != "ok" {
+		t.Fatalf("/readyz checks.dataDir=%q want \"ok\" (the bus failure is not a data-dir failure): %s", got, raw)
+	}
+	if rt.server.Ready() {
+		t.Fatal("Server.Ready() reports ready while the bus is closed")
+	}
+}
+
+// A bus nobody drains is the failure the previous revision could not see: the
+// loop is attached, so every other gate passes, and messages pile up until the
+// queue bound rejects them.
+func TestReadyzReportsNotReadyWhenNothingConsumesTheBus(t *testing.T) {
+	loop, messageBus := newIdleLoop(t)
+
+	s := NewServer(config.DefaultConfig(), readyProvider{}, loop)
+	s.SetBus(messageBus)
+	s.SetDataDir(t.TempDir())
+	base := startGateway(t, s)
+
+	status, body, raw := getJSON(t, base+"/readyz")
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz status=%d want 503 while nothing consumes the bus: %s", status, raw)
+	}
+	if got := body.Checks["bus"]; got != "no_consumer" {
+		t.Fatalf("/readyz checks.bus=%q want \"no_consumer\": %s", got, raw)
+	}
+	if reason := reasonFor(body, "bus"); reason == "" {
+		t.Fatalf("/readyz did not name the failing check in its reasons: %s", raw)
+	}
+	for _, gate := range []string{"config", "provider", "agentLoop", "dataDir"} {
+		if got := body.Checks[gate]; got != "ok" {
+			t.Fatalf("/readyz checks.%s=%q want \"ok\": only the bus gate should be failing: %s", gate, got, raw)
+		}
+	}
+
+	// The gate must open when the loop actually starts draining, or it is
+	// decoration rather than a probe.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = loop.Run(ctx) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !messageBus.HasConsumer() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	if status, _, raw := getJSON(t, base+"/readyz"); status != http.StatusOK {
+		t.Fatalf("/readyz status=%d want 200 once the loop drains the bus: %s", status, raw)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Gate: the data directory
+// ---------------------------------------------------------------------------
+
+// The write probe must fail where a stat would succeed. A regular file is
+// exactly that case: os.Stat reports it as present, while nothing can be created
+// inside it.
+func TestReadyzDataDirGateIsAWriteNotAStat(t *testing.T) {
+	rt := newReadyRuntime(t)
+	base := startGateway(t, rt.server)
+
+	// Sanity: the healthy directory passes.
+	if status, body, raw := getJSON(t, base+"/readyz"); status != http.StatusOK {
+		t.Fatalf("/readyz status=%d want 200 with a writable data directory: %s (checks=%v)", status, raw, body.Checks)
+	}
+
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("create the file used as a fake data directory: %v", err)
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Fatalf("the injected path must be stat-able, or the test would not distinguish a write from a stat: %v", err)
+	}
+
+	rt.server.SetDataDir(file)
+
+	status, body, raw := getJSON(t, base+"/readyz")
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz status=%d want 503 for a data directory that cannot be written to: %s", status, raw)
+	}
+	if got := body.Checks["dataDir"]; got != "unwritable" {
+		t.Fatalf("/readyz checks.dataDir=%q want \"unwritable\" (a stat-based check would have passed): %s", got, raw)
+	}
+	if reason := reasonFor(body, "dataDir"); reason == "" {
+		t.Fatalf("/readyz did not name the failing check in its reasons: %s", raw)
+	}
+	if got := body.Checks["bus"]; got != "ok" {
+		t.Fatalf("/readyz checks.bus=%q want \"ok\" (the data-dir failure is not a bus failure): %s", got, raw)
+	}
+	if rt.server.Ready() {
+		t.Fatal("Server.Ready() reports ready while the data directory is not writable")
+	}
+}
+
+// A data directory that does not exist is the other half of the same gate: the
+// session store's root is created beneath it, so it cannot be missing.
+func TestReadyzReportsNotReadyWhenTheDataDirectoryDoesNotExist(t *testing.T) {
+	rt := newReadyRuntime(t)
+	base := startGateway(t, rt.server)
+
+	rt.server.SetDataDir(filepath.Join(t.TempDir(), "missing", "data"))
+
+	status, body, raw := getJSON(t, base+"/readyz")
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz status=%d want 503 for a missing data directory: %s", status, raw)
+	}
+	if got := body.Checks["dataDir"]; got != "unwritable" {
+		t.Fatalf("/readyz checks.dataDir=%q want \"unwritable\": %s", got, raw)
+	}
+}
+
+// A readiness probe runs on a timer for the life of the process: it must not
+// leave anything behind in the directory it writes to.
+func TestReadyzWriteProbeLeavesNothingBehind(t *testing.T) {
+	rt := newReadyRuntime(t)
+	base := startGateway(t, rt.server)
+
+	for i := 0; i < 3; i++ {
+		if status, _, raw := getJSON(t, base+"/readyz"); status != http.StatusOK {
+			t.Fatalf("probe %d status=%d want 200: %s", i, status, raw)
+		}
+	}
+
+	entries, err := os.ReadDir(rt.dataDir)
+	if err != nil {
+		t.Fatalf("read the data directory: %v", err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("the write probe left %d entries behind: %v", len(entries), names)
+	}
+}
+
+// A probe must answer even when a check does not. The bound is exercised with a
+// check that really blocks; the hung filesystem it guards against could not be
+// reproduced in a test.
+func TestReadyzCheckIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	start := time.Now()
+	state, err := boundedCheck(func() (string, error) {
+		<-release
+		return readinessOK, nil
+	})
+	elapsed := time.Since(start)
+
+	if state != readinessTimeout {
+		t.Fatalf("state=%q want %q for a check that never answers", state, readinessTimeout)
+	}
+	if err == nil {
+		t.Fatal("a check that timed out must report an error")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("the check was abandoned only after %s, want the %s bound", elapsed, readinessCheckTimeout)
+	}
+}
+
+// The runtime handles are injected while the server may already be answering
+// probes (SetLoop/SetBus/SetDataDir are late-injection seams), so setting them
+// must not race with a probe reading them. The assertion is the race detector:
+// this test has no other pass/fail condition by design.
+func TestReadyzHandlesAreSafeToSetWhileProbing(t *testing.T) {
+	s := NewServer(config.DefaultConfig(), readyProvider{}, nil)
+	base := startGateway(t, s)
+
+	loop, messageBus := newIdleLoop(t)
+	dataDir := t.TempDir()
+
+	stop := make(chan struct{})
+	var probes sync.WaitGroup
+	probes.Add(1)
+	go func() {
+		defer probes.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			resp, err := http.Get(base + "/readyz")
+			if err != nil {
+				return
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		s.SetLoop(loop)
+		s.SetBus(messageBus)
+		s.SetDataDir(dataDir)
+	}
+	close(stop)
+	probes.Wait()
 }

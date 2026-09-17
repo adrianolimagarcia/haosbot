@@ -591,3 +591,123 @@ func TestConcurrentPublishConsume(t *testing.T) {
 		t.Errorf("consumed %d, want %d", got, producers*perProducer)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Consumer observation
+// ---------------------------------------------------------------------------
+
+// HasConsumer is the readiness observable: it must be false until something
+// actually enters ConsumeInbound, and true from then on.
+func TestHasConsumerReportsWhetherAnythingDrains(t *testing.T) {
+	b := New(Options{})
+	defer b.Close()
+
+	if b.HasConsumer() {
+		t.Fatal("a bus nobody has consumed from reported a consumer")
+	}
+	if got := b.ConsumerCount(); got != 0 {
+		t.Fatalf("ConsumerCount()=%d on a fresh bus, want 0", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	consumed := make(chan struct{})
+	go func() {
+		close(consumed)
+		_, _ = b.ConsumeInbound(ctx)
+	}()
+
+	<-consumed
+	deadline := time.Now().Add(5 * time.Second)
+	for !b.HasConsumer() {
+		if time.Now().After(deadline) {
+			t.Fatal("HasConsumer() stayed false while a consumer was blocked in ConsumeInbound")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := b.ConsumerCount(); got != 1 {
+		t.Fatalf("ConsumerCount()=%d with one consumer parked in the queue, want 1", got)
+	}
+
+	// The count is in flight, the flag is historical: a consumer that is busy
+	// delivering is not parked any more, but it has not gone away either.
+	cancel()
+	deadline = time.Now().Add(5 * time.Second)
+	for b.ConsumerCount() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("ConsumerCount() never returned to 0 after the consumer stopped")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !b.HasConsumer() {
+		t.Fatal("HasConsumer() went back to false after a consumer had attached")
+	}
+}
+
+// The counters are read by a probe while the bus is in use, so they must be
+// race-free and must not disturb dispatch.
+func TestConsumerObservationRacesWithTraffic(t *testing.T) {
+	b := New(Options{})
+	defer b.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var consumers sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		consumers.Add(1)
+		go func() {
+			defer consumers.Done()
+			for {
+				if _, err := b.ConsumeInbound(ctx); err != nil {
+					return
+				}
+			}
+		}()
+	}
+
+	// Observers read the counters while the bus is in use; the race detector is
+	// the assertion for them.
+	var observers sync.WaitGroup
+	stop := make(chan struct{})
+	for i := 0; i < 4; i++ {
+		observers.Add(1)
+		go func() {
+			defer observers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = b.HasConsumer()
+				_ = b.ConsumerCount()
+			}
+		}()
+	}
+
+	for i := 0; i < 500; i++ {
+		if err := b.PublishInbound(ctx, core.InboundMessage{Channel: "c", ChatID: "1"}); err != nil {
+			t.Fatalf("PublishInbound: %v", err)
+		}
+	}
+
+	// The queue draining is what proves the consumers really ran, so the
+	// assertion below cannot pass on a goroutine that was never scheduled.
+	deadline := time.Now().Add(5 * time.Second)
+	for b.InboundSize() > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the consumers did not drain the queue: %d pending", b.InboundSize())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !b.HasConsumer() {
+		t.Fatal("HasConsumer() is false after consumers drained the bus")
+	}
+
+	cancel()
+	consumers.Wait()
+	close(stop)
+	observers.Wait()
+}

@@ -345,6 +345,12 @@ func cmdGateway(args []string) error {
 	}
 
 	apiServer := api.NewServer(cfg, prov, rt.loop)
+	// /readyz gates on the bus being consumed and on the data directory being
+	// writable. Both handles live here, not in the api package, so they are
+	// injected the same way the loop is; leaving them out would make those two
+	// checks report "missing" and take a healthy gateway out of rotation.
+	apiServer.SetBus(rt.bus)
+	apiServer.SetDataDir(config.DefaultDataDir())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -121,7 +121,7 @@ No objeto `"api"` do `config.json`, configure a chave `"apiKey"`:
   ```http
   Authorization: Bearer <seu-token>
   ```
-- O endpoint `/health` permanece aberto sem autenticação para monitoramento de liveness.
+- O endpoint `/health` permanece aberto sem autenticação para monitoramento de liveness. O endpoint `/readyz` (readiness) também é aberto, pelo mesmo motivo: uma sonda de load balancer/orquestrador não carrega token.
 
 ---
 
@@ -145,7 +145,30 @@ haosbot gateway --port 8900
 O gateway inicia um servidor HTTP nativo com os seguintes endpoints:
 
 - **`GET /`**: Serve a WebUI embutida (Control Center) — abre `http://IP:8900/` no navegador.
-- **`GET /health`**: Retorna `{"status":"ok","runtime":"haosbot"}`.
+- **`GET /health`**: Retorna `{"status":"ok","runtime":"haosbot"}`. É liveness: responde enquanto o processo está de pé, mesmo que ainda não possa atender.
+- **`GET /readyz`**: É readiness: responde **`200`** quando o gateway pode receber tráfego e **`503`** quando não pode. Corpo:
+
+  ```json
+  {
+    "status": "ok",
+    "runtime": "haosbot",
+    "ready": true,
+    "checks": { "config": "ok", "provider": "ok", "agentLoop": "ok", "process": "ok", "bus": "ok", "dataDir": "ok" }
+  }
+  ```
+
+  Cada chave de `checks` é um portão independente; quando algum falha, `status` vira `"degraded"`, `ready` vira `false` e `reasons` nomeia o portão que falhou (ex.: `"bus: nothing is consuming the bus: the agent loop is not draining it"`):
+
+  | Portão | `ok` significa | Valores de falha |
+  |---|---|---|
+  | `config` | configuração carregada | `missing` |
+  | `provider` | provedor de modelo anexado | `missing` |
+  | `agentLoop` | loop do agente anexado | `missing` |
+  | `process` | o dono do processo não tirou o gateway de rotação (`SetReady`) | `not_ready` |
+  | `bus` | a fila de mensagens está aberta **e** há um consumidor drenando-a | `no_consumer` (ninguém consome), `closed` (fila fechada), `missing` |
+  | `dataDir` | o diretório de dados (`~/.haosbot`, onde fica `sessions/`) aceita uma escrita real | `unwritable`, `missing` |
+
+  A verificação de `dataDir` cria e remove um arquivo temporário no diretório (não usa `stat`, que passaria num sistema de arquivos somente-leitura). Todas as verificações têm timeout curto (500 ms cada) e são baratas o bastante para serem executadas em toda sonda; qualquer portão que não termine a tempo reporta `timeout`. O `bus` **não** olha o tamanho da fila de propósito, porque uma fila cheia é o que um servidor ocupado tem — uma sonda que ficasse doente sob carga causaria a indisponibilidade que ela existe para evitar.
 - **`GET /v1/models`**: Lista os modelos configurados.
 - **`POST /v1/chat/completions`**: Recebe requisições no formato padrão OpenAI e despacha o turno para o loop do agente e provedor configurado.
 - **`GET /api/config`**: Lê a configuração atual (`~/.haosbot/config.json`) — usado pelo painel visual.

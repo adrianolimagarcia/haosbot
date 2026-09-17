@@ -80,18 +80,6 @@ func storeClosed(store *micrographrag.Store) bool {
 	return store.DB().PingContext(context.Background()) != nil
 }
 
-func waitFor(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
-}
-
 // TestGraphStorePoolBoundsOpenStores proves the pool does not keep one open
 // store per session key: after many distinct keys it holds at most maxOpen.
 func TestGraphStorePoolBoundsOpenStores(t *testing.T) {
@@ -265,7 +253,7 @@ func TestGraphStorePoolStorePinsUntilContextDone(t *testing.T) {
 	// and the eviction it triggers closes the evicted store after removing it
 	// from the pool, so wait for the observable end state (a dead handle)
 	// rather than for the bookkeeping count, which drops one step earlier.
-	waitFor(t, "the pool to close the store whose context was cancelled", func() bool {
+	waitFor(t, 5*time.Second, "the pool to close the store whose context was cancelled", func() bool {
 		return storeClosed(first)
 	})
 	if got := openStoreCount(p); got != maxOpen {
@@ -328,7 +316,7 @@ func TestGraphStorePoolConcurrentAcquireKeepsPinnedStoresUsable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	waitFor(t, "the pool to converge back to its limit", func() bool {
+	waitFor(t, 5*time.Second, "the pool to converge back to its limit", func() bool {
 		return openStoreCount(p) <= maxOpen
 	})
 }

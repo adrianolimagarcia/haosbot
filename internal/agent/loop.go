@@ -19,7 +19,23 @@ import (
 )
 
 func (l *Loop) graphMemoryContext(ctx context.Context, store *micrographrag.Store, query string) (string, error) {
-	results, err := store.Search(ctx, query, micrographrag.SearchOptions{Limit: 6})
+	// Start from the STORE'S OWN defaults and override only the limit.
+	//
+	// Passing a bare literal here was a silent no-op. micrographrag's
+	// normalizeSearchOptions (search.go:27-58) fills Limit/FTSLimit/GraphDepth
+	// and the weights from the defaults but NEVER copies EnableFTS, EnableVector
+	// or EnableGraph, and Search only consults an engine whose flag is set. A
+	// non-zero options struct therefore disabled every engine: measured against
+	// a store holding one matching memory,
+	//     SearchOptions{}               -> 1 result
+	//     SearchOptions{Limit: 6}       -> 0 results, nil error   <-- what this
+	//     SearchOptions{Limit:6,EnableFTS:true} -> 1 result
+	// so the retrieved-memory block was always empty and never reported a
+	// failure. DefaultSearchOptions carries the flags the store was actually
+	// opened with, which is what we want; Limit is the only thing to tune.
+	opts := store.DefaultSearchOptions()
+	opts.Limit = 6
+	results, err := store.Search(ctx, query, opts)
 	if err != nil {
 		return "", err
 	}

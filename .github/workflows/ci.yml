@@ -46,8 +46,21 @@ jobs:
       - name: Build canonical binary
         run: go build ./cmd/haosbot
 
+      - name: Build with production tags
+        run: go build -tags sqlite_fts5 ./cmd/haosbot
+
       - name: Unit and differential tests
         run: go test -count=1 ./...
+
+      # The production binary is built with -tags sqlite_fts5 (MicroGraphRAG
+      # needs SQLite FTS5), but the untagged run above skips every test that
+      # opens a store, so the retrieved-memory path was never exercised in CI.
+      # A silent no-op lived there: Search with a non-zero options struct
+      # disabled every engine because micrographrag's normalizeSearchOptions
+      # does not copy the Enable* flags. These packages are the ones that open a
+      # store; they are the ones that must run tagged.
+      - name: Tests with production tags
+        run: go test -tags sqlite_fts5 -count=1 ./internal/agent/... ./internal/memory/... ./cmd/...
 
       - name: Race detector
         run: go test -race -count=1 ./...

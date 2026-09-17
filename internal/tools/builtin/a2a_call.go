@@ -10,15 +10,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/adrianolimagarcia/nanobot-go/internal/netpolicy"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
 )
 
 // A2ACallTool allows the nanobot agent to discover and delegate tasks to another A2A agent.
 type A2ACallTool struct {
 	params json.RawMessage
+	policy netpolicy.Policy
 }
 
-func NewA2ACall() *A2ACallTool {
+// NewA2ACall constructs the A2A tool. The optional allowlist is intentionally
+// explicit: private, loopback and link-local destinations are denied by default.
+// Existing callers that pass no argument retain the secure default.
+func NewA2ACall(allowlist ...[]string) *A2ACallTool {
 	raw := json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -28,7 +33,7 @@ func NewA2ACall() *A2ACallTool {
 			},
 			"agent_url": {
 				"type": "string",
-				"description": "The base URL or endpoint of the remote agent (e.g., 'http://100.76.224.27:8765' or 'http://remote-agent/a2a')."
+				"description": "The base URL or endpoint of the remote agent. Private/local destinations require an explicit SSRF allowlist entry."
 			},
 			"task_message": {
 				"type": "string",
@@ -37,7 +42,11 @@ func NewA2ACall() *A2ACallTool {
 		},
 		"required": ["action", "agent_url"]
 	}`)
-	return &A2ACallTool{params: raw}
+	policy := netpolicy.Policy{}
+	if len(allowlist) > 0 {
+		policy.Allowlist = append([]string(nil), allowlist[0]...)
+	}
+	return &A2ACallTool{params: raw, policy: policy}
 }
 
 func (t *A2ACallTool) Name() string {
@@ -68,13 +77,16 @@ func (t *A2ACallTool) Execute(ctx context.Context, args json.RawMessage) (tools.
 		return tools.Result{Content: "agent_url is required"}, nil
 	}
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := netpolicy.NewClient(60*time.Second, t.policy)
 
 	switch strings.ToLower(input.Action) {
 	case "discover":
 		discoveryURL := baseURL
 		if !strings.HasSuffix(discoveryURL, "/.well-known/agent-card.json") {
 			discoveryURL += "/.well-known/agent-card.json"
+		}
+		if _, err := netpolicy.ValidateURL(ctx, discoveryURL, t.policy); err != nil {
+			return tools.Result{Content: fmt.Sprintf("discovery blocked by outbound policy: %v", err)}, nil
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, nil)
@@ -88,7 +100,10 @@ func (t *A2ACallTool) Execute(ctx context.Context, args json.RawMessage) (tools.
 		}
 		defer resp.Body.Close()
 
-		body, _ := io.ReadAll(resp.Body)
+		body, err := readLimitedResponse(resp.Body, netpolicy.MaxResponseBytes(t.policy))
+		if err != nil {
+			return tools.Result{Content: fmt.Sprintf("discovery response rejected: %v", err)}, nil
+		}
 		return tools.Result{
 			Content: fmt.Sprintf("Remote Agent Discovery:\n%s", string(body)),
 		}, nil
@@ -101,6 +116,9 @@ func (t *A2ACallTool) Execute(ctx context.Context, args json.RawMessage) (tools.
 		endpoint := baseURL
 		if !strings.HasSuffix(endpoint, "/a2a") {
 			endpoint += "/a2a"
+		}
+		if _, err := netpolicy.ValidateURL(ctx, endpoint, t.policy); err != nil {
+			return tools.Result{Content: fmt.Sprintf("task delegation blocked by outbound policy: %v", err)}, nil
 		}
 
 		rpcReq := map[string]any{
@@ -127,7 +145,10 @@ func (t *A2ACallTool) Execute(ctx context.Context, args json.RawMessage) (tools.
 		}
 		defer resp.Body.Close()
 
-		body, _ := io.ReadAll(resp.Body)
+		body, err := readLimitedResponse(resp.Body, netpolicy.MaxResponseBytes(t.policy))
+		if err != nil {
+			return tools.Result{Content: fmt.Sprintf("A2A response rejected: %v", err)}, nil
+		}
 		return tools.Result{
 			Content: fmt.Sprintf("A2A Response from %s:\n%s", endpoint, string(body)),
 		}, nil
@@ -137,4 +158,15 @@ func (t *A2ACallTool) Execute(ctx context.Context, args json.RawMessage) (tools.
 			Content: fmt.Sprintf("unknown action: %s. Supported actions: 'discover', 'send'", input.Action),
 		}, nil
 	}
+}
+
+func readLimitedResponse(r io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("response exceeds %d bytes", limit)
+	}
+	return body, nil
 }

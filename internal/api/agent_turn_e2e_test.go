@@ -18,6 +18,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
 	"github.com/adrianolimagarcia/nanobot-go/internal/prompt"
+	"github.com/adrianolimagarcia/nanobot-go/internal/provider"
 	"github.com/adrianolimagarcia/nanobot-go/internal/provider/openai"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
 )
@@ -216,5 +217,56 @@ func TestOpenAICompatProviderTimeoutIsStructured(t *testing.T) {
 	}
 	if _, ok := body["error"].(map[string]any); !ok {
 		t.Fatalf("response is not structured: %s", rec.Body.String())
+	}
+}
+
+type compatResponseProvider struct {
+	request provider.ChatRequest
+}
+
+func (p *compatResponseProvider) Name() string { return "compat-test" }
+func (p *compatResponseProvider) Chat(_ context.Context, req provider.ChatRequest) (*core.Response, error) {
+	p.request = req
+	return &core.Response{
+		ToolCalls: []core.ToolCall{{
+			ID:        "call_compat",
+			Name:      "exec",
+			Arguments: json.RawMessage(`{"command":"printf 'ok'"}`),
+		}},
+		FinishReason: core.FinishToolCalls,
+	}, nil
+}
+
+func TestOpenAICompatPreservesMultimodalMessagesAndToolCalls(t *testing.T) {
+	cfg := config.DefaultConfig()
+	providerStub := &compatResponseProvider{}
+	server := NewServer(cfg, providerStub, nil)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", server.handleChatCompletions)
+	body := `{"model":"compat-model","messages":[{"role":"user","content":[{"type":"text","text":"run"},{"type":"image_url","image_url":{"url":"data:image/png;base64,x"}}]}],"tools":[{"type":"function","function":{"name":"exec","description":"run","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}}],"tool_choice":"required"}`
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/v1/chat/completions", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(providerStub.request.Messages) != 1 || !providerStub.request.Messages[0].Content.IsText() {
+		if len(providerStub.request.Messages) != 1 || len(providerStub.request.Messages[0].Content.Blocks) != 2 {
+			t.Fatalf("multimodal content was not preserved: %+v", providerStub.request.Messages)
+		}
+	}
+	if len(providerStub.request.Tools) != 1 || providerStub.request.Tools[0].Name != "exec" {
+		t.Fatalf("tools=%+v", providerStub.request.Tools)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	choices, _ := response["choices"].([]any)
+	message, _ := choices[0].(map[string]any)["message"].(map[string]any)
+	calls, _ := message["tool_calls"].([]any)
+	if len(calls) != 1 {
+		t.Fatalf("tool_calls=%v body=%s", calls, rec.Body.String())
 	}
 }

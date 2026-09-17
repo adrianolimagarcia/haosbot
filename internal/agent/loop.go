@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,9 +95,10 @@ type LoopConfig struct {
 	SystemPrompt        string
 
 	GraphMemory           *micrographrag.Store
-	GraphMemoryForSession func(context.Context, string) (*micrographrag.Store, error)
-	GraphMemoryEnqueue    func(string, string) bool
-	GraphMemoryMaxChars   int
+	GraphMemoryForSession    func(context.Context, string) (*micrographrag.Store, error)
+	GraphMemoryEnqueue       func(string, string) bool
+	GraphMemoryEnqueueWithID func(string, string, string) bool
+	GraphMemoryMaxChars      int
 }
 
 type activeTurn struct {
@@ -252,19 +255,40 @@ func (l *Loop) ProcessMessage(ctx context.Context, msg core.InboundMessage) (*co
 	}
 
 	history := transcript.Messages()
+	turnID := deterministicTurnID(key, len(history), msg.Content)
+	// A request can be retried after the user message was durably saved but
+	// before the provider result was saved. Reuse that message's turn ID and
+	// avoid appending a second logical user turn.
+	reusedUser := false
+	if len(history) > 0 {
+		last := history[len(history)-1]
+		if last.Role == core.RoleUser && last.Content.IsText() && last.Content.Text == msg.Content {
+			if raw, ok := last.Extra("turn_id"); ok {
+				var persistedID string
+				if json.Unmarshal(raw, &persistedID) == nil && persistedID != "" {
+					turnID = persistedID
+					history = history[:len(history)-1]
+					reusedUser = true
+				}
+			}
+		}
+	}
 	modelMessages := make([]core.Message, 0, len(history)+2)
 	modelMessages = append(modelMessages, *core.NewMessage(core.RoleSystem, systemPrompt))
 	modelMessages = append(modelMessages, history...)
 	modelMessages = append(modelMessages, *core.NewMessage(core.RoleUser, msg.Content))
 
-	userMsg := *core.NewMessage(core.RoleUser, msg.Content)
-	userMsg.Timestamp = isoLocal(time.Now())
-	if len(msg.Media) > 0 {
-		userMsg.SetExtra("media", mustRawAny(msg.Media))
-	}
-	transcript.AddMessage(userMsg)
-	if err := transcript.Save(); err != nil {
-		return nil, fmt.Errorf("agent: persist user message: %w", err)
+	if !reusedUser {
+		userMsg := *core.NewMessage(core.RoleUser, msg.Content)
+		userMsg.Timestamp = isoLocal(time.Now())
+		userMsg.SetExtra("turn_id", mustRawAny(turnID))
+		if len(msg.Media) > 0 {
+			userMsg.SetExtra("media", mustRawAny(msg.Media))
+		}
+		transcript.AddMessage(userMsg)
+		if err := transcript.Save(); err != nil {
+			return nil, fmt.Errorf("agent: persist user message: %w", err)
+		}
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -303,7 +327,9 @@ func (l *Loop) ProcessMessage(ctx context.Context, msg core.InboundMessage) (*co
 	}
 
 	graphContent := msg.Content + "\n" + res.FinalContent
-	if l.cfg.GraphMemoryEnqueue != nil {
+	if l.cfg.GraphMemoryEnqueueWithID != nil {
+		_ = l.cfg.GraphMemoryEnqueueWithID(turnID, key, graphContent)
+	} else if l.cfg.GraphMemoryEnqueue != nil {
 		_ = l.cfg.GraphMemoryEnqueue(key, graphContent)
 	} else if store, release := l.graphStoreForSession(ctx, key); store != nil {
 		// Compatibility fallback for tests/single-store embedders. Production
@@ -331,6 +357,16 @@ func (l *Loop) ProcessMessage(ctx context.Context, msg core.InboundMessage) (*co
 		Content:  content,
 		Metadata: msg.Metadata,
 	}, nil
+}
+
+func deterministicTurnID(sessionKey string, historyLen int, content string) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(sessionKey))
+	_, _ = h.Write([]byte{0})
+	_, _ = fmt.Fprintf(h, "%d", historyLen)
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(content))
+	return "turn-" + hex.EncodeToString(h.Sum(nil)[:16])
 }
 
 func (l *Loop) dispatchCommand(ctx context.Context, t Transcript, msg core.InboundMessage) (bool, *core.OutboundMessage) {

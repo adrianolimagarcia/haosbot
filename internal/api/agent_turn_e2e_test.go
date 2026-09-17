@@ -251,10 +251,8 @@ func TestOpenAICompatPreservesMultimodalMessagesAndToolCalls(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if len(providerStub.request.Messages) != 1 || !providerStub.request.Messages[0].Content.IsText() {
-		if len(providerStub.request.Messages) != 1 || len(providerStub.request.Messages[0].Content.Blocks) != 2 {
-			t.Fatalf("multimodal content was not preserved: %+v", providerStub.request.Messages)
-		}
+	if len(providerStub.request.Messages) != 1 || providerStub.request.Messages[0].Content.IsText() || len(providerStub.request.Messages[0].Content.Blocks) != 2 {
+		t.Fatalf("multimodal content was not preserved: %+v", providerStub.request.Messages)
 	}
 	if len(providerStub.request.Tools) != 1 || providerStub.request.Tools[0].Name != "exec" {
 		t.Fatalf("tools=%+v", providerStub.request.Tools)

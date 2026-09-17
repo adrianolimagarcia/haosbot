@@ -7,6 +7,27 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 )
 
+func TestConfigTargetPathPrefersLoadedSource(t *testing.T) {
+	cfg := config.DefaultConfig()
+	legacy := filepath.Join(t.TempDir(), ".nanobot", "config.json")
+	cfg.BindSourcePath(legacy)
+
+	if got := configTargetPath(cfg); got != legacy {
+		t.Fatalf("configTargetPath=%q want loaded source %q", got, legacy)
+	}
+}
+
+func TestConfigTargetPathFallsBackToCanonicalDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := config.DefaultConfig()
+
+	want := filepath.Join(home, ".haosbot", "config.json")
+	if got := configTargetPath(cfg); got != want {
+		t.Fatalf("configTargetPath=%q want %q", got, want)
+	}
+}
+
 func TestRedactedConfigRemovesSecrets(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.API.APIKey = "gateway-secret"

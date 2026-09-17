@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -61,10 +63,14 @@ func newGraphIndexer(pool *graphStorePool, workers, capacity int, outboxes ...*g
 }
 
 func (g *graphIndexer) Enqueue(sessionKey, content string) bool {
-	return g.EnqueueWithID(graphMemoryJobID(sessionKey, "", content), sessionKey, content)
+	return g.EnqueueWithIDError(graphMemoryJobID(sessionKey, "", content), sessionKey, content) == nil
 }
 
 func (g *graphIndexer) EnqueueWithID(jobID, sessionKey, content string) bool {
+	return g.EnqueueWithIDError(jobID, sessionKey, content) == nil
+}
+
+func (g *graphIndexer) EnqueueWithIDError(jobID, sessionKey, content string) error {
 	if jobID == "" {
 		jobID = graphMemoryJobID(sessionKey, "", content)
 	}
@@ -73,13 +79,13 @@ func (g *graphIndexer) EnqueueWithID(jobID, sessionKey, content string) bool {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		if g.closed {
-			return false
+			return errors.New("graph indexer is closed")
 		}
 		select {
 		case g.jobs <- job:
-			return true
+			return nil
 		default:
-			return false
+			return errors.New("graph indexer queue is full")
 		}
 	}
 
@@ -89,14 +95,17 @@ func (g *graphIndexer) EnqueueWithID(jobID, sessionKey, content string) bool {
 	closed := g.closed
 	g.mu.Unlock()
 	if closed {
-		return false
+		return errors.New("graph indexer is closed")
 	}
 	accepted, err := g.outbox.Enqueue(job)
-	if err != nil || !accepted {
-		return false
+	if err != nil {
+		return fmt.Errorf("persist GraphRAG outbox job: %w", err)
+	}
+	if !accepted {
+		return errors.New("GraphRAG outbox rejected job")
 	}
 	g.dispatchPending()
-	return true
+	return nil
 }
 
 func (g *graphIndexer) dispatchPending() {
@@ -189,24 +198,105 @@ func (g *graphIndexer) index(job graphIndexJob) error {
 	defer release()
 	source := "haosbot/session/" + job.sessionKey
 	title := "Agent turn " + job.ID
+	claimed, err := claimGraphMemoryJob(ctx, store.DB(), job, source, title)
+	if err != nil || !claimed {
+		return err
+	}
 	// ACK can be lost after AddMemory commits. The deterministic source/title
-	// pair makes the replay itself idempotent before another document is added.
+	// pair plus the durable job table make replay idempotent across workers and
+	// process restarts.
 	var existing int64
 	lookupErr := store.DB().QueryRowContext(ctx,
 		"SELECT id FROM documents WHERE source=? AND title=? LIMIT 1", source, title).Scan(&existing)
 	if lookupErr == nil {
-		return nil
+		return finishGraphMemoryJob(ctx, store.DB(), job.ID, existing, nil)
 	}
 	if lookupErr != sql.ErrNoRows {
+		_ = finishGraphMemoryJob(ctx, store.DB(), job.ID, 0, lookupErr)
 		return lookupErr
 	}
-	_, err = store.AddMemory(ctx, micrographrag.MemoryInput{
+	result, err := store.AddMemory(ctx, micrographrag.MemoryInput{
 		Kind:    1,
 		Source:  source,
 		Title:   title,
 		Content: job.content,
 	})
-	return err
+	if err != nil {
+		_ = finishGraphMemoryJob(ctx, store.DB(), job.ID, 0, err)
+		return err
+	}
+	return finishGraphMemoryJob(ctx, store.DB(), job.ID, result.DocumentID, nil)
+}
+
+const graphMemoryJobLease = 2 * time.Minute
+
+func claimGraphMemoryJob(ctx context.Context, db *sql.DB, job graphIndexJob, source, title string) (bool, error) {
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS haosbot_memory_jobs (
+  job_id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  title TEXT NOT NULL,
+  state TEXT NOT NULL,
+  document_id INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lease_until INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL
+)`); err != nil {
+		return false, fmt.Errorf("create GraphRAG job table: %w", err)
+	}
+	now := time.Now().Unix()
+	lease := now + int64(graphMemoryJobLease/time.Second)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO haosbot_memory_jobs
+(job_id,source,title,state,lease_until,updated_at)
+VALUES(?,?,?,?,?,?)`, job.ID, source, title, "running", lease, now)
+	if err != nil {
+		return false, err
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		var state string
+		var leaseUntil int64
+		if err := tx.QueryRowContext(ctx,
+			"SELECT state,lease_until FROM haosbot_memory_jobs WHERE job_id=?", job.ID).
+			Scan(&state, &leaseUntil); err != nil {
+			return false, err
+		}
+		if state == "succeeded" || (state == "running" && leaseUntil > now) {
+			if err := tx.Commit(); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE haosbot_memory_jobs
+SET state='running',lease_until=?,attempts=attempts+1,last_error='',updated_at=?
+WHERE job_id=?`, lease, now, job.ID); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func finishGraphMemoryJob(ctx context.Context, db *sql.DB, jobID string, documentID int64, jobErr error) error {
+	state := "succeeded"
+	lastError := ""
+	if jobErr != nil {
+		state = "retry"
+		lastError = jobErr.Error()
+	}
+	_, err := db.ExecContext(ctx, `UPDATE haosbot_memory_jobs
+SET state=?,document_id=?,lease_until=0,last_error=?,updated_at=?
+WHERE job_id=?`, state, documentID, lastError, time.Now().Unix(), jobID)
+	if err != nil {
+		return err
+	}
+	return jobErr
 }
 
 func graphRetryDelay(attempt int) time.Duration {

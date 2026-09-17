@@ -1,10 +1,10 @@
 # haosbot-go
 
-A lightweight, standalone Go reimplementation of haosbot preserving behavior, configuration, data format, and achieving extremely low RAM usage (~5-10 MB RSS), with zero external Go dependencies.
+A lightweight, standalone Go reimplementation of haosbot preserving behavior, configuration, and data format. The core runtime is a single binary; optional GraphRAG/vector features use Go modules and local model assets.
 
 ## Features
 
-- **Standalone Binary**: Single executable (~12 MB) with zero external dependencies.
+- **Standalone Binary**: Single executable with optional GraphRAG/vector capabilities and no required remote runtime service.
 - **CPython Minimal & SQLite**: Automated build script for a lightweight CPython runtime with SQLite enabled (`scripts/build_cpython_min.sh`).
 - **Python Execution Tool (`python_exec`)**: Allows agents to run dynamic Python scripts, handle SQLite databases, automate tasks, and process data securely.
 - **Memory & Dream Subsytem**: Full port of `MemoryArchiver` and `Consolidator` with atomic JSONL persistence and git store.

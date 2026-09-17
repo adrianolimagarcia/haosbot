@@ -72,6 +72,57 @@ type TranscriptStore interface {
 	Open(key string) (Transcript, error)
 }
 
+type transcriptMessageMutator interface {
+	SetMessage(int, core.Message) error
+}
+
+type graphMemoryPending struct {
+	TurnID     string `json:"turn_id"`
+	SessionKey string `json:"session_key"`
+	Content    string `json:"content"`
+}
+
+const graphMemoryPendingExtra = "_haosbot_graph_memory_pending"
+
+func (l *Loop) reconcilePendingGraphMemory(transcript Transcript) error {
+	if l.cfg.GraphMemoryEnqueueWithIDError == nil {
+		return nil
+	}
+	mutator, ok := transcript.(transcriptMessageMutator)
+	if !ok {
+		return nil
+	}
+	messages := transcript.Messages()
+	changed := false
+	for i := range messages {
+		raw, exists := messages[i].Extra(graphMemoryPendingExtra)
+		if !exists {
+			continue
+		}
+		var pending graphMemoryPending
+		if err := json.Unmarshal(raw, &pending); err != nil {
+			return fmt.Errorf("agent: decode pending GraphRAG job: %w", err)
+		}
+		if pending.TurnID == "" || pending.SessionKey == "" {
+			return errors.New("agent: pending GraphRAG job is missing identity")
+		}
+		if err := l.cfg.GraphMemoryEnqueueWithIDError(pending.TurnID, pending.SessionKey, pending.Content); err != nil {
+			return fmt.Errorf("agent: recover GraphRAG job %s: %w", pending.TurnID, err)
+		}
+		messages[i].DeleteExtra(graphMemoryPendingExtra)
+		if err := mutator.SetMessage(i, messages[i]); err != nil {
+			return fmt.Errorf("agent: clear recovered GraphRAG marker: %w", err)
+		}
+		changed = true
+	}
+	if changed {
+		if err := transcript.Save(); err != nil {
+			return fmt.Errorf("agent: persist recovered GraphRAG marker: %w", err)
+		}
+	}
+	return nil
+}
+
 type LoopConfig struct {
 	Bus      *bus.Bus
 	Store    TranscriptStore
@@ -96,9 +147,10 @@ type LoopConfig struct {
 
 	GraphMemory           *micrographrag.Store
 	GraphMemoryForSession    func(context.Context, string) (*micrographrag.Store, error)
-	GraphMemoryEnqueue       func(string, string) bool
-	GraphMemoryEnqueueWithID func(string, string, string) bool
-	GraphMemoryMaxChars      int
+	GraphMemoryEnqueue            func(string, string) bool
+	GraphMemoryEnqueueWithID      func(string, string, string) bool
+	GraphMemoryEnqueueWithIDError func(string, string, string) error
+	GraphMemoryMaxChars           int
 }
 
 type activeTurn struct {
@@ -230,6 +282,9 @@ func (l *Loop) ProcessMessage(ctx context.Context, msg core.InboundMessage) (*co
 	if err != nil {
 		return nil, fmt.Errorf("agent: open session %q: %w", key, err)
 	}
+	if err := l.reconcilePendingGraphMemory(transcript); err != nil {
+		return nil, err
+	}
 
 	if msg.IsUserInput() && msg.Channel != "system" && strings.HasPrefix(strings.TrimSpace(msg.Content), "/") {
 		if handled, out := l.dispatchCommand(ctx, transcript, msg); handled {
@@ -322,15 +377,54 @@ func (l *Loop) ProcessMessage(ctx context.Context, msg core.InboundMessage) (*co
 			transcript.AddMessage(m)
 		}
 	}
+	graphContent := msg.Content + "\n" + res.FinalContent
+	pendingAttached := false
+	if l.cfg.GraphMemoryEnqueueWithIDError != nil {
+		if mutator, ok := transcript.(transcriptMessageMutator); ok {
+			messages := transcript.Messages()
+			if len(messages) > 0 {
+				last := len(messages) - 1
+				messages[last].SetExtra(graphMemoryPendingExtra, mustRawAny(graphMemoryPending{
+					TurnID: turnID, SessionKey: key, Content: graphContent,
+				}))
+				if err := mutator.SetMessage(last, messages[last]); err != nil {
+					return nil, fmt.Errorf("agent: persist GraphRAG recovery marker: %w", err)
+				}
+				pendingAttached = true
+			}
+		}
+	}
 	if err := transcript.Save(); err != nil {
 		return nil, fmt.Errorf("agent: persist turn: %w", err)
 	}
 
-	graphContent := msg.Content + "\n" + res.FinalContent
-	if l.cfg.GraphMemoryEnqueueWithID != nil {
-		_ = l.cfg.GraphMemoryEnqueueWithID(turnID, key, graphContent)
+	var enqueueErr error
+	if l.cfg.GraphMemoryEnqueueWithIDError != nil {
+		enqueueErr = l.cfg.GraphMemoryEnqueueWithIDError(turnID, key, graphContent)
+	} else if l.cfg.GraphMemoryEnqueueWithID != nil {
+		if !l.cfg.GraphMemoryEnqueueWithID(turnID, key, graphContent) {
+			enqueueErr = errors.New("GraphRAG enqueue rejected")
+		}
 	} else if l.cfg.GraphMemoryEnqueue != nil {
-		_ = l.cfg.GraphMemoryEnqueue(key, graphContent)
+		if !l.cfg.GraphMemoryEnqueue(key, graphContent) {
+			enqueueErr = errors.New("GraphRAG enqueue rejected")
+		}
+	}
+	if enqueueErr != nil {
+		return nil, fmt.Errorf("agent: persist GraphRAG job: %w", enqueueErr)
+	}
+	if pendingAttached {
+		if mutator, ok := transcript.(transcriptMessageMutator); ok {
+			messages := transcript.Messages()
+			last := len(messages) - 1
+			messages[last].DeleteExtra(graphMemoryPendingExtra)
+			if err := mutator.SetMessage(last, messages[last]); err != nil {
+				return nil, fmt.Errorf("agent: clear GraphRAG recovery marker: %w", err)
+			}
+			if err := transcript.Save(); err != nil {
+				return nil, fmt.Errorf("agent: persist GraphRAG ACK marker: %w", err)
+			}
+		}
 	} else if store, release := l.graphStoreForSession(ctx, key); store != nil {
 		// Compatibility fallback for tests/single-store embedders. Production
 		// runtimes provide GraphMemoryEnqueue and do not create free goroutines.

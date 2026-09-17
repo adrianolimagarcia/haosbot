@@ -71,6 +71,7 @@ func (o *graphOutbox) replay() error {
 		return fmt.Errorf("rewind graph outbox: %w", err)
 	}
 	reader := bufio.NewReaderSize(o.file, 64*1024)
+	var offset int64
 	for {
 		line, err := reader.ReadString('\n')
 		trimmed := strings.TrimSpace(line)
@@ -80,11 +81,20 @@ func (o *graphOutbox) replay() error {
 			}
 			var record graphOutboxRecord
 			if decodeErr := json.Unmarshal([]byte(trimmed), &record); decodeErr != nil {
-				// A crash can leave only the final JSON record partially written.
-				// A malformed complete record is corruption and must stop startup;
-				// an unterminated final record is safely discarded.
+				// A crash may leave only the final JSON record partially written.
+				// Remove that tail before the next append; otherwise the next valid
+				// record would be concatenated to the broken JSON forever.
 				if errors.Is(err, io.EOF) {
-					break
+					if truncateErr := o.file.Truncate(offset); truncateErr != nil {
+						return fmt.Errorf("truncate graph outbox crash tail: %w", truncateErr)
+					}
+					if _, seekErr := o.file.Seek(0, io.SeekEnd); seekErr != nil {
+						return fmt.Errorf("seek graph outbox after tail repair: %w", seekErr)
+					}
+					if syncErr := o.file.Sync(); syncErr != nil {
+						return fmt.Errorf("sync graph outbox tail repair: %w", syncErr)
+					}
+					return nil
 				}
 				return fmt.Errorf("decode graph outbox: %w", decodeErr)
 			}
@@ -93,6 +103,7 @@ func (o *graphOutbox) replay() error {
 			}
 			o.apply(record)
 		}
+		offset += int64(len(line))
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -309,6 +320,9 @@ func (o *graphOutbox) Compact() error {
 	if err := os.Rename(tmpPath, o.path); err != nil {
 		return fmt.Errorf("replace graph outbox: %w", err)
 	}
+	if err := syncGraphOutboxDirectory(filepath.Dir(o.path)); err != nil {
+		return fmt.Errorf("sync graph outbox directory: %w", err)
+	}
 	file, err := os.OpenFile(o.path, os.O_APPEND|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("reopen graph outbox: %w", err)
@@ -317,6 +331,15 @@ func (o *graphOutbox) Compact() error {
 	o.acked = make(map[string]struct{})
 	ok = true
 	return nil
+}
+
+func syncGraphOutboxDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func (o *graphOutbox) Close() error {

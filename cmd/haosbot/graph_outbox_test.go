@@ -148,6 +148,20 @@ func TestGraphOutboxCrashTailRecoveryAndIndexerRestart(t *testing.T) {
 	if got := len(recovered.Pending()); got != 1 {
 		t.Fatalf("partial crash tail changed pending count to %d", got)
 	}
+	if ok, err := recovered.Enqueue(graphIndexJob{ID: "after-tail", sessionKey: "s", content: "still writable"}); err != nil || !ok {
+		t.Fatalf("enqueue after crash-tail repair: ok=%v err=%v", ok, err)
+	}
+	if err := recovered.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err = openGraphOutbox(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	if got := len(recovered.Pending()); got != 2 {
+		t.Fatalf("reopened pending=%d after repaired append, want 2", got)
+	}
 	var processed atomic.Int32
 	g := newGraphIndexer(nil, 1, 2, recovered)
 	g.mu.Lock()

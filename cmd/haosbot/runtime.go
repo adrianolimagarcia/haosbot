@@ -131,8 +131,9 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		MaxToolResultChars:    d.MaxToolResultChars,
 		SequentialTools:       false,
 		GraphMemoryForSession:     graphPool.Store,
-		GraphMemoryEnqueue:        graphIndexer.Enqueue,
-		GraphMemoryEnqueueWithID:  graphIndexer.EnqueueWithID,
+		GraphMemoryEnqueue:           graphIndexer.Enqueue,
+		GraphMemoryEnqueueWithID:     graphIndexer.EnqueueWithID,
+		GraphMemoryEnqueueWithIDError: graphIndexer.EnqueueWithIDError,
 		GraphMemoryMaxChars:       6000,
 	})
 	if err != nil {

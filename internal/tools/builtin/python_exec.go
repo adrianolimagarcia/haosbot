@@ -47,8 +47,8 @@ func (t *PythonExecTool) Parameters() json.RawMessage {
 
 func (t *PythonExecTool) Execute(ctx context.Context, args json.RawMessage) (tools.Result, error) {
 	var params struct {
-		Code    string `json:\"code\"`
-		Timeout int    `json:\"timeout\"`
+		Code    string `json:"code"`
+		Timeout int    `json:"timeout"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return tools.Result{}, fmt.Errorf("invalid arguments: %w", err)

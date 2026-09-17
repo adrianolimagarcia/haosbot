@@ -222,9 +222,15 @@ func pgSortedKeys(m map[string]bool) []string {
 // tests
 // --------------------------------------------------------------------------
 
-// TestPromptGuardTemplatesMatchReference proves the Go embed is byte-identical
-// to the templates the reference compares against. Every guard decision rests
-// on these bytes, so a drift here silently changes which sections are withheld.
+// TestPromptGuardTemplatesMatchReference proves the templates the Go guards
+// compare against are byte-identical to the reference's. Every guard decision
+// rests on these bytes, so a drift here silently changes which sections are
+// withheld.
+//
+// The comparison uses prompt.ReferenceTemplate — the shipped template with this
+// port's branding rewrites reversed — not the raw embedded bytes: the port ships
+// a rebranded SOUL.md on purpose, while every guard still has to agree with the
+// reference about the reference's own bytes.
 func TestPromptGuardTemplatesMatchReference(t *testing.T) {
 	doc := loadPromptGuardsDump(t)
 
@@ -234,7 +240,7 @@ func TestPromptGuardTemplatesMatchReference(t *testing.T) {
 			t.Errorf("reference reports template %q as unbundled", name)
 			continue
 		}
-		content, ok := prompt.BundledTemplate(name)
+		content, ok := prompt.ReferenceTemplate(name)
 		if !ok {
 			t.Errorf("template %q is not embedded in the Go port", name)
 			continue
@@ -283,6 +289,31 @@ func TestIsTemplateContentMatchesReference(t *testing.T) {
 	t.Logf("compared %d is_template_content probes (%d true, %d false)", len(doc.IsTemplateContent), trues, falses)
 }
 
+// pgBrandingOnlyDiff reports whether got and want are identical apart from
+// branding lines.
+//
+// The comparison stays structural: the two blocks must have the same number of
+// lines, every differing line must collapse to the same text once branding is
+// normalised, and identical lines are required to be byte-identical. That is
+// strictly stronger than normalising both blocks wholesale, which would also
+// accept a lost or duplicated line.
+func pgBrandingOnlyDiff(got, want string) bool {
+	gotLines := strings.Split(got, "\n")
+	wantLines := strings.Split(want, "\n")
+	if len(gotLines) != len(wantLines) {
+		return false
+	}
+	for i := range gotLines {
+		if gotLines[i] == wantLines[i] {
+			continue
+		}
+		if prompt.NormalizeBranding(gotLines[i]) != prompt.NormalizeBranding(wantLines[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 // TestPromptGuardsMatchReference is the decisive end-to-end differential. For
 // every case it drives the real reference ContextBuilder (via the dumper) and
 // the Go Builder against the SAME workspace, with the SAME channel,
@@ -309,10 +340,15 @@ func TestPromptGuardsMatchReference(t *testing.T) {
 				}
 			}
 
-			if gotBootstrap != c.BootstrapBlock {
+			// The bootstrap block is pure string concatenation, so it is compared
+			// structurally rather than literally: the SHIPPED SOUL template is
+			// rebranded on purpose, and the reference substitutes its own current
+			// SOUL for a legacy one, so that single line can never match. Every
+			// other byte, and the line structure itself, must.
+			if !pgBrandingOnlyDiff(gotBootstrap, c.BootstrapBlock) {
 				t.Errorf("bootstrap block differs (go %d bytes, reference %d bytes):\n--- go ---\n%q\n--- reference ---\n%q",
 					len(gotBootstrap), len(c.BootstrapBlock), gotBootstrap, c.BootstrapBlock)
-			} else if pgSHA256(gotBootstrap) != c.BootstrapSHA256 {
+			} else if gotBootstrap == c.BootstrapBlock && pgSHA256(gotBootstrap) != c.BootstrapSHA256 {
 				t.Errorf("bootstrap block matches but its digest does not; dumper is inconsistent")
 			}
 

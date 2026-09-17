@@ -83,6 +83,12 @@ func isYAMLInt(s string) bool {
 		return allOf(body[2:], isBinaryDigit) && len(body) > 2
 	case strings.HasPrefix(body, "0x"):
 		return allOf(body[2:], isHexDigit) && len(body) > 2
+	case body[0] == '0' && len(body) == 1:
+		// PyYAML's decimal branch is `(?:0|[1-9][0-9_]*)`, so a lone "0" — and
+		// its signed forms "+0"/"-0", which stripYAMLSign has already reduced to
+		// "0" — is a decimal int. Without this case the value fell through to the
+		// string branch and "zero: 0" parsed as the string "0".
+		return true
 	case body[0] == '0' && len(body) > 1:
 		if allOf(body[1:], isOctalDigit) {
 			return true
@@ -133,15 +139,19 @@ func isYAMLFloat(s string) bool {
 		return len(mantissa) > 1 && allOf(mantissa[1:], isDigitOrUnderscore)
 	}
 	if i := strings.IndexByte(mantissa, ':'); i >= 0 {
-		// Sexagesimal float: "1:30.5".
-		if !isSexagesimal(mantissa[:i+1] + "0") {
+		// Sexagesimal float: PyYAML's
+		// `[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*`. The colon groups come FIRST
+		// and the '.' separates the fraction, so "1:30.5" is a float while
+		// "1:30" is an INT — which isYAMLInt resolves to 90. Classifying
+		// "1:30" as a float here made it 90.0 where the reference reports 90.
+		dot := strings.IndexByte(mantissa, '.')
+		if dot < 0 || dot < i {
 			return false
 		}
-		frac := mantissa[i+1:]
-		if frac == "" || !allOf(frac, isDigitOrUnderscore) {
+		if !isSexagesimalFloat(mantissa[:dot]) {
 			return false
 		}
-		return true
+		return allOf(mantissa[dot+1:], isDigitOrUnderscore)
 	}
 	dot := strings.IndexByte(mantissa, '.')
 	if dot < 0 {
@@ -157,17 +167,32 @@ func isYAMLFloat(s string) bool {
 	return allOf(fracPart, isDigitOrUnderscore)
 }
 
-// isSexagesimal checks PyYAML's `[1-9][0-9_]*(:[0-5]?[0-9])+` shape.
-func isSexagesimal(s string) bool {
+// isSexagesimal checks PyYAML's INT sexagesimal shape
+// `[1-9][0-9_]*(:[0-5]?[0-9])+`: the leading component may not start with '0',
+// so "0:30" stays a string.
+func isSexagesimal(s string) bool { return sexagesimalShape(s, false) }
+
+// isSexagesimalFloat checks PyYAML's FLOAT sexagesimal shape
+// `[0-9][0-9_]*(:[0-5]?[0-9])+`, which does allow a leading zero.
+func isSexagesimalFloat(s string) bool { return sexagesimalShape(s, true) }
+
+func sexagesimalShape(s string, allowLeadingZero bool) bool {
 	parts := strings.Split(s, ":")
-	if len(parts) < 2 {
+	if len(parts) < 2 || parts[0] == "" {
 		return false
 	}
-	if !allOf(parts[0], isDigitOrUnderscore) || parts[0] == "" {
+	if !allowLeadingZero && (parts[0][0] < '1' || parts[0][0] > '9') {
+		return false
+	}
+	if !allOf(parts[0], isDigitOrUnderscore) {
 		return false
 	}
 	for _, p := range parts[1:] {
 		if p == "" || len(p) > 2 || !allOf(p, isDecimalDigit) {
+			return false
+		}
+		// Each group is `[0-5]?[0-9]`, so "60" and "99" are not components.
+		if len(p) == 2 && (p[0] < '0' || p[0] > '5') {
 			return false
 		}
 	}
@@ -292,11 +317,18 @@ func parseYAMLInt(s string) any {
 // --------------------------------------------------------------------------
 
 type yamlLine struct {
-	num    int    // 1-based, for diagnostics
-	indent int    // number of leading spaces
-	text   string // content after the indentation
-	blank  bool   // empty or comment-only
-	tabbed bool   // leading whitespace contains a tab (fatal to PyYAML)
+	num         int    // 1-based, for diagnostics
+	indent      int    // number of leading spaces
+	text        string // content after the indentation
+	blank       bool   // empty or comment-only
+	tabbed      bool   // leading whitespace contains a tab (fatal to PyYAML)
+	trailingTab bool   // a tab was trimmed from the end (also fatal to PyYAML)
+	// breakAfter reports whether a line break terminated this line in the
+	// source. It is false only for the final line of a source that does not end
+	// with "\n", which is exactly the case block-scalar chomping needs: PyYAML
+	// clips to a single trailing newline only when the block's last content line
+	// was actually followed by a break.
+	breakAfter bool
 }
 
 type yamlParser struct {
@@ -343,6 +375,11 @@ func splitYAMLLines(src string) []string {
 }
 
 func newYAMLParser(src string) (*yamlParser, error) {
+	normalized := strings.ReplaceAll(strings.ReplaceAll(src, "\r\n", "\n"), "\r", "\n")
+	// splitYAMLLines drops the empty element a trailing newline produces, so the
+	// fact that the source ended with a break has to be captured here or it is
+	// lost — and block-scalar chomping depends on it.
+	srcEndsWithBreak := strings.HasSuffix(normalized, "\n")
 	raw := splitYAMLLines(src)
 	p := &yamlParser{lines: make([]yamlLine, 0, len(raw))}
 	for i, line := range raw {
@@ -359,12 +396,17 @@ func newYAMLParser(src string) (*yamlParser, error) {
 		// decision can be made where the line is actually consumed: a tab-only
 		// line inside a block scalar is content, not an error.
 		tabbed := indent < len(line) && line[indent] == '\t'
+		// TrimRight below removes a trailing tab, which would hide the scanner
+		// error PyYAML raises for "a: 1\t" and 'a: "v"\t'.
+		trailingTab := strings.TrimRight(text, " \t") != strings.TrimRight(text, " ")
 		p.lines = append(p.lines, yamlLine{
-			num:    i + 1,
-			indent: indent,
-			text:   trimmed,
-			blank:  trimmed == "" || strings.HasPrefix(trimmed, "#"),
-			tabbed: tabbed,
+			num:         i + 1,
+			indent:      indent,
+			text:        trimmed,
+			blank:       trimmed == "" || strings.HasPrefix(trimmed, "#"),
+			tabbed:      tabbed,
+			trailingTab: trailingTab,
+			breakAfter:  i < len(raw)-1 || srcEndsWithBreak,
 		})
 	}
 	return p, nil
@@ -375,6 +417,66 @@ func newYAMLParser(src string) (*yamlParser, error) {
 // "found character '\\t' that cannot start any token".
 func tabIndentationError(lineNum int) error {
 	return yamlErr("line %d: found character '\\t' that cannot start any token", lineNum)
+}
+
+// tabOutsideQuotes reports whether text holds a tab PyYAML's scanner would
+// reject.
+//
+// A tab is NOT ordinary separation whitespace in YAML: it is fatal everywhere
+// except inside a quoted scalar or a comment. Verified against PyYAML 6.0.3 —
+// "description:\tvalue", "description: a\tb", "a: [1,\t2]", "a: 1\t" and
+// "-\tvalue" all raise ScannerError, while 'a: "x\ty"' and "a: 1 # x\ty" parse.
+// Block-scalar CONTENT is exempt, but those lines are consumed by
+// parseBlockScalar and never reach this check.
+func tabOutsideQuotes(text string) bool {
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		switch {
+		case inDouble:
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '"' {
+				inDouble = false
+			}
+		case inSingle:
+			if c == '\'' {
+				if i+1 < len(text) && text[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingle = false
+			}
+		default:
+			switch c {
+			case '"':
+				inDouble = true
+			case '\'':
+				inSingle = true
+			case '#':
+				// A '#' opens a comment at the start of the line or after
+				// separation whitespace; the rest of the line is not scanned.
+				if i == 0 || text[i-1] == ' ' || text[i-1] == '\t' {
+					return false
+				}
+			case '\t':
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// checkLineTabs rejects the scanner error for a line that is about to be read as
+// YAML tokens.
+func checkLineTabs(ln yamlLine) error {
+	if ln.tabbed || ln.trailingTab || tabOutsideQuotes(ln.text) {
+		return tabIndentationError(ln.num)
+	}
+	return nil
 }
 
 func (p *yamlParser) skipBlank() {
@@ -434,8 +536,8 @@ func (p *yamlParser) parseNode(indent int) (any, error) {
 		return nil, nil
 	}
 	ln := p.lines[p.pos]
-	if ln.tabbed {
-		return nil, tabIndentationError(ln.num)
+	if err := checkLineTabs(ln); err != nil {
+		return nil, err
 	}
 	if ln.indent < indent {
 		return nil, nil
@@ -478,8 +580,8 @@ func (p *yamlParser) parseMapping(indent int) (any, error) {
 			break
 		}
 		ln := p.lines[p.pos]
-		if ln.tabbed {
-			return nil, tabIndentationError(ln.num)
+		if err := checkLineTabs(ln); err != nil {
+			return nil, err
 		}
 		if ln.indent < indent {
 			break
@@ -875,8 +977,8 @@ func (p *yamlParser) parseSequence(indent int) (any, error) {
 			break
 		}
 		ln := p.lines[p.pos]
-		if ln.tabbed {
-			return nil, tabIndentationError(ln.num)
+		if err := checkLineTabs(ln); err != nil {
+			return nil, err
 		}
 		if ln.indent != indent || !isSequenceEntry(ln.text) {
 			if ln.indent > indent {
@@ -982,21 +1084,20 @@ func (p *yamlParser) parseBlockScalar(header string, keyIndent int) (any, error)
 	if contentIndent > 0 {
 		contentIndent += keyIndent
 	}
+	lastBreakAfter := false
 	for p.pos < len(p.lines) {
 		ln := p.lines[p.pos]
-		if strings.TrimSpace(ln.text) == "" && ln.indent == 0 && ln.blank {
-			// A genuinely empty line still belongs to the block.
+		// Only a genuinely EMPTY line is blank inside a block scalar. A
+		// comment-only line indented past the key is CONTENT: PyYAML returns
+		// 'one\n# not a comment\ntwo\n' for "d: |\n  one\n  # not a comment\n
+		// two\n", so treating '#' as a comment here would silently drop text.
+		if strings.TrimSpace(ln.text) == "" {
 			body = append(body, "")
 			p.pos++
 			continue
 		}
-		if ln.indent <= keyIndent && !ln.blank {
+		if ln.indent <= keyIndent {
 			break
-		}
-		if ln.blank {
-			body = append(body, "")
-			p.pos++
-			continue
 		}
 		if contentIndent == 0 {
 			contentIndent = ln.indent
@@ -1006,6 +1107,7 @@ func (p *yamlParser) parseBlockScalar(header string, keyIndent int) (any, error)
 		}
 		raw := strings.Repeat(" ", ln.indent-contentIndent) + ln.text
 		body = append(body, raw)
+		lastBreakAfter = ln.breakAfter
 		p.pos++
 	}
 	// Trim trailing empty lines, remembering how many there were.
@@ -1013,6 +1115,15 @@ func (p *yamlParser) parseBlockScalar(header string, keyIndent int) (any, error)
 	for len(body) > 0 && body[len(body)-1] == "" {
 		body = body[:len(body)-1]
 		trailing++
+	}
+
+	// totalBreaks is the number of line breaks that follow the block's last
+	// content character, which is what the chomping indicator acts on. Every
+	// trailing empty line contributes one break, and the break that terminated
+	// the last content line contributes one more.
+	totalBreaks := trailing
+	if trailing > 0 || lastBreakAfter {
+		totalBreaks++
 	}
 
 	var text string
@@ -1025,17 +1136,14 @@ func (p *yamlParser) parseBlockScalar(header string, keyIndent int) (any, error)
 	case '-':
 		// strip: no trailing newline
 	case '+':
-		if len(body) > 0 {
-			text += "\n"
-		}
-		text += strings.Repeat("\n", trailing)
+		// keep: every trailing break is preserved
+		text += strings.Repeat("\n", totalBreaks)
 	default:
-		// clip: PyYAML appends a single trailing newline only when the block's
-		// LAST content line ended with a break in the source, i.e. only when
-		// there were trailing empty lines that were trimmed. A block whose last
-		// line is content ("d: |\n  one\n  two") gets NO trailing newline
-		// (verified: yaml.safe_load returns "one\ntwo").
-		if trailing > 0 {
+		// clip: at most one trailing newline, and only when the block actually
+		// ended with a break. Verified against PyYAML 6.0.3:
+		//   "d: |\n  one\n  two"  -> 'one\ntwo'    (no break after "two")
+		//   "d: |\n  one\n  two\n" -> 'one\ntwo\n' (break after "two")
+		if totalBreaks > 0 {
 			text += "\n"
 		}
 	}
@@ -1077,14 +1185,20 @@ func foldBlockLines(lines []string) string {
 // may continue over following, more-indented lines (YAML allows a flow node to
 // span lines).
 func (p *yamlParser) parseFlowValue(first string, lineNum int) (any, error) {
+	// Every caller has ALREADY advanced p.pos past the line that opened the flow
+	// collection, so the line at p.pos is the first CONTINUATION line and must be
+	// appended before advancing again. Advancing first silently dropped it: the
+	// collection lost its first entry AND p.pos ended up inside the collection,
+	// so the caller's indentation checks then failed on a line it should never
+	// have seen ("bad indentation of a mapping entry").
 	buf := first
 	for !flowBalanced(buf) {
-		p.pos++
 		p.skipBlank()
 		if p.pos >= len(p.lines) {
 			return nil, yamlErr("line %d: unexpected end of stream inside a flow collection", lineNum)
 		}
 		buf += " " + p.lines[p.pos].text
+		p.pos++
 	}
 	v, n, err := p.parseFlow(buf, 0)
 	if err != nil {

@@ -14,15 +14,33 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
 	"github.com/adrianolimagarcia/nanobot-go/internal/events"
+	"sync"
 )
 
+// recordingPublisher records the inbound messages a channel publishes.
+//
+// The mutex is required, not defensive: the channel publishes from its own
+// goroutine while the test polls the recording, so reading the slice header
+// unsynchronised is a genuine data race that `go test -race` reports (and CI
+// runs with -race). Every read must go through snapshot().
 type recordingPublisher struct {
+	mu       sync.Mutex
 	messages []core.InboundMessage
 }
 
 func (p *recordingPublisher) PublishInbound(ctx context.Context, msg core.InboundMessage) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.messages = append(p.messages, msg)
 	return nil
+}
+
+// snapshot returns a copy of the recorded messages, safe to read from the test
+// goroutine while the channel keeps publishing.
+func (p *recordingPublisher) snapshot() []core.InboundMessage {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]core.InboundMessage(nil), p.messages...)
 }
 
 func TestBotClient_Methods(t *testing.T) {
@@ -390,8 +408,8 @@ func TestChannel_PollingAndInboundDispatch(t *testing.T) {
 	var received int
 	for i := 0; i < 20; i++ {
 		time.Sleep(100 * time.Millisecond)
-		if len(bus.messages) >= 2 {
-			received = len(bus.messages)
+		if n := len(bus.snapshot()); n >= 2 {
+			received = n
 			break
 		}
 	}
@@ -403,8 +421,10 @@ func TestChannel_PollingAndInboundDispatch(t *testing.T) {
 		t.Fatalf("expected at least 2 inbound messages, got %d", received)
 	}
 
+	recorded := bus.snapshot()
+
 	// Verify command message
-	cmdMsg := bus.messages[0]
+	cmdMsg := recorded[0]
 	if cmdMsg.Content != "/new start fresh session" {
 		t.Errorf("expected command content, got %q", cmdMsg.Content)
 	}
@@ -416,7 +436,7 @@ func TestChannel_PollingAndInboundDispatch(t *testing.T) {
 	}
 
 	// Verify text message
-	textMsg := bus.messages[1]
+	textMsg := recorded[1]
 	if textMsg.Content != "Hello nanobot" {
 		t.Errorf("expected text content, got %q", textMsg.Content)
 	}

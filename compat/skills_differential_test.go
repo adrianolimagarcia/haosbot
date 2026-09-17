@@ -34,6 +34,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/prompt"
 	"github.com/adrianolimagarcia/nanobot-go/internal/pyjson"
@@ -719,12 +720,21 @@ func TestSkillsCasesMatchReference(t *testing.T) {
 				BuiltinSkillsDir: c.BuiltinSkillsDir,
 			}
 			full := skNormalizeRuntime(builder.BuildSystemPrompt(c.Channel, nil, c.ProjectWorkspace, c.IncludeMemory))
-			if full != *c.Prompt {
+			// Rebranding is deliberate, so the shipped SOUL line can never match
+			// the reference's. Discount exactly that line and nothing else.
+			gotPrompt := prompt.NormalizeBranding(full)
+			wantPrompt := prompt.NormalizeBranding(*c.Prompt)
+			if gotPrompt != wantPrompt {
 				t.Errorf("full system prompt differs (go %d bytes, reference %d bytes)\n%s",
-					len(full), len(*c.Prompt), skFirstDifference(full, *c.Prompt))
+					len(gotPrompt), len(wantPrompt), skFirstDifference(gotPrompt, wantPrompt))
 			}
-			if c.PromptLen != nil && len(*c.Prompt) != *c.PromptLen {
-				t.Errorf("dumper prompt length %d does not match its own prompt string length %d", *c.PromptLen, len(*c.Prompt))
+			// prompt_len is a Python len(), i.e. a CODE POINT count, while
+			// len(*c.Prompt) counts BYTES. Comparing the two directly reported a
+			// 44-byte "inconsistency" in the dumper on every case whose prompt
+			// contains multi-byte characters.
+			if c.PromptLen != nil && utf8.RuneCountInString(*c.Prompt) != *c.PromptLen {
+				t.Errorf("dumper prompt length %d does not match its own prompt string length %d code points",
+					*c.PromptLen, utf8.RuneCountInString(*c.Prompt))
 			}
 		})
 	}
@@ -1179,8 +1189,35 @@ func TestSkillsSummaryShapeGuards(t *testing.T) {
 	if !strings.Contains(summary, ".  `") {
 		t.Error("the summary is missing the two spaces before the backticked path")
 	}
-	if strings.Contains(summary, "** \u2014") {
-		t.Error("the summary has no skill name inside the bold markers")
+	// Every entry must carry a NON-EMPTY skill name between its bold markers.
+	//
+	// The guard cannot be a bare `strings.Contains(summary, "** \u2014")`: the
+	// correct format is "- **clawhub** \u2014 desc", where the CLOSING "**" is
+	// itself followed by a space and the em dash, so that substring appears in
+	// every well-formed line and the check failed on correct output. Anchor on
+	// the list bullet and inspect the bold span instead.
+	entries := 0
+	for _, line := range strings.Split(summary, "\n") {
+		if !strings.HasPrefix(line, "- ") {
+			continue
+		}
+		entries++
+		rest := line[2:]
+		if !strings.HasPrefix(rest, "**") {
+			t.Errorf("summary entry is not bold-prefixed: %q", line)
+			continue
+		}
+		end := strings.Index(rest[2:], "**")
+		if end < 0 {
+			t.Errorf("summary entry has no closing bold marker: %q", line)
+			continue
+		}
+		if strings.TrimSpace(rest[2:2+end]) == "" {
+			t.Errorf("summary entry has an empty skill name inside the bold markers: %q", line)
+		}
+	}
+	if entries == 0 {
+		t.Fatal("the summary has no entry lines — the guard is broken, not passing")
 	}
 	if !strings.HasPrefix(summary, "### ") {
 		t.Errorf("the summary does not start with a group header: %q", summary[:skMin(40, len(summary))])

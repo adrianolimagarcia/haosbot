@@ -33,13 +33,16 @@ package prompt
 // load_bundled_template has exactly ONE consumer in the whole reference —
 // agent/context.py — so this package is also its only natural home.
 //
-// The embedded files are byte-for-byte copies of the frozen reference at
-// upstream/nanobot/nanobot/templates/. TestBundledTemplatesMatchReference
-// re-checks their SHA-256 against the checkout so drift cannot go unnoticed.
+// The embedded files are the frozen reference's templates at
+// upstream/nanobot/nanobot/templates/ with the branding rewrites in
+// brandingRewrites applied. TestBundledTemplatesMatchReference reverses those
+// rewrites and re-checks the result against the checkout byte-for-byte, so drift
+// — branded or not — cannot go unnoticed.
 
 import (
 	"embed"
 	"io/fs"
+	"strings"
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/textutil"
 )
@@ -98,6 +101,78 @@ func BundledTemplate(name string) (content string, ok bool) {
 	return string(data), true
 }
 
+// brandingRewrites maps the wording this port SHIPS back to the frozen
+// reference's wording. It is the ONLY permitted difference between a bundled
+// template and its reference counterpart, and it is deliberately an explicit
+// table rather than a hash or a "close enough" comparison: TestBundledTemplatesMatchReference
+// derives the reference bytes from the shipped bytes through this table and
+// compares them byte-for-byte against upstream/nanobot, so any OTHER drift — and
+// any change to the table itself — fails the build.
+//
+// Why the reference bytes still matter after rebranding: IsTemplateContent
+// decides whether a workspace file is still the SHIPPED DEFAULT and should be
+// withheld from the prompt, and the legacy-SOUL substitution compares a
+// workspace SOUL.md against the legacy template. A user who migrated a
+// ~/.nanobot workspace never edited those files, so their bytes are the
+// REFERENCE bytes. Recognising only the branded bytes would silently start
+// injecting "I am nanobot ..." boilerplate into the prompt — the exact
+// behaviour the reference withholds — and would break the differential prompt
+// suite. The substitutions are reversed here instead of duplicating the
+// reference files, so the shipped templates stay the single source of truth.
+var brandingRewrites = []struct{ shipped, reference string }{
+	{
+		shipped:   "I am haosbot 🤖, a autonomous infrastructure AI agent for HAOS.",
+		reference: "I am nanobot 🐈, a personal AI assistant.",
+	},
+}
+
+// brandingPlaceholder is what NormalizeBranding substitutes for both spellings
+// of a branding line, so two prompts that differ ONLY in branding compare equal.
+const brandingPlaceholder = "<BRANDING>"
+
+// NormalizeBranding replaces this port's shipped branding and the frozen
+// reference's wording with one placeholder.
+//
+// It exists for the differential harness: rebranding is deliberate, so a prompt
+// built by this port can never be byte-identical to the reference's. Callers
+// that compare prompts against the reference must use this to discount exactly
+// the branding lines and nothing else — comparing raw bytes would fail on the
+// intended difference, and normalising more broadly would hide real drift.
+func NormalizeBranding(content string) string {
+	for _, rewrite := range brandingRewrites {
+		if rewrite.shipped != "" {
+			content = strings.ReplaceAll(content, rewrite.shipped, brandingPlaceholder)
+		}
+		if rewrite.reference != "" {
+			content = strings.ReplaceAll(content, rewrite.reference, brandingPlaceholder)
+		}
+	}
+	return content
+}
+
+// ReferenceTemplate returns the frozen reference's bytes for a bundled template.
+//
+// ok is false when the template is not bundled, matching BundledTemplate. For a
+// template this port ships unchanged, the result is the bundled content itself.
+func ReferenceTemplate(name string) (string, bool) {
+	content, ok := BundledTemplate(name)
+	if !ok {
+		return "", false
+	}
+	return referenceVariant(content), true
+}
+
+// referenceVariant rewrites shipped branding back to the reference's wording.
+func referenceVariant(content string) string {
+	for _, rewrite := range brandingRewrites {
+		if rewrite.shipped == "" {
+			continue
+		}
+		content = strings.ReplaceAll(content, rewrite.shipped, rewrite.reference)
+	}
+	return content
+}
+
 // IsTemplateContent reports whether content is identical to the bundled
 // template at templatePath, i.e. whether the user has NOT customised it.
 //
@@ -112,10 +187,21 @@ func BundledTemplate(name string) (content string, ok bool) {
 //   - A missing template yields FALSE, not true: "no bundled template to
 //     compare against" means "not a template", so the content IS included. The
 //     direction matters — getting it backwards would silently drop user files.
+//
+// A file matching EITHER the shipped (branded) template or the frozen reference
+// template counts as unmodified. See brandingRewrites for why the reference
+// variant must be recognised.
 func IsTemplateContent(content, templatePath string) bool {
 	tpl, ok := BundledTemplate(templatePath)
 	if !ok {
 		return false
 	}
-	return textutil.PyStrip(content) == textutil.PyStrip(tpl)
+	stripped := textutil.PyStrip(content)
+	if stripped == textutil.PyStrip(tpl) {
+		return true
+	}
+	if ref := referenceVariant(tpl); ref != tpl {
+		return stripped == textutil.PyStrip(ref)
+	}
+	return false
 }

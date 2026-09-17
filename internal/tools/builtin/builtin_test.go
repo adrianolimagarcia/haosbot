@@ -206,7 +206,12 @@ func TestConcurrencyFlags(t *testing.T) {
 func TestRegister(t *testing.T) {
 	reg := tools.NewRegistry()
 	Register(reg, Config{})
-	want := []string{"apply_patch", "read_file", "write_file", "edit_file", "list_dir", "exec", "python_exec"}
+	// Config{} leaves EnforceCapabilities false, which is the compatibility mode:
+	// the historical COMPLETE catalog is registered regardless of the Enable*
+	// switches. a2a_call is part of that catalog (it is a built-in tool like any
+	// other), so it belongs in this list — the expectation used to stop at
+	// python_exec and failed for that reason.
+	want := []string{"apply_patch", "read_file", "write_file", "edit_file", "list_dir", "exec", "python_exec", "a2a_call"}
 	if got := reg.Names(); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("registry names = %v, want %v", got, want)
 	}
@@ -214,6 +219,70 @@ func TestRegister(t *testing.T) {
 		if _, ok := reg.Get(name); !ok {
 			t.Fatalf("registry missing %q", name)
 		}
+	}
+}
+
+// TestRegisterEnforcesCapabilities is the regression test for the capability
+// boundary: with EnforceCapabilities set — which every production composition
+// root does — the Enable* switches are authoritative. Before this was wired, a
+// deployment could set tools.exec.enable=false and still get a working shell,
+// which is worse than offering no switch at all.
+func TestRegisterEnforcesCapabilities(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+		want []string
+	}{
+		{
+			name: "nothing enabled",
+			cfg:  Config{EnforceCapabilities: true},
+			want: []string{},
+		},
+		{
+			name: "files only",
+			cfg:  Config{EnforceCapabilities: true, EnableFiles: true},
+			want: []string{"apply_patch", "read_file", "write_file", "edit_file", "list_dir"},
+		},
+		{
+			name: "exec only",
+			cfg:  Config{EnforceCapabilities: true, EnableExec: true},
+			// python_exec is arbitrary process execution and must follow the
+			// exec switch rather than bypass it.
+			want: []string{"exec", "python_exec"},
+		},
+		{
+			name: "network only",
+			cfg:  Config{EnforceCapabilities: true, EnableNetwork: true},
+			want: []string{"a2a_call"},
+		},
+		{
+			name: "all enabled",
+			cfg: Config{
+				EnforceCapabilities: true,
+				EnableFiles:         true,
+				EnableExec:          true,
+				EnableNetwork:       true,
+			},
+			want: []string{"apply_patch", "read_file", "write_file", "edit_file", "list_dir", "exec", "python_exec", "a2a_call"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := tools.NewRegistry()
+			Register(reg, tc.cfg)
+			if got := reg.Names(); strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("registry names = %v, want %v", got, tc.want)
+			}
+			// Tools() must agree with Register: a divergence between the two is
+			// how a disabled tool reappears on a different code path.
+			fromTools := make([]string, 0, len(tc.want))
+			for _, tool := range Tools(tc.cfg) {
+				fromTools = append(fromTools, tool.Name())
+			}
+			if strings.Join(fromTools, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("Tools() names = %v, want %v", fromTools, tc.want)
+			}
+		})
 	}
 }
 

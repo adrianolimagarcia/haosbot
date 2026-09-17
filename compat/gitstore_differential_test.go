@@ -255,14 +255,25 @@ func freshDir(t *testing.T, path string) {
 // directory would let two runs delete each other's repositories mid-scenario.
 func gitStoreScratchSuffix() string { return fmt.Sprintf("%d", os.Getpid()) }
 
+// gitStoreScratchRoot returns a directory OUTSIDE any git repository.
+//
+// The reference's GitStore.init() refuses to initialize a workspace that sits
+// inside an existing repository (utils/gitstore.py:197 _is_inside_git_repo walks
+// up looking for .git), so a scratch directory under the project checkout — which
+// is what <root>/.tools/tmp is — makes every scenario workspace "already inside a
+// repository": no .git is created and the scenario collapses. The temporary
+// directory is the only safe default; the "workspace inside another repository"
+// scenario builds its own .git on purpose.
+func gitStoreScratchRoot() string { return os.TempDir() }
+
 // useScratchDir tells the reference dumper where to write its scenario
 // repositories and returns that directory. The dumper runs as a child process
 // and inherits this environment, so the value identifies the repositories
 // produced by *this* process's dumper run — reading them from a fixed path would
 // risk comparing against a stale directory left by an earlier run.
-func useScratchDir(t *testing.T, root string) string {
+func useScratchDir(t *testing.T, _ string) string {
 	t.Helper()
-	dir := filepath.Join(root, ".tools", "tmp", "gitstore-ref-"+gitStoreScratchSuffix())
+	dir := filepath.Join(gitStoreScratchRoot(), "haosbot-gitstore-ref-"+gitStoreScratchSuffix())
 	// Remove anything left behind first: the checks below must fail loudly if the
 	// dumper does not actually produce the repositories, rather than compare
 	// against a directory an earlier run left there.
@@ -275,9 +286,12 @@ func useScratchDir(t *testing.T, root string) string {
 	return dir
 }
 
-// goScratchDir is where the port's own scenario repositories live.
-func goScratchDir(root string) string {
-	dir := filepath.Join(root, ".tools", "tmp", "gitstore-go-"+gitStoreScratchSuffix())
+// goScratchDir is where the port's own scenario repositories live. It must be
+// outside the project checkout for the same reason as gitStoreScratchRoot: the
+// port mirrors the reference's nested-repository guard, so a fixture inside this
+// repository would be declined and produce no .git at all.
+func goScratchDir(_ string) string {
+	dir := filepath.Join(gitStoreScratchRoot(), "haosbot-gitstore-go-"+gitStoreScratchSuffix())
 	_ = os.MkdirAll(dir, 0o777)
 	return dir
 }

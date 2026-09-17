@@ -260,10 +260,14 @@ func runDumper(t *testing.T) []byte {
 func TestDefaultsMatchPythonReference(t *testing.T) {
 	ref := loadReference(t)
 
-	cfg, err := config.LoadDefault()
-	if err != nil {
-		t.Fatalf("LoadDefault: %v", err)
-	}
+	// DefaultConfig() is the hermetic counterpart of the reference's
+	// AgentDefaults(): both are the DECLARED field defaults with the timezone
+	// validator applied, and neither reads a file. LoadDefault() would instead
+	// merge the developer's real ~/.haosbot/config.json (or the legacy
+	// ~/.nanobot/config.json), so this test would compare a local configuration
+	// against the reference's defaults and pass only on a machine that happens to
+	// have no config file.
+	cfg := config.DefaultConfig()
 	d := cfg.Agents.Defaults
 
 	got := map[string]any{
@@ -312,10 +316,9 @@ func TestDefaultsMatchPythonReference(t *testing.T) {
 func TestSerializationMatchesPythonReference(t *testing.T) {
 	ref := loadReference(t)
 
-	cfg, err := config.LoadDefault()
-	if err != nil {
-		t.Fatalf("LoadDefault: %v", err)
-	}
+	// Hermetic for the same reason as TestDefaultsMatchPythonReference: the
+	// reference serializes AgentDefaults(), never a loaded config file.
+	cfg := config.DefaultConfig()
 
 	raw, err := json.Marshal(cfg.Agents.Defaults)
 	if err != nil {

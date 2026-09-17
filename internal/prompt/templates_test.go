@@ -35,15 +35,18 @@ var bundledTemplateNames = []string{
 	"prompts/README.md",
 }
 
-// TestBundledTemplatesMatchReference is the anti-drift check: the embedded
-// bytes must be identical to the frozen reference's templates/, because
-// IsTemplateContent decides whether to WITHHOLD a user's file from the prompt
-// by comparing against them. A one-byte drift here would silently start
-// including (or excluding) content the reference includes (or excludes), and
-// nothing else in the test suite would notice.
+// TestBundledTemplatesMatchReference is the anti-drift check: reversing this
+// port's branding rewrites must reproduce the frozen reference's templates/
+// byte-for-byte, because IsTemplateContent decides whether to WITHHOLD a user's
+// file from the prompt by comparing against them. A one-byte drift here would
+// silently start including (or excluding) content the reference includes (or
+// excludes), and nothing else in the test suite would notice.
 //
-// It compares SHA-256 rather than only bytes so the failure message names the
-// two digests, which is what makes "which side moved?" answerable.
+// The comparison goes through ReferenceTemplate rather than the raw embedded
+// bytes so the deliberate rebranding of SOUL.md is allowed while every other
+// byte stays pinned. It compares SHA-256 rather than only bytes so the failure
+// message names the two digests, which is what makes "which side moved?"
+// answerable.
 func TestBundledTemplatesMatchReference(t *testing.T) {
 	refDir := filepath.Join(repoRootForTest(t), "upstream", "nanobot", "nanobot", "templates")
 	if _, err := os.Stat(refDir); err != nil {
@@ -64,11 +67,27 @@ func TestBundledTemplatesMatchReference(t *testing.T) {
 			continue
 		}
 
-		if embedded != string(raw) {
-			gotSum := sha256.Sum256([]byte(embedded))
+		// Reversing the branding must reproduce the reference bytes exactly...
+		derived, ok := ReferenceTemplate(name)
+		if !ok {
+			t.Errorf("template %q has no reference variant", name)
+			continue
+		}
+		if derived != string(raw) {
+			gotSum := sha256.Sum256([]byte(derived))
 			wantSum := sha256.Sum256(raw)
-			t.Errorf("template %q differs from the reference:\n  embedded sha256 = %s\n  reference sha256 = %s",
+			t.Errorf("template %q differs from the reference after reversing branding:\n  derived sha256   = %s\n  reference sha256 = %s",
 				name, hex.EncodeToString(gotSum[:]), hex.EncodeToString(wantSum[:]))
+		}
+
+		// ...and the predicate must accept BOTH the shipped bytes and the
+		// reference bytes, so a migrated ~/.nanobot workspace is still treated as
+		// unmodified instead of having its boilerplate injected into the prompt.
+		if !IsTemplateContent(embedded, name) {
+			t.Errorf("IsTemplateContent does not recognise the shipped bytes of %q", name)
+		}
+		if !IsTemplateContent(string(raw), name) {
+			t.Errorf("IsTemplateContent does not recognise the reference bytes of %q", name)
 		}
 	}
 }

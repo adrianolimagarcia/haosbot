@@ -135,7 +135,17 @@ func (s *Session) CommitSummaryCheckpoint(summary string, insertAt *int, lastAct
 	}
 	marker.SetExtra(HiddenHistoryMeta, json.RawMessage("true"))
 
-	active := now
+	// The reference writes `(last_active or self.updated_at).isoformat()`, so a
+	// nil last_active means "this session's updated_at" — NOT the current time.
+	// Using the wall clock here made the checkpoint metadata depend on when the
+	// call ran instead of on the session, which the differential harness caught:
+	// the reference reported the updated_at loaded from the file while this port
+	// reported a live timestamp.
+	//
+	// Neither insertMessageLocked nor setMetaRawLocked touches updatedAt, which
+	// is what makes reading it here equivalent to the reference reading
+	// self.updated_at after its raw list insert.
+	active := s.updatedAt
 	if lastActive != nil {
 		active = *lastActive
 	}

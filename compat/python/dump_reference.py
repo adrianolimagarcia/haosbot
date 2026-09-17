@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -929,7 +930,23 @@ def dump_pystr() -> dict:
 # can find again (instead of guessing this process's pid). The recorded values
 # never contain these paths (they are normalised away by _norm), so the directory
 # name does not affect the comparison.
-GITSTORE_TMP = Path(os.environ.get("GITSTORE_SCRATCH_DIR") or ROOT / ".tools" / "tmp" / f"gitstore-ref-{os.getpid()}")
+#
+# WHERE THE DEFAULT LIVES MATTERS. The reference's GitStore.init() calls
+# _is_inside_git_repo(), which walks UP from the workspace and declines to
+# initialize when any ancestor holds a .git entry. A scratch directory inside the
+# project checkout — which is what ROOT/.tools/tmp is — therefore makes EVERY
+# scenario workspace "already inside a repository": init() writes no .git at all
+# and the dump dies reading .git/info/exclude. The default must be outside any
+# repository, and the "workspace inside another repository" case below still
+# exercises the guard on purpose with its own hand-made .git.
+def _gitstore_scratch_dir() -> Path:
+    override = os.environ.get("GITSTORE_SCRATCH_DIR")
+    if override:
+        return Path(override)
+    return Path(tempfile.gettempdir()) / f"haosbot-gitstore-ref-{os.getpid()}"
+
+
+GITSTORE_TMP = _gitstore_scratch_dir()
 GITSTORE_WS = GITSTORE_TMP / "ws"
 GITSTORE_UNBORN_WS = GITSTORE_TMP / "unborn"
 GITSTORE_OUTSIDE = GITSTORE_TMP / "outside.txt"

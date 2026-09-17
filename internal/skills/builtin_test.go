@@ -325,6 +325,42 @@ func TestYAMLSubsetKnownValues(t *testing.T) {
 		{"bool off", "always: off", `{"always": false}`},
 		{"int", "count: 42", `{"count": 42}`},
 		{"negative int", "count: -7", `{"count": -7}`},
+		// PyYAML's decimal int branch is `(?:0|[1-9][0-9_]*)`, so a lone "0" is an
+		// int. Without that case it fell through to the string branch and parsed
+		// as "0".
+		{"lone zero is an int", "zero: 0", `{"zero": 0}`},
+		{"signed zero is an int", "zero: +0", `{"zero": 0}`},
+		// Sexagesimal: PyYAML's int shape is `[1-9][0-9_]*(:[0-5]?[0-9])+` and its
+		// float shape adds a trailing `\.[0-9_]*`. "1:30" is therefore an INT
+		// (90), not the float 90.0, and a leading zero or an out-of-range
+		// component makes the whole scalar a string.
+		{"sexagesimal int", "t: 1:30", `{"t": 90}`},
+		{"sexagesimal multi component", "t: 2:03:04", `{"t": 7384}`},
+		{"sexagesimal single digit component", "t: 1:5", `{"t": 65}`},
+		{"sexagesimal float", "t: 1:30.5", `{"t": 90.5}`},
+		{"sexagesimal leading zero is a string", "t: 0:30", `{"t": "0:30"}`},
+		{"sexagesimal bad component is a string", "t: 1:99", `{"t": "1:99"}`},
+		{"sexagesimal out of range is a string", "t: 1:60", `{"t": "1:60"}`},
+		// A flow collection may span lines. parseFlowValue advanced p.pos BEFORE
+		// appending the line it was looking at, so it dropped the first
+		// continuation line and left p.pos inside the collection — the caller then
+		// reported "bad indentation of a mapping entry" on a line it should never
+		// have seen.
+		{
+			"flow mapping spanning lines",
+			"name: fm\nmetadata: {\n  \"nanobot\": {\n    \"always\": true\n  }\n}\n",
+			`{"metadata": {"nanobot": {"always": true}}, "name": "fm"}`,
+		},
+		{
+			"flow sequence spanning lines",
+			"name: fs\nbins: [\n  gh,\n  tmux\n]\n",
+			`{"bins": ["gh", "tmux"], "name": "fs"}`,
+		},
+		{
+			"flow mapping spanning lines inside a nested mapping",
+			"outer:\n  inner: {\n    a: 1\n  }\n",
+			`{"outer": {"inner": {"a": 1}}}`,
+		},
 		{"octal", "mode: 0755", `{"mode": 493}`},
 		{"hex", "mode: 0x1f", `{"mode": 31}`},
 		{"float", "ratio: 1.5", `{"ratio": 1.5}`},
@@ -333,10 +369,31 @@ func TestYAMLSubsetKnownValues(t *testing.T) {
 		{"null tilde", "x: ~", `{"x": null}`},
 		{"null empty", "x:", `{"x": null}`},
 		{"empty string quoted", `x: ""`, `{"x": ""}`},
-		{"literal block", "d: |\n  one\n  two", `{"d": "one\ntwo\n"}`},
+		// Block scalars: the chomping indicator decides the trailing newline,
+		// and CLIP (the default) only adds one when the source had a line break
+		// after the last content line. Every want below was checked against
+		// PyYAML 6.0.3 directly — yaml.safe_load("d: |\n  one\n  two") is
+		// {'d': 'one\ntwo'} with NO trailing newline, because the source string
+		// ends at "two". Writing the newline-less expectation as if it were the
+		// clipped form is the easy mistake here.
+		{"literal block", "d: |\n  one\n  two", `{"d": "one\ntwo"}`},
 		{"literal strip", "d: |-\n  one\n  two", `{"d": "one\ntwo"}`},
-		{"folded block", "d: >\n  one\n  two", `{"d": "one two\n"}`},
+		{"folded block", "d: >\n  one\n  two", `{"d": "one two"}`},
 		{"folded strip", "d: >-\n  one\n  two", `{"d": "one two"}`},
+		// Same blocks WITH the final line break, so the clip branch that adds
+		// the trailing newline is exercised rather than assumed.
+		{"literal block final break", "d: |\n  one\n  two\n", `{"d": "one\ntwo\n"}`},
+		{"folded block final break", "d: >\n  one\n  two\n", `{"d": "one two\n"}`},
+		{"literal clip trims extra blanks", "d: |\n  one\n  two\n\n", `{"d": "one\ntwo\n"}`},
+		{"literal keep retains extra blanks", "d: |+\n  one\n  two\n\n", `{"d": "one\ntwo\n\n"}`},
+		{"literal keep without final break", "d: |+\n  one\n  two", `{"d": "one\ntwo"}`},
+		// Inside a block scalar a '#' line indented past the key is CONTENT, not
+		// a comment: PyYAML returns 'one\n# not a comment\ntwo\n'.
+		{"literal block keeps hash lines", "d: |\n  one\n  # not a comment\n  two\n", `{"d": "one\n# not a comment\ntwo\n"}`},
+		// A blank line inside a block survives as an empty line.
+		{"literal block keeps blank line", "d: |\n  one\n\n  two\n", `{"d": "one\n\ntwo\n"}`},
+		// Extra indentation past the detected content indent is preserved.
+		{"literal block preserves deeper indent", "d: |\n  one\n    two\n", `{"d": "one\n  two\n"}`},
 		{"duplicate keys last wins", "a: 1\na: 2", `{"a": 2}`},
 		{"numeric key stringified", "1: one", `{"1": "one"}`},
 		{"bool key stringified", "true: yes", `{"True": true}`},
@@ -383,6 +440,18 @@ func TestYAMLSubsetRejectsUnsupported(t *testing.T) {
 		{"two documents", "a: 1\n---\nb: 2"},
 		{"bad indentation", "a: 1\n  b: 2"},
 		{"line with no colon", "just a line\nand another"},
+		// A tab is not separation whitespace in YAML: it is a scanner error
+		// everywhere except inside a quoted scalar or a comment. Each case below
+		// was checked against PyYAML 6.0.3, which raises ScannerError for all of
+		// them while accepting 'a: "x\ty"' and "a: 1 # x\ty".
+		{"tab immediately after colon", "description:\tTabbed value"},
+		{"space then tab after colon", "description: \tTabbed value"},
+		{"tab inside a plain value", "description: a\tb"},
+		{"tab between key and colon", "a\tb: 1"},
+		{"tab inside a flow collection", "a: [1,\t2]"},
+		{"tab after a quoted scalar", "a: \"v\"\t"},
+		{"tab before a quoted scalar", "a:\t\"v\""},
+		{"tab after a flow collection", "a: [1, 2]\t"},
 	}
 	for _, tc := range unsupported {
 		t.Run(tc.name, func(t *testing.T) {

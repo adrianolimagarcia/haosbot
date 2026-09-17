@@ -228,6 +228,11 @@ func parseISOFormatDate(b []byte, length int, unbounded bool, year, month, day *
 			return -3
 		}
 
+		// The default applies only when the day component is ABSENT ("2026-W01").
+		// When it is present it must be read into a ZEROED accumulator:
+		// parseDigits accumulates (*v = *v*10 + digit), so seeding it with 1 made
+		// every week date parse as 11..17, fail isoToYMD's 1..7 range check, and
+		// reject the entire YYYY-Www-D form.
 		isoDay := 1
 		if unbounded || p < length {
 			if usesSeparator {
@@ -236,6 +241,7 @@ func parseISOFormatDate(b []byte, length int, unbounded bool, year, month, day *
 				}
 				p++
 			}
+			isoDay = 0
 			p, ok = parseDigits(b, p, &isoDay, 1)
 			if !ok {
 				return -4

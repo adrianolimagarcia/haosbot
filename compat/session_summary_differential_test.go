@@ -219,12 +219,30 @@ func TestSessionSummaryFromMetadataDifferential(t *testing.T) {
 	// The dumper's fromisoformat section must agree with what
 	// session_summary_from_metadata did with the same string, otherwise the
 	// corpus is not exercising what it claims to.
+	//
+	// The dumper nests the corpus as {"accepted": N, "cases": [...]}; the list is
+	// what maps a value to its datetime.fromisoformat verdict. Reading the section
+	// as a list directly failed before a single case was compared, so the whole
+	// test was reporting a harness-shape error rather than a port divergence.
+	isoSection := ssMap(t, doc["fromisoformat"])
+	isoCases, ok := isoSection["cases"].([]any)
+	if !ok {
+		t.Fatalf("dumper section fromisoformat.cases is missing or not a list")
+	}
 	isoByValue := map[string]bool{}
-	for _, raw := range sessionSummarySection(t, doc, "fromisoformat") {
+	isoAccepted := 0
+	for _, raw := range isoCases {
 		entry := ssMap(t, raw)
 		value, _ := entry["s"].(string)
-		accepted, _ := entry["ok"].(bool)
-		isoByValue[value] = accepted
+		acceptedValue, _ := entry["ok"].(bool)
+		isoByValue[value] = acceptedValue
+		if acceptedValue {
+			isoAccepted++
+		}
+	}
+	if declared, err := ssJSONInt(isoSection["accepted"]); err != nil || declared != isoAccepted {
+		t.Errorf("dumper fromisoformat accepted = %v, but the corpus contains %d accepted values",
+			isoSection["accepted"], isoAccepted)
 	}
 
 	accepted, rejected, nonNil := 0, 0, 0
@@ -376,13 +394,13 @@ func TestCommitSummaryCheckpointDifferential(t *testing.T) {
 		}
 
 		// (a) In-memory transcript, marker timestamp normalised.
-		gotMessages := ssMarshalMessages(t, sess.Messages())
-		wantMessages := ssNormalizeMarkerTimestamps(t, sessionSummarySection(t, entry, "messages"))
-		if !reflect.DeepEqual(gotMessages, wantMessages) {
-			t.Errorf("%s: messages differ\n got: %s\nwant: %s",
-				id, ssJSONString(gotMessages), ssJSONString(wantMessages))
-		}
-		for _, m := range gotMessages {
+		//
+		// The normalisation must be applied to BOTH sides. The marker's timestamp
+		// comes from datetime.now() in the reference and from the Go clock here,
+		// so leaving the Go side raw compared a live timestamp against the
+		// dumper's "<MARKER_TS>" placeholder and failed on every case.
+		rawMessages := ssMarshalMessages(t, sess.Messages())
+		for _, m := range rawMessages {
 			fields := m.(map[string]any)
 			if fields["content"] != sessionSummaryContinuation {
 				continue
@@ -392,6 +410,12 @@ func TestCommitSummaryCheckpointDifferential(t *testing.T) {
 				t.Errorf("%s: marker timestamp %q is not datetime.isoformat() shaped", id, ts)
 			}
 			markerShapeChecked++
+		}
+		gotMessages := ssNormalizeMarkerTimestamps(t, rawMessages)
+		wantMessages := ssNormalizeMarkerTimestamps(t, sessionSummarySection(t, entry, "messages"))
+		if !reflect.DeepEqual(gotMessages, wantMessages) {
+			t.Errorf("%s: messages differ\n got: %s\nwant: %s",
+				id, ssJSONString(gotMessages), ssJSONString(wantMessages))
 		}
 
 		// (b) last_archived, including the unclamped out-of-range values.

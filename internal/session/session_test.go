@@ -963,3 +963,59 @@ func TestMultimodalContentAndHiddenMarkersPreserved(t *testing.T) {
 		}
 	}
 }
+
+// TestFromISOFormatAcceptsWeekDates pins the ISO 8601 forms
+// datetime.fromisoformat accepts beyond the plain YYYY-MM-DD one. Ordinal dates
+// ("2026-002") are NOT among them, even though ISO 8601 defines them.
+//
+// The week-date form is the regression: parseISOFormatDate seeded its day
+// accumulator with the DEFAULT (1) and then let parseDigits accumulate into it,
+// so "2026-W01-1" parsed as day 11 and every YYYY-Www-D value was rejected —
+// silently replacing a stored last_active with the fallback. Every expectation
+// below was produced by running the frozen reference's
+// datetime.fromisoformat (Python 3.14) on the same string.
+func TestFromISOFormatAcceptsWeekDates(t *testing.T) {
+	accepted := []string{
+		"2026-W01-1",
+		"2026W011",
+		"2026-W53-1",
+		"2026-W53-7",
+		"2020-W53-1",
+		"2015-W53-7",
+		"0001-W01-1",
+		"9999-W52-5",
+		"2026-W01-1X03:04:05",
+		"2026W011T03:04:05",
+		"2026-01-02",
+		"2026-01-02T03:04:05",
+		"20260102",
+	}
+	for _, s := range accepted {
+		if !fromisoformatOK(s) {
+			t.Errorf("fromisoformatOK(%q) = false; datetime.fromisoformat accepts it", s)
+		}
+	}
+
+	rejected := []string{
+		"2026-W01-8", // ISO weekday is 1..7
+		"2026-W00-1", // ISO week is 1..53
+		"2026-W54-1", // ISO week is 1..53
+		"2026-W01-0", // ISO weekday is 1..7
+		"2026-13-01", // month out of range
+		"2026-02-30", // day out of range for the month
+		"2025-02-29", // not a leap year
+		"2026-W0-1",  // week component must be two digits
+		"not-a-date", // not a date at all
+		"2026",       // too short
+		// Ordinal dates are NOT part of datetime.fromisoformat's grammar, even
+		// though ISO 8601 defines them. Verified against Python 3.14 rather than
+		// assumed: fromisoformat("2026-002") raises ValueError.
+		"2026-002",
+		"2026002",
+	}
+	for _, s := range rejected {
+		if fromisoformatOK(s) {
+			t.Errorf("fromisoformatOK(%q) = true; datetime.fromisoformat rejects it", s)
+		}
+	}
+}

@@ -1193,41 +1193,101 @@ func TestLegacyKeyMigration(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestPathHelpers checks path resolution against a controlled HOME.
+//
+// The branded helpers prefer ~/.haosbot and fall back to the legacy ~/.nanobot
+// installation, which is the compatibility contract this port advertises: a
+// machine that already has ~/.nanobot keeps using it, a fresh machine gets
+// ~/.haosbot, and a machine with both prefers ~/.haosbot. The previous version of
+// this test asserted ~/.nanobot for every helper and so failed against the
+// documented behaviour — and covered none of the fallback branches.
 func TestPathHelpers(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	t.Run("fresh install prefers ~/.haosbot", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
 
-	cases := []struct {
-		name string
-		got  string
-		want string
-	}{
-		{"DefaultConfigPath", DefaultConfigPath(), filepath.Join(home, ".nanobot", "config.json")},
-		{"DefaultDataDir", DefaultDataDir(), filepath.Join(home, ".nanobot")},
-		{"DefaultWorkspace", DefaultWorkspace(), filepath.Join(home, ".nanobot", "workspace")},
-		{"SessionsDir", SessionsDir(), filepath.Join(home, ".nanobot", "sessions")},
-		{"CronDir", CronDir(), filepath.Join(home, ".nanobot", "cron")},
-		{"LogsDir", LogsDir(), filepath.Join(home, ".nanobot", "logs")},
-		{"WebUIDir", WebUIDir(), filepath.Join(home, ".nanobot", "webui")},
-		{"MediaDir(empty)", MediaDir(""), filepath.Join(home, ".nanobot", "media")},
-		{"MediaDir(telegram)", MediaDir("telegram"), filepath.Join(home, ".nanobot", "media", "telegram")},
-		{"CLIHistoryPath", CLIHistoryPath(), filepath.Join(home, ".nanobot", "history", "cli_history")},
-	}
-	for _, tc := range cases {
-		if tc.got != tc.want {
-			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		cases := []struct {
+			name string
+			got  string
+			want string
+		}{
+			{"DefaultConfigPath", DefaultConfigPath(), filepath.Join(home, ".haosbot", "config.json")},
+			{"DefaultDataDir", DefaultDataDir(), filepath.Join(home, ".haosbot")},
+			{"DefaultWorkspace", DefaultWorkspace(), filepath.Join(home, ".haosbot", "workspace")},
+			{"CronDir", CronDir(), filepath.Join(home, ".haosbot", "cron")},
+			{"LogsDir", LogsDir(), filepath.Join(home, ".haosbot", "logs")},
+			{"WebUIDir", WebUIDir(), filepath.Join(home, ".haosbot", "webui")},
+			{"MediaDir(empty)", MediaDir(""), filepath.Join(home, ".haosbot", "media")},
+			{"MediaDir(telegram)", MediaDir("telegram"), filepath.Join(home, ".haosbot", "media", "telegram")},
+			// These two are ports of the reference's LEGACY-global helpers
+			// (paths.py get_legacy_sessions_dir / get_cli_history_path), so they
+			// keep the ~/.nanobot spelling by design.
+			{"SessionsDir", SessionsDir(), filepath.Join(home, ".nanobot", "sessions")},
+			{"CLIHistoryPath", CLIHistoryPath(), filepath.Join(home, ".nanobot", "history", "cli_history")},
 		}
-		if !filepath.IsAbs(tc.got) {
-			t.Errorf("%s must be absolute, got %q", tc.name, tc.got)
+		for _, tc := range cases {
+			if tc.got != tc.want {
+				t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+			}
+			if !filepath.IsAbs(tc.got) {
+				t.Errorf("%s must be absolute, got %q", tc.name, tc.got)
+			}
 		}
-	}
 
-	// The helpers must be pure: no directory may be created as a side effect.
-	for _, dir := range []string{DefaultDataDir(), DefaultWorkspace(), SessionsDir(), CronDir(), LogsDir(), WebUIDir(), MediaDir("x")} {
-		if _, err := os.Stat(dir); err == nil {
-			t.Errorf("path helper created %q as a side effect", dir)
+		// The helpers must be pure: no directory may be created as a side effect.
+		for _, dir := range []string{DefaultDataDir(), DefaultWorkspace(), SessionsDir(), CronDir(), LogsDir(), WebUIDir(), MediaDir("x")} {
+			if _, err := os.Stat(dir); err == nil {
+				t.Errorf("path helper created %q as a side effect", dir)
+			}
 		}
-	}
+	})
+
+	t.Run("legacy install falls back to ~/.nanobot", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		legacy := filepath.Join(home, ".nanobot")
+		if err := os.MkdirAll(filepath.Join(legacy, "workspace"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(legacy, "config.json"), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if got, want := DefaultConfigPath(), filepath.Join(legacy, "config.json"); got != want {
+			t.Errorf("DefaultConfigPath = %q, want the legacy path %q", got, want)
+		}
+		if got, want := DefaultDataDir(), legacy; got != want {
+			t.Errorf("DefaultDataDir = %q, want the legacy dir %q", got, want)
+		}
+		if got, want := DefaultWorkspace(), filepath.Join(legacy, "workspace"); got != want {
+			t.Errorf("DefaultWorkspace = %q, want the legacy workspace %q", got, want)
+		}
+		if got, want := CronDir(), filepath.Join(legacy, "cron"); got != want {
+			t.Errorf("CronDir = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("both present prefers ~/.haosbot", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		for _, dir := range []string{
+			filepath.Join(home, ".nanobot", "workspace"),
+			filepath.Join(home, ".haosbot", "workspace"),
+		} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(home, ".nanobot", "config.json"), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if got, want := DefaultConfigPath(), filepath.Join(home, ".haosbot", "config.json"); got != want {
+			t.Errorf("DefaultConfigPath = %q, want %q", got, want)
+		}
+		if got, want := DefaultWorkspace(), filepath.Join(home, ".haosbot", "workspace"); got != want {
+			t.Errorf("DefaultWorkspace = %q, want %q", got, want)
+		}
+	})
 }
 
 // TestWorkspacePathExpandsTilde checks Config.WorkspacePath and that the field

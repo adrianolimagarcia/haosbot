@@ -97,6 +97,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 
 	messageBus := bus.New(bus.Options{})
 	graphPool := newGraphStorePool(filepath.Join(config.DefaultDataDir(), "graph-sessions"))
+	graphIndexer := newGraphIndexer(graphPool, 2, 64)
 
 	loop, err := agent.NewLoop(agent.LoopConfig{
 		Bus:                   messageBus,
@@ -113,9 +114,13 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		MaxToolResultChars:    d.MaxToolResultChars,
 		SequentialTools:       false,
 		GraphMemoryForSession: graphPool.Store,
+		GraphMemoryEnqueue:    graphIndexer.Enqueue,
 		GraphMemoryMaxChars:   6000,
 	})
 	if err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		graphIndexer.Close(shutdownCtx)
+		cancel()
 		_ = graphPool.Close()
 		messageBus.Close()
 		return nil, fmt.Errorf("build agent loop: %w", err)
@@ -127,6 +132,9 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		loop:  loop,
 		store: store,
 		closeF: func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			graphIndexer.Close(shutdownCtx)
+			cancel()
 			_ = graphPool.Close()
 			messageBus.Close()
 		},

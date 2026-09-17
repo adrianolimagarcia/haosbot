@@ -17,8 +17,8 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/command"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
+	"github.com/adrianolimagarcia/nanobot-go/internal/netpolicy"
 	"github.com/adrianolimagarcia/nanobot-go/internal/provider"
-	"github.com/adrianolimagarcia/nanobot-go/internal/provider/openai"
 )
 
 type Server struct {
@@ -73,7 +73,8 @@ func (s *Server) Start(addr string) error {
 		_, _ = w.Write([]byte(`{"status":"ok","runtime":"haosbot"}`))
 	})
 
-	// POST /api/fetch-models (fetch models directly from any remote endpoint like Ollama/vLLM/OpenAI)
+	// POST /api/fetch-models. The URL is untrusted input and therefore goes
+	// through the same SSRF policy used by network-capable tools.
 	mux.HandleFunc("/api/fetch-models", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -91,8 +92,14 @@ func (s *Server) Start(addr string) error {
 		if baseURL == "" {
 			baseURL = "https://api.openai.com/v1"
 		}
-		url := baseURL + "/models"
-		httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+		targetURL := baseURL + "/models"
+		policy := netpolicy.Policy{Allowlist: s.cfg.Tools.SSRFWhitelist}
+		if _, err := netpolicy.ValidateURL(r.Context(), targetURL, policy); err != nil {
+			http.Error(w, fmt.Sprintf("outbound URL blocked: %v", err), http.StatusForbidden)
+			return
+		}
+
+		httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL, nil)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -102,16 +109,27 @@ func (s *Server) Start(addr string) error {
 			apiKey = "no-key"
 		}
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-		client := &http.Client{Timeout: 10 * time.Second}
+		client := netpolicy.NewClient(10*time.Second, policy)
 		resp, err := client.Do(httpReq)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Falha ao conectar: %v", err), http.StatusBadGateway)
 			return
 		}
 		defer resp.Body.Close()
+
+		limit := netpolicy.MaxResponseBytes(policy)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Falha ao ler resposta: %v", err), http.StatusBadGateway)
+			return
+		}
+		if int64(len(body)) > limit {
+			http.Error(w, "Remote response exceeded size limit", http.StatusBadGateway)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		_, _ = w.Write(body)
 	})
 
 	// POST /api/restart (graceful restart of nanobot agent)
@@ -121,69 +139,46 @@ func (s *Server) Start(addr string) error {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"restarting","message":"Reiniciando nanobot gateway..."}`))
+		_, _ = w.Write([]byte(`{"status":"restarting","message":"Reiniciando haosbot gateway..."}`))
 		go func() {
 			time.Sleep(500 * time.Millisecond)
 			os.Exit(0) // Systemd Restart=always will immediately restart with fresh state
 		}()
 	})
 
-	// GET & POST /api/config (save and read config directly from WebUI!)
+	// GET & POST /api/config. GET is redacted; POST is a typed, preserving patch
+	// and intentionally requires restart instead of performing a half-hot-reload.
 	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
 		configPath := filepath.Join(os.Getenv("HOME"), ".haosbot", "config.json")
 
 		if r.Method == http.MethodGet {
-			w.Header().Set("Content-Type", "application/json")
-			data, err := os.ReadFile(configPath)
+			view, err := redactedConfig(s.cfg)
 			if err != nil {
-				// return current in-memory defaults
-				_ = json.NewEncoder(w).Encode(s.cfg)
+				http.Error(w, fmt.Sprintf("Config view error: %v", err), http.StatusInternalServerError)
 				return
 			}
-			_, _ = w.Write(data)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(view)
 			return
 		}
 
 		if r.Method == http.MethodPost {
-			var newCfg map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+			var patch map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 				http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 				return
 			}
-
-			data, err := json.MarshalIndent(newCfg, "", "  ")
-			if err != nil {
-				http.Error(w, fmt.Sprintf("Encode error: %v", err), http.StatusInternalServerError)
+			if err := saveConfigPatch(s.cfg, configPath, patch); err != nil {
+				http.Error(w, fmt.Sprintf("Invalid configuration: %v", err), http.StatusBadRequest)
 				return
-			}
-
-			_ = os.MkdirAll(filepath.Dir(configPath), 0755)
-			if err := os.WriteFile(configPath, data, 0644); err != nil {
-				http.Error(w, fmt.Sprintf("Write error: %v", err), http.StatusInternalServerError)
-				return
-			}
-
-			// Hot-reload configuration into memory immediately
-			if loaded, err := config.LoadDefault(); err == nil {
-				s.cfg = loaded
-				pConfig := s.cfg.Providers.OpenAI
-				apiKey := ""
-				if pConfig.APIKey != nil {
-					apiKey = *pConfig.APIKey
-				}
-				apiBase := "https://api.openai.com/v1"
-				if pConfig.APIBase != nil && *pConfig.APIBase != "" {
-					apiBase = *pConfig.APIBase
-				}
-				s.provider = openai.New(openai.Options{
-					APIKey:  apiKey,
-					BaseURL: apiBase,
-				})
-				fmt.Printf("[nanobot hot-reload] Updated provider: BaseURL=%s, Model=%s, APIKeyLen=%d\n", apiBase, s.cfg.Agents.Defaults.Model, len(apiKey))
 			}
 
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"status":"saved","message":"Configurações salvas e aplicadas com sucesso!"}`))
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":          "saved",
+				"restartRequired": true,
+				"message":         "Configurações salvas; reinicie o gateway para aplicar todas as mudanças.",
+			})
 			return
 		}
 

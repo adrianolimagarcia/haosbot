@@ -132,10 +132,6 @@ type graphStoreEntry struct {
 	pins  int
 }
 
-func newGraphStorePool(dir string) *graphStorePool {
-	return newGraphStorePoolWithEmbedder(dir, resolveGraphPoolMaxOpenStores(), nil)
-}
-
 func newGraphStorePoolWithEmbedder(dir string, maxOpen int, embedder micrographrag.Embedder) *graphStorePool {
 	p := newGraphStorePoolWithLimit(dir, maxOpen)
 	p.embedder = embedder

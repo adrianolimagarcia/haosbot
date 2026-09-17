@@ -7,7 +7,12 @@ set -euo pipefail
 PYTHON_VERSION="v3.14.7" # Fallback or latest stable tag/branch if 3.14.7 is ahead, let's use main/v3.12 or v3.11 for stability if 3.14 isn't tagged yet, or user's requested tag. Let's use v3.12.7 or python 3.11/3.12 stable.
 # Note: CPython 3.14 might not exist yet as 3.14 is future; let's use v3.12.7 as a robust production choice or allow parameter.
 CPYTHON_TAG="${1:-v3.12.7}"
-PREFIX="${HOME}/.nanobot/python-min"
+# Install into the branded data directory, matching MANUAL.md section 8 and
+# internal/command/router.go, which both document ~/.haosbot/python-min. This
+# used to write to the legacy ~/.nanobot/python-min, so a fresh install built an
+# interpreter where the agent no longer looks for it. Override with
+# HAOSBOT_PYTHON_PREFIX for a custom layout.
+PREFIX="${HAOSBOT_PYTHON_PREFIX:-${HOME}/.haosbot/python-min}"
 
 echo "==> Preparing to build CPython ${CPYTHON_TAG} minimal..."
 echo "    Installation target: ${PREFIX}"

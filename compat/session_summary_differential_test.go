@@ -77,6 +77,11 @@ var (
 	sessionSummaryDocOnce sync.Once
 	sessionSummaryDoc     map[string]any
 	sessionSummaryErr     error
+
+	// sessionSummarySkip is set when the reference venv is absent. It is a
+	// sentinel rather than an error so every caller can t.Skip instead of
+	// t.Fatalf, and so the skip survives the sync.Once for later tests.
+	sessionSummarySkip string
 )
 
 func loadSessionSummaryDump(t *testing.T) map[string]any {
@@ -86,7 +91,14 @@ func loadSessionSummaryDump(t *testing.T) map[string]any {
 		python := filepath.Join(root, ".tools", "venv", "bin", "python")
 		script := filepath.Join(root, "compat", "python", "dump_session_summary.py")
 		if _, err := os.Stat(python); err != nil {
-			sessionSummaryErr = fmt.Errorf("reference venv not present at %s", python)
+			// A missing reference venv means the differential check cannot run at
+			// all, which is a SKIP - exactly like the other compat suites. It used
+			// to be recorded as an error and turned into t.Fatalf below, so running
+			// ./compat anywhere without the venv (every git worktree, for instance)
+			// reported four hard failures instead of four skips, which reads like a
+			// broken port rather than a missing harness.
+			sessionSummarySkip = fmt.Sprintf(
+				"SKIP: reference venv not present at %s - differential check not run", python)
 			return
 		}
 		if _, err := os.Stat(script); err != nil {
@@ -111,6 +123,9 @@ func loadSessionSummaryDump(t *testing.T) map[string]any {
 			return
 		}
 	})
+	if sessionSummarySkip != "" {
+		t.Skip(sessionSummarySkip)
+	}
 	if sessionSummaryErr != nil {
 		t.Fatalf("%v", sessionSummaryErr)
 	}

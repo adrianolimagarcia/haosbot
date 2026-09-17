@@ -256,6 +256,42 @@ verdadeiro; sem `enabled`, o canal fica desligado. O valor é interpretado com a
 verdade de Python, então a string `"false"` **liga** o canal — use o booleano
 `false` para desligá-lo.
 
+### 9.1 Política de entrega (progresso, dicas de ferramenta, raciocínio)
+
+Três chaves controlam o que o canal recebe durante um turno, e valem tanto no
+nível global (`channels.*`) quanto dentro da seção do canal:
+
+| chave | efeito |
+| --- | --- |
+| `sendProgress` | envia o texto de progresso do agente |
+| `sendToolHints` | envia as dicas de chamada de ferramenta |
+| `showReasoning` | envia o raciocínio do modelo |
+
+```json
+{
+  "channels": {
+    "sendProgress": true,
+    "telegram": { "enabled": true, "token": "...", "sendToolHints": false }
+  }
+}
+```
+
+A precedência é a da referência Python (`nanobot/channels/manager.py:219-231`): o
+valor da seção do canal vence quando existe; sem ele vale o padrão de transporte
+do próprio canal e, na ausência deste, a política global.
+
+**Aqui a regra booleana é a OPOSTA da regra de ativação acima.** As três chaves
+só são aceitas como booleano JSON de verdade: a string `"false"` **não** desliga
+nada, porque não é um `bool` — o valor é tratado como ausente e o padrão
+prevalece. Isso reproduz `isinstance(value, bool)` da referência
+(`manager.py:355-368`), enquanto `enabled` usa a verdade de Python. As duas
+regras convivem e não devem ser confundidas: use `false` (sem aspas) para
+desligar a entrega e a string `"false"` para ligar um canal.
+
+As chaves também são aceitas na forma snake_case (`send_progress`,
+`send_tool_hints`, `show_reasoning`); quando as duas formas aparecem, a
+snake_case vence.
+
 Ao iniciar `haosbot gateway`, o canal do Telegram fará polling de mensagens e responderá diretamente pelo chat.
 
 ---

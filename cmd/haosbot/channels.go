@@ -16,6 +16,10 @@ package main
 //     resolves to enabled, where an omitted `enabled` falls back to the
 //     plugin's default_enabled — false for every channel here (plugin.py:38;
 //     only the reference's websocket channel declares true).
+//   - the DELIVERY POLICY resolution is _build_channel (manager.py:206-232):
+//     the global `channels.send_progress` / `send_tool_hints` / `show_reasoning`
+//     policy, the channel's own progress_transport_defaults() hook, and the
+//     per-channel overrides — see applyChannelDeliveryPolicy below.
 //
 // Deliberately absent, with the reason: multi-instance channels
 // (contracts.py:73-109), the channel dependency gate
@@ -92,10 +96,30 @@ func buildChannelManager(cfg *config.Config, messageBus *bus.Bus) *channels.Chan
 			slog.Warn("channel not available", "channel", name, "error", err)
 			continue
 		}
+		applyChannelDeliveryPolicy(cfg, section, ch)
 		manager.AddChannelInstance(name, name, "default", ch)
 	}
 
 	return manager
+}
+
+// applyChannelDeliveryPolicy resolves the channel's delivery policy from the
+// configuration and writes it onto the freshly built channel. It is the tail of
+// _build_channel (manager.py:219-231); the resolution itself lives in
+// internal/channels next to the read half the manager uses
+// (internal/channels/manager.go:805), because it is ChannelManager logic rather
+// than plugin-discovery logic.
+//
+// Before this call existed, nothing in the production path ever wrote these
+// three values: every channel kept NewBase's hardcoded true, true, true
+// (internal/channels/base.go:303-305) and `channels.sendProgress: false` — at
+// either level — silently did nothing.
+func applyChannelDeliveryPolicy(cfg *config.Config, section map[string]any, ch channels.Channel) {
+	channels.ApplyDeliveryPolicy(ch, section, channels.GlobalDeliveryPolicy{
+		SendProgress:  cfg.Channels.SendProgress,
+		SendToolHints: cfg.Channels.SendToolHints,
+		ShowReasoning: cfg.Channels.ShowReasoning,
+	})
 }
 
 // channelRuntimeNames lists the registered runtimes in a deterministic order.

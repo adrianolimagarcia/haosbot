@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -142,7 +141,7 @@ func (s *Server) Start(addr string) error {
 	})
 
 	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
-		configPath := filepath.Join(os.Getenv("HOME"), ".haosbot", "config.json")
+		configPath := configTargetPath(s.cfg)
 
 		if r.Method == http.MethodGet {
 			view, err := redactedConfig(s.cfg)

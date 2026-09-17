@@ -55,17 +55,6 @@ func (c *Client) ChatStream(ctx context.Context, req provider.ChatRequest) (<-ch
 }
 
 // consumeStream reads the SSE body, emits deltas, and closes the channel.
-func (c *Client) consumeStream(
-	ctx context.Context,
-	readCtx context.Context,
-	cancel context.CancelFunc,
-	body io.ReadCloser,
-	idle time.Duration,
-	events chan<- core.StreamEvent,
-) {
-	c.consumeStreamWithFormat(ctx, readCtx, cancel, body, idle, events, ToolCallFormatAuto)
-}
-
 func (c *Client) consumeStreamWithFormat(
 	ctx context.Context,
 	readCtx context.Context,

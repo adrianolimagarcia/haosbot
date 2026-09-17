@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -199,8 +198,5 @@ func TestGraphOutboxRetryPersistsAttemptState(t *testing.T) {
 	}
 	if pending[0].NotBefore.Before(time.Now()) {
 		t.Fatal("retry deadline was not persisted")
-	}
-	if errors.Is(context.Canceled, nil) {
-		t.Fatal("unreachable guard")
 	}
 }

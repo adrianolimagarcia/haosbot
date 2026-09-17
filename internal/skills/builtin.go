@@ -79,11 +79,25 @@ func BundledSkillFile(rel string) (string, bool) {
 
 // BundledSkillNames returns the names of the embedded built-in skill
 // directories — the directories that hold a SKILL.md — in the order embed.FS
-// reports them (lexicographic).
+// reports them, which is LEXICOGRAPHIC BY SPECIFICATION (go:embed, and
+// fs.ReadDir over an embed.FS, always return entries sorted by filename).
 //
-// The reference's own order comes from os directory listing and is NOT sorted
-// (see Loader.entriesFromDir); the embedded FS has no such order to preserve.
-// builtin_test.go pins the two orders against each other for the shipped tree.
+// That order is the contract; it is deliberately NOT the reference's order. The
+// reference lists its built-in skills with `base.iterdir()` (agent/skills.py:78),
+// i.e. raw readdir order, which is a property of the HOST — it differs between
+// filesystems and between machines (the same tree came back
+// [README.md clawhub cron ...] on a developer machine and
+// [github weather clawhub ...] on the CI runner) — and an embedded tree has no
+// directory order to preserve even in principle. Reproducing it is therefore
+// impossible, and a test that asserted it failed on CI while passing locally.
+//
+// Callers that need the reference's behaviour for a directory that really is on
+// disk must go through Loader.entriesFromDir, which reads with
+// os.File.ReadDir(-1) and is deliberately UNSORTED; that path is correct and
+// must not be "fixed" by sorting. This function is only for the embedded tree.
+//
+// builtin_test.go pins the SET of names and this function's sortedness; compat's
+// TestSkillsBundledOrderMatchesReference pins the set against the reference.
 func BundledSkillNames() []string {
 	entries, err := fs.ReadDir(builtinSkillsFS, builtinSkillsEmbedRoot)
 	if err != nil {

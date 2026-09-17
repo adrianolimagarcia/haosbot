@@ -112,18 +112,33 @@ func TestBundledSkillsMatchReference(t *testing.T) {
 	t.Logf("verified %d embedded files against %s", len(refFiles), refDir)
 }
 
-// TestBundledSkillNamesPinned pins the skill directory list. A skill appearing
-// or disappearing here changes what the model is told it can do.
+// TestBundledSkillNamesPinned pins the embedded built-in skill SET against a
+// hand-written list, and pins the ORDER as the lexicographic one go:embed
+// guarantees. A skill appearing or disappearing here changes what the model is
+// told it can do, so the list is written out rather than derived from the tree.
+//
+// It deliberately does NOT compare against the reference tree's readdir order.
+// `go:embed` sorts by filename by specification, while the reference's order
+// comes from base.iterdir() (agent/skills.py:78) and is a property of the host
+// filesystem, so the two agree only by luck — they did on the developer machine
+// that first wrote this test and did not on the CI runner. That comparison
+// belongs to compat's TestSkillsBundledOrderMatchesReference, which asserts set
+// equality plus sortedness for exactly that reason.
 func TestBundledSkillNamesPinned(t *testing.T) {
 	got := BundledSkillNames()
 	want := append([]string(nil), bundledSkillNamesPinned...)
 	sort.Strings(want)
+
+	// The order is part of the contract: fs.ReadDir over an embed.FS sorts.
+	if !sort.StringsAreSorted(got) {
+		t.Errorf("BundledSkillNames() = %v is not lexicographic, which go:embed guarantees", got)
+	}
 	if len(got) != len(want) {
-		t.Fatalf("BundledSkillNames() = %v, want %v", got, want)
+		t.Fatalf("BundledSkillNames() = %v, want the set %v", got, want)
 	}
 	for i := range got {
 		if got[i] != want[i] {
-			t.Fatalf("BundledSkillNames() = %v, want %v", got, want)
+			t.Fatalf("BundledSkillNames() = %v, want the set %v", got, want)
 		}
 	}
 }

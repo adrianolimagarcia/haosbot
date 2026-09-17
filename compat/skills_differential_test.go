@@ -460,28 +460,79 @@ func TestSkillsBundledAssetsMatchReference(t *testing.T) {
 	t.Logf("compared %d bundled skill files against the reference digests", checked)
 }
 
-// TestSkillsBundledOrderMatchesReference pins the embedded skill order against
-// the reference's own os listing. The reference does NOT sort directory
-// entries, so this is a real (if machine-dependent) property, not a tautology.
+// TestSkillsBundledOrderMatchesReference pins the two things about the embedded
+// built-in listing that are actually true on every host: the port ships the same
+// SET of built-in skills as the reference, and the port's order is the
+// lexicographic one go:embed guarantees.
+//
+// Byte-for-byte ORDER equality with the reference is NOT achievable, and
+// asserting it made this test fail on every CI run while passing on a developer
+// machine:
+//
+//   - go:embed (and fs.ReadDir over an embed.FS) is specified to return entries
+//     SORTED BY FILENAME. An embedded tree has no directory order to preserve,
+//     so BundledSkillNames() is lexicographic on every host, always.
+//   - The reference lists its built-in skills with `base.iterdir()`
+//     (agent/skills.py:78) — raw readdir order, which is a property of the
+//     HOST, not of the reference. On this machine it happens to come back
+//     lexicographic ([README.md clawhub cron github ...]); the CI runner
+//     returned [github weather clawhub my ...]. Neither is "the" order.
+//
+// The reference's order is therefore not a stable target, and the port cannot
+// reproduce it even in principle. What must hold — and what a real regression
+// breaks — is that the same skills are shipped (a missing or extra built-in
+// skill changes what the model is told it can do) and that the port's order is
+// deterministic.
 func TestSkillsBundledOrderMatchesReference(t *testing.T) {
 	doc, _ := loadSkillsDump(t)
 	if len(doc.BundledOrder) == 0 {
 		t.Fatal("dumper reported 0 built-in entries — the harness is broken, not passing")
 	}
 
-	wantDirs := make([]string, 0, len(doc.BundledOrder))
+	// The reference's listing, filtered to the entries that are skills: a
+	// directory holding a SKILL.md. README.md is not one.
+	refDirs := make([]string, 0, len(doc.BundledOrder))
 	for _, name := range doc.BundledOrder {
 		if info, err := os.Stat(filepath.Join(doc.BuiltinSkillsDir, name)); err == nil && info.IsDir() {
 			if _, err := os.Stat(filepath.Join(doc.BuiltinSkillsDir, name, "SKILL.md")); err == nil {
-				wantDirs = append(wantDirs, name)
+				refDirs = append(refDirs, name)
 			}
 		}
 	}
-	got := skills.BundledSkillNames()
-	if !skStringsEqual(got, wantDirs) {
-		t.Errorf("embedded built-in skill order differs from the reference's listing:\n  go        = %v\n  reference = %v", got, wantDirs)
+	if len(refDirs) == 0 {
+		t.Fatal("the reference's listing contains no skill directories — the harness is broken, not passing")
 	}
-	t.Logf("compared %d built-in skill directory names (reference listing: %v)", len(got), doc.BundledOrder)
+
+	got := skills.BundledSkillNames()
+	if len(got) == 0 {
+		t.Fatal("BundledSkillNames() returned nothing — the harness is broken, not passing")
+	}
+
+	// SET equality, which is the meaningful invariant.
+	gotSorted := append([]string(nil), got...)
+	sort.Strings(gotSorted)
+	wantSorted := append([]string(nil), refDirs...)
+	sort.Strings(wantSorted)
+	if !skStringsEqual(gotSorted, wantSorted) {
+		t.Errorf("the embedded built-in tree does not ship the same skills as the reference:\n  go        = %v\n  reference = %v",
+			gotSorted, wantSorted)
+	}
+
+	// ORDER: the port's order is lexicographic, and that is asserted directly
+	// rather than compared against the reference, because the reference's order
+	// is raw readdir order.
+	if !sort.StringsAreSorted(got) {
+		t.Errorf("BundledSkillNames() is not in the lexicographic order fs.ReadDir guarantees:\n  go = %v", got)
+	}
+
+	if sort.StringsAreSorted(refDirs) {
+		// Say out loud when the run cannot distinguish the two orders: on such a
+		// host the old order-equality assertion passed for the wrong reason.
+		t.Logf("note: this host's readdir order for the reference tree happens to be lexicographic (%v), so this run cannot tell the two orders apart; the set assertion above is what holds everywhere", refDirs)
+	} else {
+		t.Logf("note: this host's readdir order for the reference tree is NOT lexicographic (%v) — the condition that used to fail here", refDirs)
+	}
+	t.Logf("compared %d built-in skill names as a set; go:embed order = %v", len(got), got)
 }
 
 // --------------------------------------------------------------------------
@@ -1036,6 +1087,89 @@ func TestSkillsPreFixPortDiverged(t *testing.T) {
 	t.Logf("pre-fix behaviour already agreed in %d cases: %v", len(agreed), agreed)
 }
 
+// skExpectedUnavailableSuffix renders the ` (unavailable: ...)` suffix the
+// reference appends to a skill whose required CLIs are absent, derived from THIS
+// HOST's PATH rather than from a recorded verdict.
+//
+// The suffix is computed at runtime on both sides — shutil.which in
+// _get_missing_requirements (skills.py:278-284) and exec.LookPath in
+// GetMissingRequirements (loader.go:477-491) — so it is a property of the
+// MACHINE, not of the port. The CI runner has tmux on PATH; this developer
+// machine does not. Pinning the verdict made TestFreshInstallSkillsSection fail
+// on CI with a summary exactly 25 bytes shorter, which is precisely the length
+// of " (unavailable: CLI: tmux)".
+func skExpectedUnavailableSuffix(bins ...string) string {
+	var missing []string
+	for _, bin := range bins {
+		if _, err := exec.LookPath(bin); err != nil {
+			missing = append(missing, "CLI: "+bin)
+		}
+	}
+	if len(missing) == 0 {
+		return ""
+	}
+	return " (unavailable: " + strings.Join(missing, ", ") + ")"
+}
+
+// skBuiltinSkillBlock locates the built-in skills group of a rendered prompt and
+// returns its entry lines plus the index range they occupy in the prompt's
+// lines. ok is false when the prompt has no built-in group.
+func skBuiltinSkillBlock(rendered string) (lines []string, start, end int, ok bool) {
+	all := strings.Split(rendered, "\n")
+	for i, line := range all {
+		if !strings.HasPrefix(line, "### Built-in skills (`") {
+			continue
+		}
+		j := i + 1
+		for j < len(all) && strings.HasPrefix(all[j], "- **") {
+			j++
+		}
+		return all, i + 1, j, true
+	}
+	return nil, 0, 0, false
+}
+
+// skNormalizeBuiltinSkillOrder returns the prompt with the entries of its
+// built-in skills group sorted, and every other line untouched.
+//
+// It exists because the two sides of TestSkillsEmbeddedDefaultMatchesExplicitDir
+// obtain the SAME skills in different orders: the embedded tree comes back
+// lexicographic (go:embed sorts), while an explicit directory comes back in
+// readdir order, which is a property of the host filesystem. Sorting that one
+// group makes the comparison insensitive to the non-reproducible order while
+// leaving the group header, every description, availability suffix and relative
+// path, and every other section of the prompt under byte-for-byte comparison.
+func skNormalizeBuiltinSkillOrder(rendered string) string {
+	all, start, end, ok := skBuiltinSkillBlock(rendered)
+	if !ok {
+		return rendered
+	}
+	block := append([]string(nil), all[start:end]...)
+	sort.Strings(block)
+	copy(all[start:end], block)
+	return strings.Join(all, "\n")
+}
+
+// skBuiltinSkillNames lists the skill names a rendered prompt advertises in its
+// built-in group, in the order they appear.
+func skBuiltinSkillNames(rendered string) []string {
+	all, start, end, ok := skBuiltinSkillBlock(rendered)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, end-start)
+	for _, line := range all[start:end] {
+		rest, found := strings.CutPrefix(line, "- **")
+		if !found {
+			continue
+		}
+		if index := strings.Index(rest, "**"); index >= 0 {
+			names = append(names, rest[:index])
+		}
+	}
+	return names
+}
+
 // TestFreshInstallSkillsSection is the headline measurement: the section the
 // model now receives on a fresh install, quoted, with its measured length.
 func TestFreshInstallSkillsSection(t *testing.T) {
@@ -1050,6 +1184,10 @@ func TestFreshInstallSkillsSection(t *testing.T) {
 	if fresh == nil {
 		t.Fatal("dumper produced no fresh_builtin_only case")
 	}
+	if fresh.Summary == nil || fresh.Prompt == nil || fresh.PromptLen == nil {
+		t.Fatalf("the dumper recorded no fresh-install summary/prompt (summary_error=%v, prompt_error=%v)",
+			fresh.SummaryError, fresh.PromptError)
+	}
 
 	loader := skLoader(*fresh)
 	summary, err := loader.BuildSkillsSummary(nil, fresh.ProjectWorkspace)
@@ -1062,14 +1200,41 @@ func TestFreshInstallSkillsSection(t *testing.T) {
 
 	// The exact shape the reference emits: an em dash, TWO spaces before the
 	// backticked path, and a group header naming the relative root.
+	//
+	// The `(unavailable: ...)` suffix is NOT part of that shape: it is derived
+	// from this host's PATH at runtime, so it is expected here exactly when the
+	// CLI really is missing.
 	for _, want := range []string{
 		"### Built-in skills (`skills`)",
 		"- **clawhub** \u2014 Search and install agent skills from ClawHub, the public skill registry.  `clawhub/SKILL.md`",
-		"- **summarize** \u2014 Summarize or extract text/transcripts from URLs, podcasts, and local files (great fallback for \u201ctranscribe this YouTube/video\u201d). (unavailable: CLI: summarize)  `summarize/SKILL.md`",
-		"- **tmux** \u2014 Remote-control tmux sessions for interactive CLIs by sending keystrokes and scraping pane output. (unavailable: CLI: tmux)  `tmux/SKILL.md`",
+		"- **summarize** \u2014 Summarize or extract text/transcripts from URLs, podcasts, and local files (great fallback for \u201ctranscribe this YouTube/video\u201d)." + skExpectedUnavailableSuffix("summarize") + "  `summarize/SKILL.md`",
+		"- **tmux** \u2014 Remote-control tmux sessions for interactive CLIs by sending keystrokes and scraping pane output." + skExpectedUnavailableSuffix("tmux") + "  `tmux/SKILL.md`",
 	} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("fresh-install summary is missing:\n  %q\nactual:\n%s", want, summary)
+		}
+	}
+	if got := skExpectedUnavailableSuffix("tmux") + skExpectedUnavailableSuffix("summarize"); got == "" {
+		t.Logf("note: tmux and summarize are BOTH on PATH here, so this run exercises only the no-suffix branch; a host with one of them absent (CI has tmux, not summarize) exercises the other")
+	} else {
+		t.Logf("note: unavailable suffix expected on this host: %q", got)
+	}
+
+	// Cross-check the helper against the reference's OWN verdict for the same
+	// PATH. The reference computed it with shutil.which inside the dumper, so a
+	// disagreement means the helper is wrong about this host — and every
+	// expectation above derived from it would be wrong with it.
+	for _, name := range []string{"tmux", "summarize"} {
+		report, ok := fresh.Skills[name]
+		if !ok || report.Missing == nil {
+			t.Fatalf("the dumper recorded no availability verdict for the built-in skill %q", name)
+		}
+		want := ""
+		if *report.Missing != "" {
+			want = " (unavailable: " + *report.Missing + ")"
+		}
+		if got := skExpectedUnavailableSuffix(name); got != want {
+			t.Errorf("the host-derived suffix for %s is %q, but the reference reported %q for the same PATH", name, got, want)
 		}
 	}
 
@@ -1088,8 +1253,27 @@ func TestFreshInstallSkillsSection(t *testing.T) {
 	if !strings.Contains(section, summary) {
 		t.Error("the rendered # Skills section does not contain the summary verbatim")
 	}
-	t.Logf("reference prompt: %d bytes; port prompt: %d bytes; skills summary: %d bytes",
-		*fresh.PromptLen, len(skNormalizeRuntime(full)), len(summary))
+
+	// The full prompt against the reference's, with the built-in group's ORDER
+	// normalised (both sides read the same directory here, so this is a no-op in
+	// practice; it is what keeps the comparison from depending on a filesystem
+	// property) and with the two documented divergences discounted: the runtime
+	// line and the shipped branding. Everything else — every section, every
+	// description, availability suffix and relative path — must match exactly,
+	// which is what catches a missing section or altered skill content.
+	gotPrompt := skNormalizeBuiltinSkillOrder(prompt.NormalizeBranding(skNormalizeRuntime(full)))
+	wantPrompt := skNormalizeBuiltinSkillOrder(prompt.NormalizeBranding(*fresh.Prompt))
+	if gotPrompt != wantPrompt {
+		t.Errorf("the fresh-install prompt differs from the reference's (go %d bytes, reference %d bytes)\n%s",
+			len(gotPrompt), len(wantPrompt), skFirstDifference(gotPrompt, wantPrompt))
+	}
+
+	// *fresh.PromptLen is a Python len(), i.e. a CODE POINT count, while len() in
+	// Go counts BYTES. Reporting the two side by side produced a phantom 44-byte
+	// "difference" on every host: this prompt carries 11 em dashes, two curly
+	// quotes and 8 CJK characters, and each costs one extra byte in UTF-8.
+	t.Logf("reference prompt: %d code points / %d bytes; port prompt: %d code points / %d bytes; skills summary: %d bytes",
+		*fresh.PromptLen, len(*fresh.Prompt), utf8.RuneCountInString(gotPrompt), len(gotPrompt), len(summary))
 	t.Logf("fresh-install skills summary:\n%s", summary)
 }
 
@@ -1136,10 +1320,21 @@ func TestActiveSkillsSectionFromWorkspaceSkill(t *testing.T) {
 // the root path itself never appears). It is what makes the production default
 // trustworthy, since the differential harness always passes an explicit
 // directory in order to compare absolute roots byte for byte.
+//
+// The two prompts CANNOT be compared byte for byte as rendered, because the two
+// sides get the built-in skills in different orders: the embedded tree comes
+// back lexicographic (go:embed sorts by filename, by specification) while an
+// explicit directory comes back in readdir order, which is a property of the
+// host filesystem and not reproducible from an embedded tree. So the built-in
+// group's entries are sorted on both sides first — see
+// skNormalizeBuiltinSkillOrder. The real intent is preserved and still checked:
+// the group header, every entry's description, availability suffix and relative
+// path, the workspace group above it, and every other section of the prompt must
+// still match byte for byte.
 func TestSkillsEmbeddedDefaultMatchesExplicitDir(t *testing.T) {
 	doc, _ := loadSkillsDump(t)
 
-	checked := 0
+	checked, permuted := 0, 0
 	for _, c := range doc.Cases {
 		if c.SummaryError != nil || c.Name != "fresh_builtin_only" && c.Name != "workspace_skills_creation_order" {
 			continue
@@ -1153,15 +1348,39 @@ func TestSkillsEmbeddedDefaultMatchesExplicitDir(t *testing.T) {
 		}
 		gotEmbedded := skNormalizeRuntime(embedded.BuildSystemPrompt(c.Channel, nil, c.ProjectWorkspace, c.IncludeMemory))
 		gotExplicit := skNormalizeRuntime(explicit.BuildSystemPrompt(c.Channel, nil, c.ProjectWorkspace, c.IncludeMemory))
-		if gotEmbedded != gotExplicit {
-			t.Errorf("case %s: the embedded built-in tree and the explicit directory produce different prompts\n%s",
-				c.Name, skFirstDifference(gotEmbedded, gotExplicit))
+
+		embeddedNames := skBuiltinSkillNames(gotEmbedded)
+		explicitNames := skBuiltinSkillNames(gotExplicit)
+		if len(embeddedNames) == 0 {
+			t.Fatalf("case %s: the embedded built-in tree rendered no built-in skills group — the harness is broken, not passing", c.Name)
+		}
+		if len(explicitNames) == 0 {
+			t.Fatalf("case %s: the explicit directory rendered no built-in skills group", c.Name)
+		}
+		if !sort.StringsAreSorted(embeddedNames) {
+			t.Errorf("case %s: the embedded built-in group is not lexicographic: %v", c.Name, embeddedNames)
+		}
+		if !sort.StringsAreSorted(explicitNames) {
+			permuted++
+		}
+
+		normalizedEmbedded := skNormalizeBuiltinSkillOrder(gotEmbedded)
+		normalizedExplicit := skNormalizeBuiltinSkillOrder(gotExplicit)
+		if normalizedEmbedded != normalizedExplicit {
+			t.Errorf("case %s: the embedded built-in tree and the explicit directory produce different prompts once the built-in group's order is normalised\n%s",
+				c.Name, skFirstDifference(normalizedEmbedded, normalizedExplicit))
 		}
 	}
 	if checked == 0 {
 		t.Fatal("no relative-root case was exercised — the harness is broken, not passing")
 	}
-	t.Logf("the embedded built-in tree matched an explicit directory in %d cases", checked)
+	if permuted == 0 {
+		// Same honesty as the previous fix in this series: say out loud when the
+		// host's readdir order is already lexicographic, because then this run
+		// cannot distinguish "order-insensitive" from "order happened to agree".
+		t.Logf("note: the explicit directory's readdir order was already lexicographic on this host in all %d cases, so this run cannot distinguish the two orders; the normalisation above is what makes the assertion hold on a host where it is not", checked)
+	}
+	t.Logf("the embedded built-in tree matched an explicit directory in %d cases (%d of them with a non-lexicographic readdir order)", checked, permuted)
 }
 
 // TestSkillsSummaryShapeGuards pins the two formatting details that are easy to

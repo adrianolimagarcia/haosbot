@@ -6,11 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	micrographrag "github.com/adrianolimagarcia/micrographrag-go"
 )
@@ -54,6 +56,9 @@ const graphPoolMaxOpenStoresEnv = "NANOBOT_GRAPH_MAX_OPEN_STORES"
 //     as the in-flight operations finish. When every store is pinned the pool
 //     exceeds maxOpen temporarily rather than closing a store underneath its
 //     user; the overshoot is bounded by the number of concurrent operations.
+//     That bound is not left to this comment: it is counted here (see
+//     OvershootStats) and asserted by
+//     TestGraphStorePoolOvershootBoundedByConcurrentPins.
 //   - Close is the shutdown path: it closes every store, pinned or not, because
 //     no later operation can use them.
 type graphStorePool struct {
@@ -72,6 +77,48 @@ type graphStorePool struct {
 	// FTS-enabled store without it, and CI runs `go test ./...` untagged);
 	// production always uses graphStoreConfig.
 	storeConfig func(path string) micrographrag.Config
+
+	// Overshoot accounting. The pool is allowed to exceed maxOpen (see
+	// evictLocked); these counters are what make that tradeoff observable
+	// instead of a claim in a comment. They are cumulative for the life of the
+	// pool and are read from another goroutine by OvershootStats, while they are
+	// written under p.mu — hence atomics. Nothing is touched on the paths that
+	// stay within the limit, so bounding the pool costs one integer comparison
+	// per eviction pass and no allocation.
+	peakOvershoot     atomic.Int64
+	overshootEpisodes atomic.Int64
+	blockedEvictions  atomic.Int64
+
+	// overLimit mirrors the outcome of the last eviction pass (true when it had
+	// to leave the pool above maxOpen). Only ever touched under p.mu. It exists
+	// so that a sustained overshoot counts as ONE episode rather than one per
+	// pass, which is what "how often does this happen" means to an operator.
+	overLimit bool
+}
+
+// graphPoolOvershootStats is a snapshot of how far past its limit the pool has
+// been forced and how often. All fields are counts; the zero value is a pool
+// that has never exceeded maxOpen (except MaxOpen, which is a limit, not a
+// count).
+type graphPoolOvershootStats struct {
+	// MaxOpen is the configured bound.
+	MaxOpen int
+	// Open and Pinned are the pool's state when the snapshot was taken.
+	Open   int
+	Pinned int
+	// PeakOvershoot is the high-water mark of (open - maxOpen). It never
+	// shrinks: it answers "how far over did this pool ever go", so a zero here
+	// means the limit was never exceeded.
+	PeakOvershoot int
+	// OvershootEpisodes counts the separate times the pool went from at or
+	// below maxOpen to above it. One burst of concurrent retrievals is one
+	// episode, however many eviction passes it took to notice.
+	OvershootEpisodes int64
+	// BlockedEvictions counts eviction passes that stopped above maxOpen
+	// because every remaining store was pinned — the mechanism behind both
+	// numbers above, and the one that grows with the number of operations
+	// rather than with the number of incidents.
+	BlockedEvictions int64
 }
 
 // graphStoreEntry is one open session store plus the number of operations
@@ -206,6 +253,13 @@ func (p *graphStorePool) releaser(entry *graphStoreEntry) func() {
 // temporarily; the overshoot is bounded by the number of concurrent operations
 // and is corrected by the next release, because releaser runs this again.
 //
+// The bound is enforced, not asserted: the loop can only stop above maxOpen
+// when oldestIdleLocked finds nothing, which means every store the pool still
+// holds is pinned — so the excess is always a subset of the pins in flight and
+// can never exceed them. That is the invariant
+// TestGraphStorePoolOvershootBoundedByConcurrentPins checks under real
+// concurrency, and recordOvershootLocked is what records it for an operator.
+//
 // The returned stores are closed by the caller after the mutex is dropped, so
 // an entry leaves the map one step before its handle dies. The close is still
 // synchronous inside the acquire or release call that triggered the eviction:
@@ -216,6 +270,8 @@ func (p *graphStorePool) evictLocked() []*micrographrag.Store {
 	for len(p.stores) > p.maxOpen {
 		el := p.oldestIdleLocked()
 		if el == nil {
+			// Nothing left to evict: every store the pool holds is pinned.
+			p.recordOvershootLocked()
 			return evicted
 		}
 		entry := el.Value.(*graphStoreEntry)
@@ -223,7 +279,91 @@ func (p *graphStorePool) evictLocked() []*micrographrag.Store {
 		p.order.Remove(el)
 		evicted = append(evicted, entry.store)
 	}
+	// The pass reached the limit, so the pool is no longer over it and the next
+	// time it is, that is a new episode.
+	p.overLimit = false
 	return evicted
+}
+
+// recordOvershootLocked accounts for an eviction pass that had to stop above
+// maxOpen because every remaining store was pinned. Callers must hold p.mu.
+//
+// This is the only writer of the overshoot counters, and it runs only when the
+// pool is genuinely over its limit, so an acquire or a release that stays
+// within maxOpen performs no atomic operation at all.
+func (p *graphStorePool) recordOvershootLocked() {
+	over := int64(len(p.stores) - p.maxOpen)
+	// Writers are serialised by p.mu, so a plain load-then-store cannot lose an
+	// update; the atomic is there for the reader in OvershootStats, which runs
+	// on another goroutine.
+	if over > p.peakOvershoot.Load() {
+		p.peakOvershoot.Store(over)
+	}
+	p.blockedEvictions.Add(1)
+	if !p.overLimit {
+		p.overLimit = true
+		p.overshootEpisodes.Add(1)
+	}
+}
+
+// OvershootStats reports how far past maxOpen the pool has been forced and how
+// often, as a race-free snapshot that any goroutine may read while the pool is
+// in use. The runtime logs it at shutdown (LogShutdownStats).
+//
+// It takes p.mu to count the open and pinned entries, so it blocks for as long
+// as a store is being opened — this is a diagnostic, not a hot path, and it
+// deliberately adds no lock that Acquire or release would have to take. The
+// counters themselves are read outside the lock and are monotonic, so a
+// concurrent acquire can be visible in one field and not another; every number
+// is exact on its own, the combination is a point-in-time approximation.
+//
+// The counters are cumulative and survive Close, so a snapshot taken after
+// shutdown still reports the pool's history while Open and Pinned read zero.
+func (p *graphStorePool) OvershootStats() graphPoolOvershootStats {
+	p.mu.Lock()
+	open := len(p.stores)
+	pinned := 0
+	for _, el := range p.stores {
+		if el.Value.(*graphStoreEntry).pins > 0 {
+			pinned++
+		}
+	}
+	p.mu.Unlock()
+
+	return graphPoolOvershootStats{
+		MaxOpen:           p.maxOpen,
+		Open:              open,
+		Pinned:            pinned,
+		PeakOvershoot:     int(p.peakOvershoot.Load()),
+		OvershootEpisodes: p.overshootEpisodes.Load(),
+		BlockedEvictions:  p.blockedEvictions.Load(),
+	}
+}
+
+// LogShutdownStats writes the overshoot snapshot to the diagnostic log. It is
+// called by the runtime at shutdown, next to graphPool.Close, and is the only
+// place the overshoot is surfaced outside a test.
+//
+// It logs at Info only when the pool actually exceeded its limit, because that
+// is the event worth an operator's attention, and at Debug otherwise: a clean
+// shutdown of a pool that stayed within its bound has nothing to report, and
+// `haosbot run` should not print a diagnostics line for it. Run with the log
+// level at Debug to see the counters either way.
+func (p *graphStorePool) LogShutdownStats() {
+	stats := p.OvershootStats()
+	if stats.PeakOvershoot == 0 {
+		slog.Debug("graph store pool stayed within its open-store limit",
+			"maxOpen", stats.MaxOpen,
+			"open", stats.Open)
+		return
+	}
+	slog.Info("graph store pool exceeded its open-store limit while stores were pinned",
+		"maxOpen", stats.MaxOpen,
+		"peakOvershoot", stats.PeakOvershoot,
+		"overshootEpisodes", stats.OvershootEpisodes,
+		"blockedEvictions", stats.BlockedEvictions,
+		"open", stats.Open,
+		"pinned", stats.Pinned)
 }
 
 // oldestIdleLocked returns the least recently acquired entry that is not
@@ -291,6 +431,12 @@ func (p *graphStorePool) Store(ctx context.Context, sessionKey string) (*microgr
 // path (buildRuntime calls it after graphIndexer.Close has drained the queue).
 // Unlike eviction it does not skip pinned entries: at shutdown nothing may
 // survive, so callers must stop issuing work before calling it.
+//
+// The overshoot counters are deliberately NOT reset: they describe the pool's
+// history, which is what makes a post-shutdown OvershootStats meaningful. Only
+// overLimit is cleared, because a pool holding no stores is not over its limit
+// — a late release that reaches evictLocked after Close must not be recorded as
+// the end of an episode that Close already ended.
 func (p *graphStorePool) Close() error {
 	p.mu.Lock()
 	if p.closed {
@@ -306,6 +452,7 @@ func (p *graphStorePool) Close() error {
 	// indexer's last worker, or a retrieval still unwinding) must not panic.
 	p.stores = map[string]*list.Element{}
 	p.order.Init()
+	p.overLimit = false
 	p.mu.Unlock()
 
 	var joined error

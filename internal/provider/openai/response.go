@@ -49,6 +49,10 @@ type wireResponse struct {
 // parseResponse mirrors OpenAICompatProvider._parse
 // (openai_compat_provider.py:1542-1686) for a decoded JSON response.
 func parseResponse(payload []byte) (*core.Response, error) {
+	return parseResponseWithToolCallFormat(payload, ToolCallFormatAuto)
+}
+
+func parseResponseWithToolCallFormat(payload []byte, format ToolCallFormat) (*core.Response, error) {
 	var resp wireResponse
 	if err := json.Unmarshal(payload, &resp); err != nil {
 		return nil, fmt.Errorf("openai: decode response: %w", err)
@@ -59,7 +63,7 @@ func parseResponse(payload []byte) (*core.Response, error) {
 		// (openai_compat_provider.py:1552-1565).
 		if raw := firstTruthyRaw(resp.Content, resp.OutputText); raw != nil {
 			content := extractTextContent(raw)
-			content, calls := extractTextToolCalls(content)
+			content, calls := extractTextToolCallsWithFormat(content, format)
 			if content != "" || len(calls) > 0 {
 				finish := "stop"
 				if resp.FinishReason != nil && *resp.FinishReason != "" {
@@ -130,7 +134,7 @@ func parseResponse(payload []byte) (*core.Response, error) {
 		calls = append(calls, call)
 	}
 	if len(calls) == 0 {
-		content, calls = extractTextToolCalls(content)
+		content, calls = extractTextToolCallsWithFormat(content, format)
 	}
 
 	return &core.Response{
@@ -359,9 +363,16 @@ var textToolCallParameterRe = regexp.MustCompile(`(?s)<parameter\s*=\s*([A-Za-z_
 // <tool_call> blocks are normalized into structured calls and the matched spans
 // are removed from the visible content.
 func extractTextToolCalls(content string) (string, []core.ToolCall) {
-	if content == "" || !strings.Contains(content, "<tool_call>") {
+	return extractTextToolCallsWithFormat(content, ToolCallFormatAuto)
+}
+
+func extractTextToolCallsWithFormat(content string, format ToolCallFormat) (string, []core.ToolCall) {
+	format = normalizeToolCallFormat(format)
+	if content == "" || !strings.Contains(content, "<tool_call>") || format == ToolCallFormatNative {
 		return content, nil
 	}
+	parseJSON := format == ToolCallFormatAuto || format == ToolCallFormatJSON
+	parseXML := format == ToolCallFormatAuto || format == ToolCallFormatXML
 
 	type parsedCall struct {
 		call       core.ToolCall
@@ -369,8 +380,9 @@ func extractTextToolCalls(content string) (string, []core.ToolCall) {
 	}
 	var parsed []parsedCall
 
-	// JSON payloads are the existing format and remain the first-class path.
-	for _, match := range textToolCallRe.FindAllStringSubmatchIndex(content, -1) {
+	// JSON payloads are selected only for capable models/providers.
+	if parseJSON {
+		for _, match := range textToolCallRe.FindAllStringSubmatchIndex(content, -1) {
 		payloadText := stripJSONFence(content[match[2]:match[3]])
 		var payload map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(payloadText), &payload); err != nil || payload == nil {
@@ -417,13 +429,15 @@ func extractTextToolCalls(content string) (string, []core.ToolCall) {
 			start: match[0],
 			end:   match[1],
 		})
+		}
 	}
 
 	// Some models emit a non-XML, XML-like format with one text parameter per
 	// argument. Convert every parameter to a JSON string value. Values are
 	// trimmed only at the boundary so indentation around the tags does not
 	// become part of a shell command; internal whitespace and newlines survive.
-	for _, match := range textToolCallXMLRe.FindAllStringSubmatchIndex(content, -1) {
+	if parseXML {
+		for _, match := range textToolCallXMLRe.FindAllStringSubmatchIndex(content, -1) {
 		call, ok := parseXMLTextToolCall(
 			content[match[2]:match[3]],
 			content[match[4]:match[5]],
@@ -431,7 +445,8 @@ func extractTextToolCalls(content string) (string, []core.ToolCall) {
 		if !ok {
 			continue
 		}
-		parsed = append(parsed, parsedCall{call: call, start: match[0], end: match[1]})
+			parsed = append(parsed, parsedCall{call: call, start: match[0], end: match[1]})
+		}
 	}
 
 	if len(parsed) == 0 {

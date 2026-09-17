@@ -45,7 +45,7 @@ func (s *Server) SetLoop(loop *agent.Loop) {
 func (s *Server) checkAuth(r *http.Request) bool {
 	apiKey := s.cfg.API.APIKey
 	if apiKey == "" {
-		return true // No auth required if apiKey is not configured
+		return true // securityMiddleware restricts no-key mode to loopback peers.
 	}
 
 	auth := r.Header.Get("Authorization")
@@ -57,6 +57,10 @@ func (s *Server) checkAuth(r *http.Request) bool {
 }
 
 func (s *Server) Start(addr string) error {
+	if err := s.validateBindAddr(addr); err != nil {
+		return err
+	}
+
 	mux := http.NewServeMux()
 	s.registerWebUI(mux)
 	a2aHandler := a2a.NewHandler(s.cfg, s.loop)
@@ -126,14 +130,6 @@ func (s *Server) Start(addr string) error {
 
 	// GET & POST /api/config (save and read config directly from WebUI!)
 	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
-		// If request is from loopback or same host, or apiKey is empty, allow.
-		// Otherwise check Bearer token.
-		if s.cfg.API.APIKey != "" && !s.checkAuth(r) {
-			// Check if the auth token matches the new posted apiKey or let user authenticate
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
-
 		configPath := filepath.Join(os.Getenv("HOME"), ".haosbot", "config.json")
 
 		if r.Method == http.MethodGet {
@@ -197,7 +193,7 @@ func (s *Server) Start(addr string) error {
 	// GET /v1/models
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		if !s.checkAuth(r) {
-			http.Error(w, `{"error":{"message":"Invalid or missing API key","type":"authentication_error"}}`, http.StatusUnauthorized)
+			writeUnauthorized(w)
 			return
 		}
 
@@ -223,7 +219,7 @@ func (s *Server) Start(addr string) error {
 	// POST /v1/chat/completions
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		if !s.checkAuth(r) {
-			http.Error(w, `{"error":{"message":"Invalid or missing API key","type":"authentication_error"}}`, http.StatusUnauthorized)
+			writeUnauthorized(w)
 			return
 		}
 
@@ -362,8 +358,10 @@ func (s *Server) Start(addr string) error {
 	})
 
 	s.server = &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr:              addr,
+		Handler:           s.securityMiddleware(mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	return s.server.ListenAndServe()

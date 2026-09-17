@@ -9,6 +9,9 @@ type Config struct {
 	Files PathPolicy
 	// Exec configures the exec tool.
 	Exec ExecOptions
+	// SSRFWhitelist is the explicit outbound-network exception list shared by
+	// tools that accept model/user-controlled URLs.
+	SSRFWhitelist []string
 }
 
 // Register adds the core built-in tools to r in a deterministic order.
@@ -28,7 +31,7 @@ func Register(r *tools.Registry, cfg Config) {
 	r.Register(NewListDir(cfg.Files))
 	r.Register(NewExec(cfg.Exec))
 	r.Register(NewPythonExec(cfg.Files.Workspace))
-	r.Register(NewA2ACall())
+	r.Register(NewA2ACall(cfg.SSRFWhitelist))
 }
 
 // Tools returns the core built-in tools in the same order as Register.
@@ -41,6 +44,6 @@ func Tools(cfg Config) []tools.Tool {
 		NewListDir(cfg.Files),
 		NewExec(cfg.Exec),
 		NewPythonExec(cfg.Files.Workspace),
-		NewA2ACall(),
+		NewA2ACall(cfg.SSRFWhitelist),
 	}
 }

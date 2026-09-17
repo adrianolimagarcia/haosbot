@@ -9,25 +9,31 @@ import (
 )
 
 type graphIndexJob struct {
+	ID         string
 	sessionKey string
 	content    string
+	Attempts   int
+	NotBefore  time.Time
 }
 
-// graphIndexer replaces the unbounded goroutine-per-turn pattern with bounded
-// backpressure. Enqueue is intentionally non-blocking: derived memory must never
-// make a successful agent turn fail or stall indefinitely.
+// graphIndexer is a durable dispatcher. A job is written to the outbox before
+// it is acknowledged to the caller; a full in-memory queue therefore creates
+// backpressure without data loss.
 type graphIndexer struct {
-	pool   *graphStorePool
-	jobs   chan graphIndexJob
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	pool    *graphStorePool
+	jobs    chan graphIndexJob
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+	outbox  *graphOutbox
+	process func(context.Context, graphIndexJob) error
 
-	mu     sync.RWMutex
-	closed bool
+	mu        sync.Mutex
+	closed    bool
+	scheduled map[string]struct{}
 }
 
-func newGraphIndexer(pool *graphStorePool, workers, capacity int) *graphIndexer {
+func newGraphIndexer(pool *graphStorePool, workers, capacity int, outboxes ...*graphOutbox) *graphIndexer {
 	if workers <= 0 {
 		workers = 2
 	}
@@ -36,29 +42,98 @@ func newGraphIndexer(pool *graphStorePool, workers, capacity int) *graphIndexer 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	g := &graphIndexer{
-		pool:   pool,
-		jobs:   make(chan graphIndexJob, capacity),
-		ctx:    ctx,
-		cancel: cancel,
+		pool:      pool,
+		jobs:      make(chan graphIndexJob, capacity),
+		ctx:       ctx,
+		cancel:    cancel,
+		scheduled: make(map[string]struct{}),
+	}
+	if len(outboxes) > 0 {
+		g.outbox = outboxes[0]
 	}
 	for i := 0; i < workers; i++ {
 		g.wg.Add(1)
 		go g.worker()
 	}
+	g.dispatchPending()
 	return g
 }
 
 func (g *graphIndexer) Enqueue(sessionKey, content string) bool {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	if g.closed {
+	return g.EnqueueWithID(graphMemoryJobID(sessionKey, "", content), sessionKey, content)
+}
+
+func (g *graphIndexer) EnqueueWithID(jobID, sessionKey, content string) bool {
+	if jobID == "" {
+		jobID = graphMemoryJobID(sessionKey, "", content)
+	}
+	job := graphIndexJob{ID: jobID, sessionKey: sessionKey, content: content}
+	if g.outbox == nil {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.closed {
+			return false
+		}
+		select {
+		case g.jobs <- job:
+			return true
+		default:
+			return false
+		}
+	}
+
+	// Persistence happens before dispatch. If shutdown races this call after
+	// the pre-check, the durable record is still recoverable on the next start.
+	g.mu.Lock()
+	closed := g.closed
+	g.mu.Unlock()
+	if closed {
 		return false
 	}
-	select {
-	case g.jobs <- graphIndexJob{sessionKey: sessionKey, content: content}:
-		return true
-	default:
+	accepted, err := g.outbox.Enqueue(job)
+	if err != nil || !accepted {
 		return false
+	}
+	g.dispatchPending()
+	return true
+}
+
+func (g *graphIndexer) dispatchPending() {
+	if g.outbox == nil {
+		return
+	}
+	for {
+		pending := g.outbox.Pending()
+		if len(pending) == 0 {
+			return
+		}
+		dispatched := false
+		for _, job := range pending {
+			if !job.NotBefore.IsZero() && time.Now().Before(job.NotBefore) {
+				continue
+			}
+			g.mu.Lock()
+			if g.closed {
+				g.mu.Unlock()
+				return
+			}
+			if _, exists := g.scheduled[job.ID]; exists {
+				g.mu.Unlock()
+				continue
+			}
+			select {
+			case g.jobs <- job:
+				g.scheduled[job.ID] = struct{}{}
+				dispatched = true
+			default:
+				g.mu.Unlock()
+				return
+			}
+			g.mu.Unlock()
+		}
+		if !dispatched {
+			return
+		}
 	}
 }
 
@@ -72,27 +147,67 @@ func (g *graphIndexer) worker() {
 			if !ok {
 				return
 			}
-			ctx, cancel := context.WithTimeout(g.ctx, 15*time.Second)
-			// Acquire (not Store): the pin is released explicitly right after
-			// the write, so the pool may evict and close the store as soon as
-			// this job is done, but never while AddMemory is running.
-			store, release, err := g.pool.Acquire(ctx, job.sessionKey)
-			if err == nil {
-				_, _ = store.AddMemory(ctx, micrographrag.MemoryInput{
-					Kind:    1,
-					Source:  "haosbot/session/" + job.sessionKey,
-					Title:   "Agent turn " + job.sessionKey,
-					Content: job.content,
-				})
-				release()
+			err := g.index(job)
+			if err == nil && g.outbox != nil {
+				err = g.outbox.Ack(job.ID)
 			}
-			cancel()
+			if err != nil && g.outbox != nil {
+				job.Attempts++
+				delay := graphRetryDelay(job.Attempts)
+				_ = g.outbox.Retry(job, time.Now().Add(delay))
+			}
+			g.mu.Lock()
+			delete(g.scheduled, job.ID)
+			g.mu.Unlock()
+			if err == nil {
+				g.dispatchPending()
+			} else {
+				// Keep failures out of the hot loop while retaining them durably.
+				time.AfterFunc(graphRetryDelay(job.Attempts), g.dispatchPending)
+			}
 		}
 	}
 }
 
+func (g *graphIndexer) index(job graphIndexJob) error {
+	if g.process != nil {
+		return g.process(g.ctx, job)
+	}
+	if g.pool == nil {
+		return context.Canceled
+	}
+	ctx, cancel := context.WithTimeout(g.ctx, 15*time.Second)
+	defer cancel()
+	store, release, err := g.pool.Acquire(ctx, job.sessionKey)
+	if err != nil {
+		return err
+	}
+	defer release()
+	_, err = store.AddMemory(ctx, micrographrag.MemoryInput{
+		Kind:    1,
+		Source:  "haosbot/session/" + job.sessionKey,
+		Title:   "Agent turn " + job.ID,
+		Content: job.content,
+	})
+	return err
+}
+
+func graphRetryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := 250 * time.Millisecond
+	for i := 1; i < attempt && delay < graphOutboxMaxRetry; i++ {
+		delay *= 2
+	}
+	if delay > graphOutboxMaxRetry {
+		return graphOutboxMaxRetry
+	}
+	return delay
+}
+
 // Close stops accepting new work and drains queued jobs for up to the supplied
-// context deadline. When the deadline expires workers are cancelled.
+// context deadline. Undispatched or failed jobs stay in the durable outbox.
 func (g *graphIndexer) Close(ctx context.Context) {
 	g.mu.Lock()
 	if g.closed {

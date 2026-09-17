@@ -588,6 +588,161 @@ func TestTaskStoreIsBounded(t *testing.T) {
 	}
 }
 
+// TestTaskStoreNeverExceedsCapDuringBurst is the HARD-bound contract: the
+// retained count must never exceed maxRetainedTasks at ANY instant, not merely
+// once a burst has been trimmed back.
+//
+// Regression: publish inserted first and enforced the cap afterwards, and every
+// publisher trimmed independently, so N concurrent publishers could hold the
+// store at up to cap+N entries until the next trim walked it back — and each of
+// those publishers paid for a full walk. The sampler below runs WHILE the burst
+// is in flight, so the assertion is about every observed instant rather than
+// about the end state, which the amortised implementation already satisfied.
+// Observed at the pre-fix revision with these parameters: 1025..1029.
+//
+// The observable is h.retained rather than a lock-free count of h.tasks.Range:
+// sync.Map.Range "does not necessarily correspond to any consistent snapshot of
+// the Map's contents", so a concurrent walk can count entries that were never
+// live at the same instant. Measured while developing this test: a lock-free
+// walk reported 1028 and 1034 for a map that, counted under the store's own
+// mutex, never held more than 1024 entries. Asserting on the walk would be
+// asserting on an artifact of the iteration, not on the store.
+func TestTaskStoreNeverExceedsCapDuringBurst(t *testing.T) {
+	// A nil loop keeps each task instantaneous; the subject here is the store.
+	h := NewHandler(config.DefaultConfig(), nil)
+
+	const (
+		publishers   = 32
+		perPublisher = 200
+	)
+
+	var (
+		wg         sync.WaitGroup
+		sampler    sync.WaitGroup
+		maxCounted atomic.Int64
+	)
+	stop := make(chan struct{})
+
+	// The sampler reads the retained count in a tight loop: the overshoot window
+	// is short, so it must not do anything expensive between reads.
+	sampler.Add(1)
+	go func() {
+		defer sampler.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if n := h.retained.Load(); n > maxCounted.Load() {
+				maxCounted.Store(n)
+			}
+		}
+	}()
+
+	start := make(chan struct{})
+	for p := 0; p < publishers; p++ {
+		wg.Add(1)
+		go func(p int) {
+			defer wg.Done()
+			<-start
+			for i := 0; i < perPublisher; i++ {
+				h.publish(Task{
+					ID:        fmt.Sprintf("burst-%d-%d", p, i),
+					Status:    "completed",
+					Input:     "burst",
+					Output:    "burst",
+					CreatedAt: time.Now(),
+					UpdatedAt: time.Now(),
+				})
+			}
+		}(p)
+	}
+	close(start)
+	wg.Wait()
+	close(stop)
+	sampler.Wait()
+
+	// The sampler must have observed the store in its bounded region, or the
+	// assertion below would be vacuous.
+	if got := maxCounted.Load(); got < taskTrimTarget {
+		t.Fatalf("the sampler only ever saw %d retained tasks, want the burst to fill the store "+
+			"past the low-water mark of %d: the test did not exercise the bound", got, taskTrimTarget)
+	}
+	if got := maxCounted.Load(); got > maxRetainedTasks {
+		t.Fatalf("the retained count reached %d while %d publishers were publishing (cap %d): "+
+			"the bound is amortised, not a ceiling — a publisher inserted first and trimmed afterwards",
+			got, publishers, maxRetainedTasks)
+	}
+
+	// The end state must be bounded and the counter must not have drifted from
+	// the map it counts. Nothing is publishing any more, so the walk below is a
+	// true count of the store.
+	if got := h.retained.Load(); got > maxRetainedTasks {
+		t.Fatalf("retained count is %d after the burst, want at most %d", got, maxRetainedTasks)
+	}
+	stored := int64(0)
+	h.tasks.Range(func(_, _ any) bool { stored++; return true })
+	if stored != h.retained.Load() {
+		t.Fatalf("the store holds %d tasks but the retained counter says %d", stored, h.retained.Load())
+	}
+	if stored == 0 {
+		t.Fatal("the burst left the store empty: the bound must not evict live work")
+	}
+}
+
+// A hard cap must not be paid for with the work in flight: with the store at its
+// cap, admitting one more task evicts terminal tasks, even though the running
+// task is the oldest entry in the store.
+func TestTaskCapEvictsTerminalTasksBeforeRunningOnes(t *testing.T) {
+	h := NewHandler(config.DefaultConfig(), nil)
+	now := time.Now()
+
+	// Seed the store at its cap directly: the OLDEST entry is the running one,
+	// so a plain oldest-first policy would evict exactly the wrong task.
+	h.tasks.Store("running", &Task{ID: "running", Status: "working", UpdatedAt: now.Add(-time.Hour)})
+	for i := 0; i < maxRetainedTasks-1; i++ {
+		id := fmt.Sprintf("done-%d", i)
+		h.tasks.Store(id, &Task{ID: id, Status: "completed", UpdatedAt: now})
+	}
+	h.retained.Store(maxRetainedTasks)
+
+	h.publish(Task{ID: "fresh", Status: "working", CreatedAt: now, UpdatedAt: now})
+
+	if _, ok := h.tasks.Load("running"); !ok {
+		t.Fatal("the trim evicted an in-flight task while terminal tasks were available to evict")
+	}
+	if _, ok := h.tasks.Load("fresh"); !ok {
+		t.Fatal("the task that triggered the trim was itself evicted")
+	}
+	if got := h.retained.Load(); got > maxRetainedTasks {
+		t.Fatalf("retained count is %d after the admission trim, want at most %d", got, maxRetainedTasks)
+	}
+}
+
+// When every retained task is still running the cap still has to hold: the
+// policy allows in-flight tasks to be dropped as a last resort, and a peer that
+// loses its entry gets "Task not found" rather than an unbounded store.
+func TestTaskCapHoldsWhenEveryTaskIsRunning(t *testing.T) {
+	h := NewHandler(config.DefaultConfig(), nil)
+	now := time.Now()
+
+	for i := 0; i < maxRetainedTasks; i++ {
+		id := fmt.Sprintf("running-%d", i)
+		h.tasks.Store(id, &Task{ID: id, Status: "working", CreatedAt: now, UpdatedAt: now})
+	}
+	h.retained.Store(maxRetainedTasks)
+
+	h.publish(Task{ID: "fresh", Status: "working", CreatedAt: now, UpdatedAt: now})
+
+	if got := h.retained.Load(); got > maxRetainedTasks {
+		t.Fatalf("retained count is %d, want at most %d even when nothing is terminal", got, maxRetainedTasks)
+	}
+	if _, ok := h.tasks.Load("fresh"); !ok {
+		t.Fatal("the task that triggered the trim was itself evicted")
+	}
+}
+
 // The TTL pass drops terminal tasks once the retention window has passed, and
 // leaves work that is still running alone. The test rewinds the sweep clock
 // instead of waiting out the real TTL.

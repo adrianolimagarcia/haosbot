@@ -14,6 +14,7 @@ import (
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/a2a"
 	"github.com/adrianolimagarcia/nanobot-go/internal/agent"
+	"github.com/adrianolimagarcia/nanobot-go/internal/bus"
 	"github.com/adrianolimagarcia/nanobot-go/internal/command"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/netpolicy"
@@ -25,7 +26,18 @@ type Server struct {
 	server    *http.Server
 	provider  provider.Provider
 	cmdRouter *command.Router
-	loop      *agent.Loop
+
+	// loop, bus and dataDir are the runtime handles the request path and /readyz
+	// need and cannot derive from the config: the agent loop, the message bus the
+	// channels publish into, and the data directory the session store writes
+	// under. All three are late-injected seams (the gateway assembles them after
+	// the api package is constructed — cmd/haosbot/runtime.go), and all three are
+	// atomics so a probe or a request running concurrently with a setter cannot
+	// race with it. An unset handle is reported as a failing check rather than
+	// silently passing.
+	loop    atomic.Pointer[agent.Loop]
+	bus     atomic.Pointer[bus.Bus]
+	dataDir atomic.Pointer[string]
 
 	// notReady is the process-owned readiness override read by /readyz
 	// (see ready.go). The zero value means "no override".
@@ -33,17 +45,29 @@ type Server struct {
 }
 
 func NewServer(cfg *config.Config, prov provider.Provider, loop *agent.Loop) *Server {
-	return &Server{
+	s := &Server{
 		cfg:       cfg,
 		provider:  prov,
 		cmdRouter: command.NewRouter(),
-		loop:      loop,
 	}
+	s.loop.Store(loop)
+	return s
 }
 
 func (s *Server) SetLoop(loop *agent.Loop) {
-	s.loop = loop
+	s.loop.Store(loop)
 }
+
+// SetBus attaches the message bus whose consumers /readyz reports on. The
+// gateway owns the bus (it also hands it to the channel manager and the agent
+// loop), so it is injected here instead of being rebuilt: a second bus would be
+// a second source of truth for the same queue.
+func (s *Server) SetBus(b *bus.Bus) { s.bus.Store(b) }
+
+// SetDataDir records the directory the gateway writes runtime data under — the
+// parent of the session store's root (cmd/haosbot/runtime.go builds the root as
+// <data dir>/sessions). /readyz proves it accepts a write.
+func (s *Server) SetDataDir(dir string) { s.dataDir.Store(&dir) }
 
 func (s *Server) checkAuth(r *http.Request) bool {
 	apiKey := s.cfg.API.APIKey
@@ -67,7 +91,7 @@ func (s *Server) Start(addr string) error {
 	mux := http.NewServeMux()
 	s.registerWebUI(mux)
 	s.registerReady(mux)
-	a2aHandler := a2a.NewHandler(s.cfg, s.loop)
+	a2aHandler := a2a.NewHandler(s.cfg, s.loop.Load())
 	a2aHandler.RegisterRoutes(mux)
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

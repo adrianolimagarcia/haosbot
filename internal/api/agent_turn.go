@@ -30,7 +30,8 @@ func (s *Server) registerAgentTurn(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if s.loop == nil {
+		loop := s.loop.Load()
+		if loop == nil {
 			http.Error(w, "Agent loop is not available", http.StatusServiceUnavailable)
 			return
 		}
@@ -59,7 +60,7 @@ func (s *Server) registerAgentTurn(mux *http.ServeMux) {
 
 		ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
 		defer cancel()
-		out, err := s.loop.ProcessMessage(ctx, core.InboundMessage{
+		out, err := loop.ProcessMessage(ctx, core.InboundMessage{
 			Channel:   "webui",
 			SenderID:  sessionID,
 			ChatID:    sessionID,

@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
 )
@@ -71,6 +72,14 @@ type Bus struct {
 	maxOutbound int
 
 	handlers []*subscription
+
+	// Consumer observation, for readiness probes. consumers counts the
+	// ConsumeInbound calls in flight and consumeStarts counts every one ever
+	// entered; see HasConsumer. They are updated on the inbound consume path
+	// only and change no dispatch behaviour: two atomic increments per consume,
+	// no lock.
+	consumers     atomic.Int64
+	consumeStarts atomic.Int64
 }
 
 type subscription struct {
@@ -138,6 +147,13 @@ func (b *Bus) PublishInbound(ctx context.Context, msg core.InboundMessage) error
 // ConsumeInbound blocks until a message is available, ctx is done, or the bus
 // closes.
 func (b *Bus) ConsumeInbound(ctx context.Context) (core.InboundMessage, error) {
+	// Observed by HasConsumer/ConsumerCount. Counted before the loop and
+	// released on every return path, so a consumer that is blocked, delivering
+	// or gone is never reported as in flight.
+	b.consumeStarts.Add(1)
+	b.consumers.Add(1)
+	defer b.consumers.Add(-1)
+
 	for {
 		b.mu.Lock()
 		if len(b.inbound) > 0 {
@@ -167,6 +183,42 @@ func (b *Bus) InboundSize() int {
 	defer b.mu.Unlock()
 	return len(b.inbound)
 }
+
+// HasConsumer reports whether anything has attached to the inbound queue: at
+// least one ConsumeInbound call has been entered since the bus was created.
+//
+// The queue accessors above only ever say how much is WAITING, and a bus that
+// nobody drains looks exactly like an idle one — InboundSize is 0 in both cases.
+// A gateway whose agent loop goroutine was never started, or has already
+// returned, therefore had no way to notice: every message published to it piled
+// up until the queue bound rejected it, while a readiness probe answered 200.
+// This is that missing observable.
+//
+// What it does and does not prove:
+//
+//   - false means nothing has ever drained the bus, which is the startup failure
+//     above. Nothing can flip it back to false, so a probe cannot flap on it.
+//   - true means a consumer attached at some point. Together with Closed() that
+//     is a sound "the loop is still draining" signal for the gateway runtime:
+//     agent.Loop.Run leaves ConsumeInbound only on a cancelled context, on a
+//     closed bus, or on an error from the bus itself — never because a turn
+//     failed — so an attached consumer on an open bus is either blocked in the
+//     queue or delivering a message it took from it.
+//   - it does NOT prove a consumer is parked in the queue right now. See
+//     ConsumerCount, which is deliberately not used for readiness: it reads 0
+//     whenever the consumer is busy processing, and a probe that flapped to
+//     unhealthy while the agent was working would cause the outage it exists to
+//     prevent.
+//
+// Outbound consumption (the channel manager draining replies) is not counted
+// here; ConsumeInbound is the agent loop's path.
+func (b *Bus) HasConsumer() bool { return b.consumeStarts.Load() > 0 }
+
+// ConsumerCount reports how many ConsumeInbound calls are in flight right now.
+// Zero means either that nothing has attached or that the attached consumer is
+// delivering a message it already took, so it is a diagnostic — not a liveness
+// signal, and not something to gate readiness on.
+func (b *Bus) ConsumerCount() int { return int(b.consumers.Load()) }
 
 // ---------------------------------------------------------------------------
 // Outbound

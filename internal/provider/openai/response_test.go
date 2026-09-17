@@ -103,3 +103,24 @@ func TestExtractXMLLikeTextToolCallRejectsDuplicateParameters(t *testing.T) {
 		t.Fatalf("duplicate-parameter block produced calls: %+v", calls)
 	}
 }
+
+func TestTextToolCallParserCapabilityModes(t *testing.T) {
+	jsonBlock := `before<tool_call>{"name":"exec","arguments":{"command":"json"}}</tool_call>after`
+	xmlBlock := `before<tool_call><function=exec><parameter=command>xml</parameter></function></tool_call>after`
+
+	if _, calls := extractTextToolCallsWithFormat(jsonBlock, ToolCallFormatNative); len(calls) != 0 {
+		t.Fatal("native mode must not heuristically parse text")
+	}
+	if _, calls := extractTextToolCallsWithFormat(jsonBlock, ToolCallFormatXML); len(calls) != 0 {
+		t.Fatal("XML mode must not parse JSON text calls")
+	}
+	if visible, calls := extractTextToolCallsWithFormat(jsonBlock, ToolCallFormatJSON); len(calls) != 1 || visible != "beforeafter" {
+		t.Fatalf("JSON mode: visible=%q calls=%d", visible, len(calls))
+	}
+	if _, calls := extractTextToolCallsWithFormat(xmlBlock, ToolCallFormatJSON); len(calls) != 0 {
+		t.Fatal("JSON mode must not parse XML text calls")
+	}
+	if visible, calls := extractTextToolCallsWithFormat(xmlBlock, ToolCallFormatXML); len(calls) != 1 || visible != "beforeafter" {
+		t.Fatalf("XML mode: visible=%q calls=%d", visible, len(calls))
+	}
+}

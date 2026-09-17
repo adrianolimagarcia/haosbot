@@ -771,6 +771,9 @@ var gatewayFields = []fieldDef{
 	{name: "port"},
 	{name: "restart_mode"},
 	{name: "heartbeat"},
+	// Port-only extensions; the reference ignores unknown keys here.
+	{name: "max_inbound_queue"},
+	{name: "max_outbound_queue"},
 }
 
 var heartbeatFields = []fieldDef{
@@ -781,7 +784,9 @@ var heartbeatFields = []fieldDef{
 func decodeGateway(c *collector, o *jmap) GatewayConfig {
 	out := GatewayConfig{
 		Host: "127.0.0.1", Port: 18790, RestartMode: "auto",
-		Heartbeat: HeartbeatConfig{Enabled: true, IntervalS: 30 * 60},
+		Heartbeat:        HeartbeatConfig{Enabled: true, IntervalS: 30 * 60},
+		MaxInboundQueue:  DefaultMaxInboundQueue,
+		MaxOutboundQueue: DefaultMaxOutboundQueue,
 	}
 	out.Host = c.readString(o, gatewayFields[0], out.Host)
 	out.Port = c.readInt(o, gatewayFields[1], out.Port, intBound{}, intBound{})
@@ -792,6 +797,10 @@ func decodeGateway(c *collector, o *jmap) GatewayConfig {
 			out.Heartbeat.IntervalS = c.readInt(sub, heartbeatFields[1], out.Heartbeat.IntervalS, intBound{}, intBound{})
 		}
 	}
+	// Ge(0) keeps 0 available as the explicit "unbounded" escape hatch, so a
+	// deployment that wants the reference's behavior can still ask for it.
+	out.MaxInboundQueue = c.readInt(o, gatewayFields[4], out.MaxInboundQueue, Ge(0), intBound{})
+	out.MaxOutboundQueue = c.readInt(o, gatewayFields[5], out.MaxOutboundQueue, Ge(0), intBound{})
 	return out
 }
 

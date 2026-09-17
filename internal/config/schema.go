@@ -365,12 +365,31 @@ type ApiConfig struct {
 	APIKey  string       `json:"apiKey"`
 }
 
-// GatewayConfig mirrors schema.py:353-359.
+// GatewayConfig mirrors schema.py:353-359, plus two port-only queue limits.
+//
+// The reference's GatewayConfig declares only host/port/restart_mode/heartbeat.
+// MaxInboundQueue and MaxOutboundQueue are a DELIBERATE DIVERGENCE: the Python
+// bus uses unbounded asyncio.Queues (nanobot/bus/queue.py:32-33), so the
+// reference has no such setting to mirror, and this port must not run unbounded
+// on the small devices it targets.
+//
+// They live here rather than at the root of Config because the reference's root
+// Config is a BaseSettings with extra="forbid" (schema.py:422), so a root-level
+// key would make a config file written by this port fail to load in the
+// reference ("Unknown setting"). GatewayConfig descends from `Base`, whose
+// pydantic default is extra="ignore", so the reference loads these keys and
+// ignores them — verified against upstream 1bb712d3.
 type GatewayConfig struct {
 	Host        string          `json:"host"`
 	Port        int             `json:"port"`
 	RestartMode string          `json:"restartMode"`
 	Heartbeat   HeartbeatConfig `json:"heartbeat"`
+
+	// MaxInboundQueue caps the gateway's pending inbound messages;
+	// MaxOutboundQueue does the same for outbound messages. Zero means
+	// unbounded, matching bus.Options, but the defaults are non-zero.
+	MaxInboundQueue  int `json:"maxInboundQueue"`
+	MaxOutboundQueue int `json:"maxOutboundQueue"`
 }
 
 // HeartbeatConfig mirrors schema.py:326-330.
@@ -573,10 +592,12 @@ func defaultConfigSkeleton() *Config {
 		Providers:     DefaultProvidersConfig(),
 		API:           ApiConfig{Host: "127.0.0.1", Port: 8900, Timeout: 120.0, APIKey: ""},
 		Gateway: GatewayConfig{
-			Host:        "127.0.0.1",
-			Port:        18790,
-			RestartMode: "auto",
-			Heartbeat:   HeartbeatConfig{Enabled: true, IntervalS: 30 * 60},
+			Host:             "127.0.0.1",
+			Port:             18790,
+			RestartMode:      "auto",
+			Heartbeat:        HeartbeatConfig{Enabled: true, IntervalS: 30 * 60},
+			MaxInboundQueue:  DefaultMaxInboundQueue,
+			MaxOutboundQueue: DefaultMaxOutboundQueue,
 		},
 		Tools:        DefaultToolsConfig(),
 		ModelPresets: map[string]ModelPresetConfig{},

@@ -40,8 +40,9 @@
     return headers;
   }
 
-  function appendTextMessage(stream, text, kind) {
+  async function appendTextMessage(stream, text, kind) {
     const wrapper = document.createElement('div');
+    let assistantBody = null;
     if (kind === 'user') {
       wrapper.className = 'flex justify-end';
       const bubble = document.createElement('div');
@@ -65,18 +66,42 @@
       copy.addEventListener('click', () => navigator.clipboard.writeText(text));
       top.append(label, copy);
 
-      // LLM output is untrusted. Use textContent rather than marked.parse +
-      // innerHTML, which allowed model/tool/document content to execute HTML.
-      const body = document.createElement('pre');
-      body.className = 'whitespace-pre-wrap font-sans text-gray-800 text-sm leading-relaxed bg-transparent border-0 p-0 m-0';
-      body.textContent = text;
+      // LLM output is untrusted. The server renders it (internal/api/markdown.go)
+      // and returns markup that is safe by construction, so the browser never
+      // parses untrusted text into markup itself. The raw text is shown first as
+      // inert text and replaced once the renderer answers; if the renderer is
+      // unavailable the inert text simply stays.
+      assistantBody = document.createElement('div');
+      assistantBody.className = 'prose max-w-none text-gray-800 text-sm';
+      assistantBody.textContent = text;
 
       const footer = document.createElement('div');
       footer.className = 'text-gray-400 text-[10px] pt-2';
       footer.textContent = 'Agora';
-      wrapper.append(top, body, footer);
+      wrapper.append(top, assistantBody, footer);
     }
     stream.appendChild(wrapper);
+
+    if (assistantBody) {
+      const html = await renderMarkdown(text);
+      if (html !== null) assistantBody.innerHTML = html;
+    }
+  }
+
+  async function renderMarkdown(text) {
+    try {
+      const res = await fetch('/api/webui/render', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return typeof data.html === 'string' ? data.html : null;
+    } catch (err) {
+      console.warn('Falha ao renderizar a resposta:', err);
+      return null;
+    }
   }
 
   window.newSession = function newSession() {
@@ -94,7 +119,7 @@
 
     input.value = '';
     const stream = document.getElementById('chat-stream');
-    appendTextMessage(stream, text, 'user');
+    await appendTextMessage(stream, text, 'user');
 
     const loader = document.createElement('div');
     loader.className = 'flex items-center space-x-2 text-xs text-gray-400';
@@ -115,14 +140,14 @@
       loader.remove();
 
       if (!res.ok) {
-        appendTextMessage(stream, `Erro (${res.status}): ${await res.text()}`, 'error');
+        await appendTextMessage(stream, `Erro (${res.status}): ${await res.text()}`, 'error');
       } else {
         const data = await res.json();
-        appendTextMessage(stream, data.content || '(sem resposta)', 'assistant');
+        await appendTextMessage(stream, data.content || '(sem resposta)', 'assistant');
       }
     } catch (err) {
       loader.remove();
-      appendTextMessage(stream, `Erro de conexão: ${err.message}`, 'error');
+      await appendTextMessage(stream, `Erro de conexão: ${err.message}`, 'error');
     }
 
     const container = document.getElementById('messages-container');

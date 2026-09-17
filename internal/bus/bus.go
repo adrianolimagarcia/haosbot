@@ -87,16 +87,6 @@ func (b *Bus) broadcastLocked() {
 	b.wait = make(chan struct{})
 }
 
-// wake returns a channel closed on the next state change.
-func (b *Bus) wake() (<-chan struct{}, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.closed {
-		return nil, ErrClosed
-	}
-	return b.wait, nil
-}
-
 // ---------------------------------------------------------------------------
 // Inbound
 // ---------------------------------------------------------------------------

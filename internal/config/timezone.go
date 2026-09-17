@@ -54,9 +54,7 @@ func detectSystemTimezone() string {
 func localZoneName() string {
 	// 1. $TZ, matching tzlocal.utils._tz_name_from_env.
 	if tz := os.Getenv("TZ"); tz != "" {
-		if strings.HasPrefix(tz, ":") {
-			tz = tz[1:]
-		}
+		tz = strings.TrimPrefix(tz, ":")
 		if tz != "" && !filepath.IsAbs(tz) {
 			if _, err := time.LoadLocation(tz); err == nil {
 				return tz

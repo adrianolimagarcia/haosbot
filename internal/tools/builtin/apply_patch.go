@@ -384,7 +384,7 @@ func (t *ApplyPatch) applyReplace(
 	// multi-byte first character cannot re-occur inside itself, so the byte and
 	// character searches find a second occurrence under exactly the same
 	// conditions.
-	if strings.Index(normContent[pos+1:], normOld) >= 0 {
+	if strings.Contains(normContent[pos+1:], normOld) {
 		return "", "", patchErrf("old_text appears multiple times in %s", path)
 	}
 

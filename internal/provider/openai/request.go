@@ -254,15 +254,6 @@ func (m *wireMessage) set(key string, raw json.RawMessage) {
 	m.fields = append(m.fields, wireField{key: key, raw: raw})
 }
 
-func (m *wireMessage) del(key string) {
-	for i := range m.fields {
-		if m.fields[i].key == key {
-			m.fields = append(m.fields[:i], m.fields[i+1:]...)
-			return
-		}
-	}
-}
-
 func (m *wireMessage) clone() *wireMessage {
 	cp := &wireMessage{fields: make([]wireField, len(m.fields))}
 	copy(cp.fields, m.fields)

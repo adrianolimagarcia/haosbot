@@ -97,10 +97,7 @@ type matchSpan struct {
 
 // endLine mirrors _match_end_line (filesystem.py:679-682).
 func (m matchSpan) endLine() int {
-	comparable := m.text
-	if strings.HasSuffix(comparable, "\n") {
-		comparable = comparable[:len(comparable)-1]
-	}
+	comparable := strings.TrimSuffix(m.text, "\n")
 	return m.line + strings.Count(comparable, "\n")
 }
 

@@ -10,8 +10,6 @@ import (
 // HKUDS/nanobot@1bb712d3488915ca4ed9ccc1a93067ff722f5ab9) via
 // compat/python/dump_apply_patch.py.
 
-func strptr(s string) *string { return &s }
-
 func TestBuildUnifiedDiffPayloadDefaults(t *testing.T) {
 	before := "one\ntwo\nthree\n"
 	after := "one\n2\nthree\nfour\n"

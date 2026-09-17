@@ -90,10 +90,6 @@ func (o *jmap) child(name string) *jmap {
 	return &jmap{m: nil, path: appendPath(o.path, Field(name))}
 }
 
-func (o *jmap) childMap(name string, m map[string]any) *jmap {
-	return &jmap{m: m, path: appendPath(o.path, Field(name))}
-}
-
 func appendPath(p []PathPart, extra ...PathPart) []PathPart {
 	out := make([]PathPart, 0, len(p)+len(extra))
 	out = append(out, p...)

@@ -73,7 +73,7 @@ func ValidSkillMetadata(metadata map[string]any, name string) bool {
 	if s, ok := metadata["name"].(string); !ok || s != name {
 		return false
 	}
-	description, _ := metadata["description"]
+	description := metadata["description"]
 	if utf8.RuneCountInString(name) > 64 {
 		return false
 	}

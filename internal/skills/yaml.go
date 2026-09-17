@@ -756,14 +756,6 @@ func resolvePlainKeyValue(raw string) any {
 	return resolveScalar(strings.TrimRight(raw, " \t"))
 }
 
-// resolvePlainKey applies YAML implicit typing to an unquoted mapping key and
-// then Python's str(), mirroring parse_skill_metadata's
-// `{str(key): value for key, value in parsed.items()}`. `true: x` therefore
-// becomes the key "True" and `1: x` the key "1", not the raw source text.
-func resolvePlainKey(raw string) string {
-	return pyStr(resolveScalar(strings.TrimRight(raw, " \t")))
-}
-
 // parseValue parses the value part of a mapping entry. rest is the text after
 // the key's colon (possibly empty); keyIndent is the indentation of the key
 // line, used to discover a nested block node.

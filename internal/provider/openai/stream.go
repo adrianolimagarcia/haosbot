@@ -101,7 +101,9 @@ func (c *Client) consumeStream(
 
 	if !done && failure == nil {
 		if payload, ok := sse.flush(); ok {
-			done, failure = dispatchChunk(payload, aggregate, ctx, events)
+			// The loop has already exited, so the returned `done` is never read
+			// again — only failure feeds the switch below.
+			_, failure = dispatchChunk(payload, aggregate, ctx, events)
 		}
 	}
 

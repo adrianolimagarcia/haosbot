@@ -62,7 +62,7 @@ func PublicHistoryMessage(message map[string]any) map[string]any {
 
 	// Python: cleaned.pop(RUNTIME_CONTEXT_HISTORY_META, None). The key is
 	// removed whether or not it held a usable marker.
-	marker, _ := cleaned[HistoryMeta]
+	marker := cleaned[HistoryMeta]
 	delete(cleaned, HistoryMeta)
 
 	markerData, ok := marker.(map[string]any)

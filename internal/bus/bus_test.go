@@ -189,7 +189,7 @@ func TestUnboundedByDefault(t *testing.T) {
 	}
 }
 
-type testEvent struct{ n int }
+type testEvent struct{}
 
 func (testEvent) EventName() string { return "test" }
 

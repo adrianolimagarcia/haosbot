@@ -942,9 +942,6 @@ func (r *Runner) runOne(
 	return res
 }
 
-// utf8Start reports whether b begins a UTF-8 sequence.
-func utf8Start(b byte) bool { return b&0xC0 != 0x80 }
-
 // assistantMessage renders a model response as a transcript message.
 //
 // Two things about it are load-bearing and were both wrong before:

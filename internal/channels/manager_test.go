@@ -91,12 +91,6 @@ func (c *mgrChannel) unblockSend() {
 	c.blockChat, c.block, c.blockAll = "", nil, false
 }
 
-func (c *mgrChannel) signalFirstSend(ch chan struct{}) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.signal = ch
-}
-
 func (c *mgrChannel) setSendResult(fn func(attempt int, msg core.OutboundMessage) error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -324,9 +318,20 @@ func newMgr(t *testing.T, opts ...ManagerOption) (*ChannelManager, *bus.Bus) {
 
 func strPtr(s string) *string { return &s }
 
+// waitFor polls cond until it holds or the budget expires.
+//
+// The budget is deliberately generous because these are LIVENESS checks over
+// goroutine scheduling, not performance assertions: `go test -race` slows
+// everything down and CI runs the whole suite on a shared runner. A real hang
+// still fails, just later.
+//
+// A generous budget is not a substitute for a correct condition, though: the
+// flake this helper reported in TestCancelOutboundReturnsAdmissionPermits was a
+// WRONG PRECONDITION in that test (a transient state that only sometimes
+// existed), not a slow machine — see the blockEverySend comment there.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
@@ -1173,7 +1178,14 @@ func TestCancelOutboundReturnsAdmissionPermits(t *testing.T) {
 	m.AddChannel("mock", ch)
 
 	release := make(chan struct{})
-	ch.blockSend("0", release)
+	// EVERY destination must block, not just chat "0". blockSend("0", ...) left
+	// the other three sends free to complete, so outboundTaskCount() settled at 1
+	// and the "tasks to be registered" wait below could only ever be satisfied by
+	// catching a TRANSIENT moment before those three finished — it failed under
+	// `go test -race -count=25 ./internal/channels/`. Holding all four is also
+	// what the test is actually about: the four admission permits must be
+	// returned by cancellation.
+	ch.blockEverySend(release)
 
 	for i := 0; i < 4; i++ {
 		if err := m.QueueOutbound(context.Background(), ch, core.OutboundMessage{

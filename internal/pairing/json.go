@@ -65,23 +65,6 @@ func (o *jsonObject) set(key string, value any) {
 	o.vals[key] = value
 }
 
-// del removes key, preserving the relative order of the remaining keys.
-func (o *jsonObject) del(key string) {
-	if o == nil {
-		return
-	}
-	if _, ok := o.vals[key]; !ok {
-		return
-	}
-	delete(o.vals, key)
-	for i, k := range o.keys {
-		if k == key {
-			o.keys = append(o.keys[:i], o.keys[i+1:]...)
-			break
-		}
-	}
-}
-
 // decodeJSONDocument parses exactly one JSON document, preserving object key
 // order.
 //

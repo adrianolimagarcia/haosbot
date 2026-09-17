@@ -815,7 +815,8 @@ func TestDefaultPathMatchesDataDir(t *testing.T) {
 }
 
 func TestDefaultReturnsOneStore(t *testing.T) {
-	if Default() != Default() {
+	first, second := Default(), Default()
+	if first != second {
 		t.Error("Default() returned two different stores")
 	}
 	if Default().Path() != DefaultPath() {

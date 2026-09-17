@@ -124,15 +124,6 @@ func (s *objectStore) get(id objectID) (rawObject, error) {
 	return s.getPacked(id)
 }
 
-// getLooseOnly reads a loose object without consulting packs.
-func (s *objectStore) getLooseOnly(id objectID) (rawObject, error) {
-	data, err := os.ReadFile(s.loosePath(id))
-	if err != nil {
-		return rawObject{}, err
-	}
-	return decodeLoose(id, data)
-}
-
 // decodeLoose parses "<type> <size>\0<body>" from a zlib stream.
 func decodeLoose(id objectID, compressed []byte) (rawObject, error) {
 	zr, err := zlib.NewReader(bytes.NewReader(compressed))

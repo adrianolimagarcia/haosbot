@@ -242,7 +242,8 @@ func parseISOFormatDate(b []byte, length int, unbounded bool, year, month, day *
 				p++
 			}
 			isoDay = 0
-			p, ok = parseDigits(b, p, &isoDay, 1)
+			// p is not read again: the function returns straight after.
+			_, ok = parseDigits(b, p, &isoDay, 1)
 			if !ok {
 				return -4
 			}

@@ -77,6 +77,9 @@ type graphStorePool struct {
 	// FTS-enabled store without it, and CI runs `go test ./...` untagged);
 	// production always uses graphStoreConfig.
 	storeConfig func(path string) micrographrag.Config
+	// embedder is shared across session stores. Each store receives a wrapper
+	// whose Close is a no-op because Store.Close otherwise owns the embedder.
+	embedder micrographrag.Embedder
 
 	// Overshoot accounting. The pool is allowed to exceed maxOpen (see
 	// evictLocked); these counters are what make that tradeoff observable
@@ -130,7 +133,13 @@ type graphStoreEntry struct {
 }
 
 func newGraphStorePool(dir string) *graphStorePool {
-	return newGraphStorePoolWithLimit(dir, resolveGraphPoolMaxOpenStores())
+	return newGraphStorePoolWithEmbedder(dir, resolveGraphPoolMaxOpenStores(), nil)
+}
+
+func newGraphStorePoolWithEmbedder(dir string, maxOpen int, embedder micrographrag.Embedder) *graphStorePool {
+	p := newGraphStorePoolWithLimit(dir, maxOpen)
+	p.embedder = embedder
+	return p
 }
 
 func newGraphStorePoolWithLimit(dir string, maxOpen int) *graphStorePool {
@@ -168,15 +177,19 @@ func resolveGraphPoolMaxOpenStores() int {
 	return v
 }
 
-// graphStoreConfig is the production store configuration: MicroGraphRAG
-// defaults with the vector index and the embedding worker off, because this
-// port configures no embedder. Retrieval is FTS5 plus graph expansion.
+// graphStoreConfig is the production store configuration. Vector search is
+// enabled by newGraphStorePoolWithEmbedder when a local embedder is available;
+// without one the store remains FTS5 plus graph expansion.
 func graphStoreConfig(path string) micrographrag.Config {
 	graphCfg := micrographrag.DefaultConfig(path)
 	graphCfg.EnableVector = false
 	graphCfg.EnableEmbeddingWorker = false
 	return graphCfg
 }
+
+type sharedGraphEmbedder struct{ micrographrag.Embedder }
+
+func (sharedGraphEmbedder) Close() error { return nil }
 
 // Acquire returns the store for sessionKey pinned for the caller. The returned
 // release function must be called once the caller is done with the store; it is
@@ -223,7 +236,14 @@ func (p *graphStorePool) open(ctx context.Context, sessionKey string) (*microgra
 	}
 	sum := sha256.Sum256([]byte(sessionKey))
 	name := hex.EncodeToString(sum[:]) + ".db"
-	return micrographrag.Open(ctx, p.storeConfig(filepath.Join(p.dir, name)), nil)
+	cfg := p.storeConfig(filepath.Join(p.dir, name))
+	var embedder micrographrag.Embedder
+	if p.embedder != nil {
+		cfg.EnableVector = true
+		cfg.EnableEmbeddingWorker = true
+		embedder = sharedGraphEmbedder{Embedder: p.embedder}
+	}
+	return micrographrag.Open(ctx, cfg, embedder)
 }
 
 // releaser returns the idempotent release function handed to the caller of
@@ -458,6 +478,11 @@ func (p *graphStorePool) Close() error {
 	var joined error
 	for _, store := range stores {
 		if err := store.Close(); err != nil {
+			joined = errors.Join(joined, err)
+		}
+	}
+	if p.embedder != nil {
+		if err := p.embedder.Close(); err != nil {
 			joined = errors.Join(joined, err)
 		}
 	}

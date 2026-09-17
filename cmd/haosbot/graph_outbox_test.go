@@ -66,7 +66,7 @@ func TestGraphIndexerDurableFullQueueRetryAndDedup(t *testing.T) {
 	started := make(chan string, 1)
 	release := make(chan struct{})
 	processed := make(chan string, 4)
-	g.process = func(ctx context.Context, job graphIndexJob) error {
+	g.setProcess(func(ctx context.Context, job graphIndexJob) error {
 		calls.Add(1)
 		select {
 		case started <- job.ID:
@@ -81,7 +81,7 @@ func TestGraphIndexerDurableFullQueueRetryAndDedup(t *testing.T) {
 		}
 		processed <- job.ID
 		return nil
-	}
+	})
 	if !g.EnqueueWithID("first", "s", "one") {
 		t.Fatal("first enqueue was rejected")
 	}
@@ -148,10 +148,10 @@ func TestGraphOutboxCrashTailRecoveryAndIndexerRestart(t *testing.T) {
 	}
 	var processed atomic.Int32
 	g := newGraphIndexer(nil, 1, 2, recovered)
-	g.process = func(context.Context, graphIndexJob) error {
+	g.setProcess(func(context.Context, graphIndexJob) error {
 		processed.Add(1)
 		return nil
-	}
+	})
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(recovered.Pending()) == 0 {

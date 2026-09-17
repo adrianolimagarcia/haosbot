@@ -90,6 +90,11 @@ type Options struct {
 	HTTPClient *http.Client
 	// ExtraHeaders are applied last, overriding defaults.
 	ExtraHeaders map[string]string
+	// ToolCallFormat selects the text parser for this provider. Native tool_calls
+	// remain supported; Auto preserves legacy behavior.
+	ToolCallFormat ToolCallFormat
+	// ToolCallFormatsByModel overrides ToolCallFormat for exact model IDs.
+	ToolCallFormatsByModel map[string]ToolCallFormat
 }
 
 // Client is an OpenAI-compatible chat provider.
@@ -101,8 +106,10 @@ type Client struct {
 	baseURL         string
 	model           string
 	httpClient      *http.Client
-	extraHeaders    map[string]string
-	sessionAffinity string
+	extraHeaders         map[string]string
+	toolCallFormat       ToolCallFormat
+	toolCallFormatsModel map[string]ToolCallFormat
+	sessionAffinity      string
 }
 
 var (
@@ -145,13 +152,19 @@ func New(opts Options) *Client {
 	for k, v := range opts.ExtraHeaders {
 		headers[k] = v
 	}
+	modelFormats := make(map[string]ToolCallFormat, len(opts.ToolCallFormatsByModel))
+	for k, v := range opts.ToolCallFormatsByModel {
+		modelFormats[strings.ToLower(strings.TrimSpace(k))] = normalizeToolCallFormat(v)
+	}
 	return &Client{
-		apiKey:          apiKey,
-		baseURL:         base,
-		model:           model,
-		httpClient:      httpClient,
-		extraHeaders:    headers,
-		sessionAffinity: randomHex(16),
+		apiKey:              apiKey,
+		baseURL:             base,
+		model:               model,
+		httpClient:          httpClient,
+		extraHeaders:        headers,
+		toolCallFormat:      normalizeToolCallFormat(opts.ToolCallFormat),
+		toolCallFormatsModel: modelFormats,
+		sessionAffinity:     randomHex(16),
 	}
 }
 
@@ -188,7 +201,17 @@ func (c *Client) Chat(ctx context.Context, req provider.ChatRequest) (*core.Resp
 	if err != nil {
 		return nil, fmt.Errorf("openai: read response body: %w", err)
 	}
-	return parseResponse(payload)
+	return parseResponseWithToolCallFormat(payload, c.toolCallFormatForModel(req.Model))
+}
+
+func (c *Client) toolCallFormatForModel(model string) ToolCallFormat {
+	if model == "" {
+		model = c.model
+	}
+	if format, ok := c.toolCallFormatsModel[strings.ToLower(strings.TrimSpace(model))]; ok {
+		return format
+	}
+	return c.toolCallFormat
 }
 
 // endpoint returns the absolute chat-completions URL.

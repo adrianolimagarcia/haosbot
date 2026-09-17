@@ -168,7 +168,7 @@ func (o *graphOutbox) appendLocked(record graphOutboxRecord) error {
 
 func (o *graphOutbox) Enqueue(job graphIndexJob) (bool, error) {
 	if job.ID == "" {
-		job.ID = graphMemoryJobID(job.sessionKey, job.content)
+		job.ID = graphMemoryJobID(job.sessionKey, "", job.content)
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()

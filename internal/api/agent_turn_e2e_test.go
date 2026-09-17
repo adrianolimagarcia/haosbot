@@ -195,7 +195,7 @@ func mustJSONString(s string) string {
 type immediateTimeoutProvider struct{}
 
 func (immediateTimeoutProvider) Name() string { return "timeout" }
-func (immediateTimeoutProvider) Chat(ctx context.Context, provider.ChatRequest) (*core.Response, error) {
+func (immediateTimeoutProvider) Chat(ctx context.Context, _ provider.ChatRequest) (*core.Response, error) {
 	return nil, context.DeadlineExceeded
 }
 

@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"html"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -57,14 +59,16 @@ func parseResponse(payload []byte) (*core.Response, error) {
 		// (openai_compat_provider.py:1552-1565).
 		if raw := firstTruthyRaw(resp.Content, resp.OutputText); raw != nil {
 			content := extractTextContent(raw)
-			if content != "" {
+			content, calls := extractTextToolCalls(content)
+			if content != "" || len(calls) > 0 {
 				finish := "stop"
 				if resp.FinishReason != nil && *resp.FinishReason != "" {
 					finish = *resp.FinishReason
 				}
 				return &core.Response{
 					Content:          content,
-					HasContent:       true,
+					HasContent:       content != "",
+					ToolCalls:        calls,
 					FinishReason:     core.FinishReason(finish),
 					Usage:            extractUsage(resp.Usage),
 					ReasoningContent: extractTextContent(resp.ReasoningContent),
@@ -334,6 +338,22 @@ func parseToolArguments(raw json.RawMessage) json.RawMessage {
 // textToolCallRe mirrors _TEXT_TOOL_CALL_RE (openai_compat_provider.py:122).
 var textToolCallRe = regexp.MustCompile(`(?s)<tool_call>\s*(.*?)\s*</tool_call>`)
 
+// textToolCallXMLRe accepts the XML-like function/parameter format emitted by
+// some OpenAI-compatible models:
+//
+//	<tool_call>
+//	<function=exec>
+//	<parameter=command>printf 'hello'</parameter>
+//	</function>
+//	</tool_call>
+//
+// It is intentionally narrower than a general XML parser: tool and parameter
+// names must be identifiers, and the closing tags must be present. This keeps
+// malformed model output as visible assistant text instead of executing a
+// partial or guessed call.
+var textToolCallXMLRe = regexp.MustCompile(`(?s)<tool_call>\s*<function\s*=\s*([A-Za-z_][A-Za-z0-9_.:-]*)\s*>(.*?)</function\s*>\s*</tool_call\s*>`)
+var textToolCallParameterRe = regexp.MustCompile(`(?s)<parameter\s*=\s*([A-Za-z_][A-Za-z0-9_.:-]*)\s*>(.*?)</parameter\s*>`)
+
 // extractTextToolCalls mirrors _extract_text_tool_calls
 // (openai_compat_provider.py:245-295): providers that answer with text-format
 // <tool_call> blocks are normalized into structured calls and the matched spans
@@ -343,8 +363,13 @@ func extractTextToolCalls(content string) (string, []core.ToolCall) {
 		return content, nil
 	}
 
-	var calls []core.ToolCall
-	var spans [][2]int
+	type parsedCall struct {
+		call       core.ToolCall
+		start, end int
+	}
+	var parsed []parsedCall
+
+	// JSON payloads are the existing format and remain the first-class path.
 	for _, match := range textToolCallRe.FindAllStringSubmatchIndex(content, -1) {
 		payloadText := stripJSONFence(content[match[2]:match[3]])
 		var payload map[string]json.RawMessage
@@ -383,26 +408,89 @@ func extractTextToolCalls(content string) (string, []core.ToolCall) {
 			id = shortToolID()
 		}
 
-		calls = append(calls, core.ToolCall{
-			ID:        id,
-			Name:      name,
-			Arguments: parseToolArguments(encodedArgs),
+		parsed = append(parsed, parsedCall{
+			call: core.ToolCall{
+				ID:        id,
+				Name:      name,
+				Arguments: parseToolArguments(encodedArgs),
+			},
+			start: match[0],
+			end:   match[1],
 		})
-		spans = append(spans, [2]int{match[0], match[1]})
 	}
 
-	if len(calls) == 0 {
+	// Some models emit a non-XML, XML-like format with one text parameter per
+	// argument. Convert every parameter to a JSON string value. Values are
+	// trimmed only at the boundary so indentation around the tags does not
+	// become part of a shell command; internal whitespace and newlines survive.
+	for _, match := range textToolCallXMLRe.FindAllStringSubmatchIndex(content, -1) {
+		call, ok := parseXMLTextToolCall(
+			content[match[2]:match[3]],
+			content[match[4]:match[5]],
+		)
+		if !ok {
+			continue
+		}
+		parsed = append(parsed, parsedCall{call: call, start: match[0], end: match[1]})
+	}
+
+	if len(parsed) == 0 {
 		return content, nil
 	}
 
+	// JSON and XML-like blocks can be interleaved. Sort before removing spans
+	// so visible content and tool-call order remain deterministic.
+	sort.SliceStable(parsed, func(i, j int) bool {
+		return parsed[i].start < parsed[j].start
+	})
+
+	calls := make([]core.ToolCall, 0, len(parsed))
 	var visible strings.Builder
 	last := 0
-	for _, span := range spans {
-		visible.WriteString(content[last:span[0]])
-		last = span[1]
+	for _, item := range parsed {
+		// Do not remove an overlapping span twice. This is defensive for future
+		// grammar extensions and prevents slicing backwards on malformed input.
+		if item.start < last {
+			continue
+		}
+		visible.WriteString(content[last:item.start])
+		last = item.end
+		calls = append(calls, item.call)
 	}
 	visible.WriteString(content[last:])
 	return strings.TrimSpace(visible.String()), calls
+}
+
+// parseXMLTextToolCall converts the XML-like function/parameter block into a
+// regular structured call. Any non-whitespace text outside parameter elements
+// or duplicate parameter name invalidates the whole block.
+func parseXMLTextToolCall(name, body string) (core.ToolCall, bool) {
+	params := make(map[string]string)
+	last := 0
+	for _, match := range textToolCallParameterRe.FindAllStringSubmatchIndex(body, -1) {
+		if strings.TrimSpace(body[last:match[0]]) != "" {
+			return core.ToolCall{}, false
+		}
+		key := body[match[2]:match[3]]
+		if _, exists := params[key]; exists {
+			return core.ToolCall{}, false
+		}
+		params[key] = html.UnescapeString(strings.TrimSpace(body[match[4]:match[5]]))
+		last = match[1]
+	}
+	if strings.TrimSpace(body[last:]) != "" {
+		return core.ToolCall{}, false
+	}
+
+	encodedArgs, err := marshalNoHTMLEscape(params)
+	if err != nil {
+		return core.ToolCall{}, false
+	}
+	return core.ToolCall{
+		ID:        shortToolID(),
+		Name:      name,
+		Arguments: parseToolArguments(encodedArgs),
+	}, true
 }
 
 // stripJSONFence mirrors _strip_json_fence (openai_compat_provider.py:235-242).

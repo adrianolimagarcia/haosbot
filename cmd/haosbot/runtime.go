@@ -14,8 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	micrographrag "github.com/adrianolimagarcia/micrographrag-go"
-
 	"github.com/adrianolimagarcia/nanobot-go/internal/agent"
 	"github.com/adrianolimagarcia/nanobot-go/internal/api"
 	"github.com/adrianolimagarcia/nanobot-go/internal/bus"
@@ -27,13 +25,9 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/session"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools/builtin"
-	// Aliased because buildRuntime has a local `workspace` string that would
-	// otherwise shadow the package name.
 	wsbootstrap "github.com/adrianolimagarcia/nanobot-go/internal/workspace"
 )
 
-// runtime is the assembled agent: config, bus, session store, provider, tools
-// and the loop that ties them together.
 type agentRuntime struct {
 	cfg    *config.Config
 	bus    *bus.Bus
@@ -42,7 +36,6 @@ type agentRuntime struct {
 	closeF func()
 }
 
-// transcriptStore adapts *session.Store to agent.TranscriptStore.
 type transcriptStore struct{ s *session.Store }
 
 func (t transcriptStore) Open(key string) (agent.Transcript, error) {
@@ -53,11 +46,9 @@ func (t transcriptStore) Open(key string) (agent.Transcript, error) {
 	return sess, nil
 }
 
-// buildRuntime assembles the runtime from a loaded config.
 func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	d := cfg.Agents.Defaults
 
-	// The agent workspace is where the agent reads and writes files.
 	workspace, err := expandTilde(d.Workspace)
 	if err != nil {
 		return nil, fmt.Errorf("resolve workspace: %w", err)
@@ -65,19 +56,16 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		return nil, fmt.Errorf("create workspace %s: %w", workspace, err)
 	}
-
 	if _, err := wsbootstrap.SyncTemplates(workspace, false); err != nil {
 		return nil, fmt.Errorf("sync workspace templates: %w", err)
 	}
 
-	// Session storage must live OUTSIDE the agent workspace.
 	sessionsRoot := filepath.Join(config.DefaultDataDir(), "sessions")
 	if isWithin(sessionsRoot, workspace) {
 		return nil, fmt.Errorf(
 			"session root %s is inside the agent workspace %s; refusing to start",
 			sessionsRoot, workspace)
 	}
-
 	store := session.NewStore(workspace, sessionsRoot)
 
 	prov, model, err := resolveProvider(cfg)
@@ -108,36 +96,27 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	})
 
 	messageBus := bus.New(bus.Options{})
-
-	// MicroGraphRAG is a derived index. It is optional at runtime and uses FTS5
-	// by default; vector embeddings remain disabled unless explicitly provisioned.
-	graphCfg := micrographrag.DefaultConfig(filepath.Join(config.DefaultDataDir(), "agent.db"))
-	graphCfg.EnableVector = false
-	graphCfg.EnableEmbeddingWorker = false
-	graphStore, graphErr := micrographrag.Open(context.Background(), graphCfg, nil)
-	if graphErr != nil {
-		fmt.Fprintf(os.Stderr, "haosbot: graph memory disabled: %v\n", graphErr)
-		graphStore = nil
-	}
+	graphPool := newGraphStorePool(filepath.Join(config.DefaultDataDir(), "graph-sessions"))
 
 	loop, err := agent.NewLoop(agent.LoopConfig{
-		Bus:                 messageBus,
-		Store:               transcriptStore{store},
-		Provider:            prov,
-		Tools:               registry,
-		Prompt:              prompt.New(workspace),
-		Model:               model,
-		MaxTokens:           d.MaxTokens,
-		ContextWindowTokens: d.ContextWindowTokens,
-		Temperature:         float64(d.Temperature),
-		Workspace:           workspace,
-		MaxIterations:       d.MaxToolIterations,
-		MaxToolResultChars:  d.MaxToolResultChars,
-		SequentialTools:     false,
-		GraphMemory:         graphStore,
-		GraphMemoryMaxChars: 6000,
+		Bus:                   messageBus,
+		Store:                 transcriptStore{store},
+		Provider:              prov,
+		Tools:                 registry,
+		Prompt:                prompt.New(workspace),
+		Model:                 model,
+		MaxTokens:             d.MaxTokens,
+		ContextWindowTokens:   d.ContextWindowTokens,
+		Temperature:           float64(d.Temperature),
+		Workspace:             workspace,
+		MaxIterations:         d.MaxToolIterations,
+		MaxToolResultChars:    d.MaxToolResultChars,
+		SequentialTools:       false,
+		GraphMemoryForSession: graphPool.Store,
+		GraphMemoryMaxChars:   6000,
 	})
 	if err != nil {
+		_ = graphPool.Close()
 		messageBus.Close()
 		return nil, fmt.Errorf("build agent loop: %w", err)
 	}
@@ -148,9 +127,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		loop:  loop,
 		store: store,
 		closeF: func() {
-			if graphStore != nil {
-				_ = graphStore.Close()
-			}
+			_ = graphPool.Close()
 			messageBus.Close()
 		},
 	}, nil
@@ -162,7 +139,6 @@ func (r *agentRuntime) Close() {
 	}
 }
 
-// resolveProvider picks the provider and model from config.
 func resolveProvider(cfg *config.Config) (provider.Provider, string, error) {
 	d := cfg.Agents.Defaults
 	model := d.Model
@@ -226,10 +202,6 @@ func providerConfigFor(cfg *config.Config, name string) (config.ProviderConfig, 
 				"chat completions are implemented); see docs/COMPATIBILITY.md", name)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Commands
-// ---------------------------------------------------------------------------
 
 func cmdRun(args []string) error {
 	if len(args) == 0 {
@@ -319,7 +291,6 @@ func cmdChat(args []string) error {
 	return nil
 }
 
-// cmdGateway runs the loop as a service until interrupted.
 func cmdGateway(args []string) error {
 	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
 	hostFlag := fs.String("host", "", "HTTP gateway host/IP to bind (defaults to config api.host or 127.0.0.1)")
@@ -373,7 +344,6 @@ func cmdGateway(args []string) error {
 			errCh <- err
 		}
 	}()
-
 	go func() { errCh <- rt.loop.Run(ctx) }()
 
 	select {
@@ -386,10 +356,6 @@ func cmdGateway(args []string) error {
 		return err
 	}
 }
-
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
 
 func expandTilde(path string) (string, error) {
 	if path == "" {

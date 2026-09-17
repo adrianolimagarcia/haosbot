@@ -74,7 +74,7 @@ jobs:
       - name: Install analyzers
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
 
       - name: Staticcheck
         run: staticcheck ./...

@@ -73,7 +73,10 @@ func (g *graphIndexer) worker() {
 				return
 			}
 			ctx, cancel := context.WithTimeout(g.ctx, 15*time.Second)
-			store, err := g.pool.Store(ctx, job.sessionKey)
+			// Acquire (not Store): the pin is released explicitly right after
+			// the write, so the pool may evict and close the store as soon as
+			// this job is done, but never while AddMemory is running.
+			store, release, err := g.pool.Acquire(ctx, job.sessionKey)
 			if err == nil {
 				_, _ = store.AddMemory(ctx, micrographrag.MemoryInput{
 					Kind:    1,
@@ -81,6 +84,7 @@ func (g *graphIndexer) worker() {
 					Title:   "Agent turn " + job.sessionKey,
 					Content: job.content,
 				})
+				release()
 			}
 			cancel()
 		}

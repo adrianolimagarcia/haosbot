@@ -16,10 +16,12 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -31,6 +33,12 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.14"
+
+      - name: Install frozen Python reference
+        run: |
+          python -m venv .tools/venv
+          .tools/venv/bin/python -m pip install --upgrade pip
+          .tools/venv/bin/python -m pip install -e ./upstream/nanobot
 
       - name: Download modules
         run: go mod download
@@ -65,7 +73,7 @@ jobs:
 
       - name: Install analyzers
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
           go install golang.org/x/vuln/cmd/govulncheck@latest
 
       - name: Staticcheck

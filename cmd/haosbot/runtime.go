@@ -126,6 +126,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		graphIndexer.Close(shutdownCtx)
 		cancel()
+		graphPool.LogShutdownStats()
 		_ = graphPool.Close()
 		messageBus.Close()
 		return nil, fmt.Errorf("build agent loop: %w", err)
@@ -140,6 +141,12 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			graphIndexer.Close(shutdownCtx)
 			cancel()
+			// Logged after the indexer has drained and before Close, so the
+			// counters describe the whole life of the pool: the graph store
+			// pool is allowed to exceed its open-store limit while stores are
+			// pinned, and this is where an operator sees by how much and how
+			// often (graph_pool.go: OvershootStats).
+			graphPool.LogShutdownStats()
 			_ = graphPool.Close()
 			messageBus.Close()
 		},

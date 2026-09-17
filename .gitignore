@@ -14,6 +14,9 @@ coverage.out
 __pycache__/
 *.py[cod]
 
+# Local toolchain checkout (Go toolchain, Python venv, staticcheck)
+/.tools/
+
 # Local/editor noise
 .DS_Store
 .vscode/

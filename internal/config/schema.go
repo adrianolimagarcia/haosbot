@@ -66,7 +66,25 @@ func (c *Config) RuntimeDataDir() string {
 }
 
 // WorkspacePath returns the expanded workspace path (schema.py:490-493).
-func (c *Config) WorkspacePath() string { return expandUser(c.Agents.Defaults.Workspace) }
+//
+// DELIBERATE DIVERGENCE from the reference, for the empty case only: Python's
+// `Config.workspace_path` is `Path(self.agents.defaults.workspace).expanduser()`
+// with no fallback, so an unset workspace yields "." — and this port, which
+// returns a string rather than a Path, yielded "". Either way the caller gets a
+// "ghost workspace": a path that is not the configured or default workspace
+// (internal/api/openai_compat.go passes this value to the slash-command router,
+// whose /status reply prints it). An empty workspace therefore resolves to
+// DefaultWorkspace() — the same branding-aware fallback
+// cmd/haosbot/runtime.go:369-371 and cmd/nanobot/runtime.go:399-401 already
+// apply to an empty workspace — while any explicitly configured value, including
+// the field's own literal "~/.nanobot/workspace" default (schema.py:119), is
+// returned unchanged.
+func (c *Config) WorkspacePath() string {
+	if c.Agents.Defaults.Workspace == "" {
+		return DefaultWorkspace()
+	}
+	return expandUser(c.Agents.Defaults.Workspace)
+}
 
 // ResolveDefaultPreset returns the implicit `default` preset built from the
 // agents.defaults fields. Port of schema.py:472-479.

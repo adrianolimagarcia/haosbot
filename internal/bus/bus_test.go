@@ -239,6 +239,59 @@ func TestUnsubscribeIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestUnsubscribePeerSuppressesItMidDispatch pins the reference's call-time
+// activity check.
+//
+// The reference snapshots the handler LIST at the top of publish
+// (queue.py:120, `list(self._handlers)`), but every entry re-checks its own
+// `active` flag at the moment it is CALLED (queue.py:104-107). A handler that
+// unsubscribes a peer therefore suppresses that peer for the dispatch already
+// in progress.
+//
+// This port must snapshot the list, not the active set. Resolving the active
+// set up front (the previous revision) decides that B is live before A ever
+// runs, so B is called anyway — a divergence the reference never exhibits.
+//
+// The late-subscription assertion is not the discriminator (it holds in both
+// revisions); it guards the fix against the over-correction of re-reading
+// b.handlers on each iteration instead of snapshotting it, which would both
+// diverge from the reference and deadlock on the handler's own unsubscribe.
+func TestUnsubscribePeerSuppressesItMidDispatch(t *testing.T) {
+	b := New(Options{})
+	defer b.Close()
+	ctx := context.Background()
+
+	var peerCalls atomic.Int64
+	var lateSubscribed atomic.Int64
+	var unsubPeer func()
+
+	b.Subscribe(func(context.Context, Event) {
+		// A unsubscribes its peer B from inside the dispatch, then registers
+		// a handler of its own.
+		unsubPeer()
+		b.Subscribe(func(context.Context, Event) { lateSubscribed.Add(1) })
+	})
+	unsubPeer = b.Subscribe(func(context.Context, Event) { peerCalls.Add(1) })
+
+	b.Publish(ctx, testEvent{})
+
+	if got := peerCalls.Load(); got != 0 {
+		t.Errorf("peer handler called %d times during the dispatch that unsubscribed it; "+
+			"the reference checks active at call time and suppresses it", got)
+	}
+	if got := lateSubscribed.Load(); got != 0 {
+		t.Errorf("handler registered during dispatch called %d times; the reference "+
+			"iterates a snapshot of the handler list", got)
+	}
+
+	// Control, true in every revision: the peer stays suppressed afterwards.
+	before := peerCalls.Load()
+	b.Publish(ctx, testEvent{})
+	if got := peerCalls.Load(); got != before {
+		t.Errorf("peer handler called %d more times after unsubscribe", got-before)
+	}
+}
+
 // TestPanickingHandlerIsIsolated ensures one bad subscriber cannot stop
 // delivery to the others.
 func TestPanickingHandlerIsIsolated(t *testing.T) {

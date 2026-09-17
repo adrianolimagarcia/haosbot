@@ -108,7 +108,13 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		},
 	})
 
-	messageBus := bus.New(bus.Options{})
+	// Bounded by default, exactly like the gateway entrypoint
+	// (cmd/haosbot/runtime.go). A zero bus.Options is unbounded, so passing an
+	// empty Options here left the legacy binary able to grow without limit when
+	// its consumer stalled — the failure mode config.BusOptions exists to
+	// prevent. Both entrypoints must build their bus the same way; see
+	// internal/config/bus.go.
+	messageBus := bus.New(cfg.BusOptions())
 
 	loop, err := agent.NewLoop(agent.LoopConfig{
 		Bus:                 messageBus,

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -102,7 +103,13 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	// runs these queues unbounded; see internal/config/bus.go.
 	messageBus := bus.New(cfg.BusOptions())
 	graphPool := newGraphStorePool(filepath.Join(config.DefaultDataDir(), "graph-sessions"))
-	graphIndexer := newGraphIndexer(graphPool, 2, 64)
+	graphOutbox, err := openGraphOutbox(filepath.Join(config.DefaultDataDir(), "graph-outbox.jsonl"))
+	if err != nil {
+		_ = graphPool.Close()
+		messageBus.Close()
+		return nil, fmt.Errorf("open GraphRAG outbox: %w", err)
+	}
+	graphIndexer := newGraphIndexer(graphPool, 2, 64, graphOutbox)
 
 	loop, err := agent.NewLoop(agent.LoopConfig{
 		Bus:                   messageBus,
@@ -118,14 +125,21 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		MaxIterations:         d.MaxToolIterations,
 		MaxToolResultChars:    d.MaxToolResultChars,
 		SequentialTools:       false,
-		GraphMemoryForSession: graphPool.Store,
-		GraphMemoryEnqueue:    graphIndexer.Enqueue,
-		GraphMemoryMaxChars:   6000,
+		GraphMemoryForSession:     graphPool.Store,
+		GraphMemoryEnqueue:        graphIndexer.Enqueue,
+		GraphMemoryEnqueueWithID:  graphIndexer.EnqueueWithID,
+		GraphMemoryMaxChars:       6000,
 	})
 	if err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		graphIndexer.Close(shutdownCtx)
 		cancel()
+		if compactErr := graphOutbox.Compact(); compactErr != nil {
+			slog.Error("compact GraphRAG outbox", "error", compactErr)
+		}
+		if closeErr := graphOutbox.Close(); closeErr != nil {
+			slog.Error("close GraphRAG outbox", "error", closeErr)
+		}
 		graphPool.LogShutdownStats()
 		_ = graphPool.Close()
 		messageBus.Close()
@@ -141,6 +155,12 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			graphIndexer.Close(shutdownCtx)
 			cancel()
+			if compactErr := graphOutbox.Compact(); compactErr != nil {
+				slog.Error("compact GraphRAG outbox", "error", compactErr)
+			}
+			if closeErr := graphOutbox.Close(); closeErr != nil {
+				slog.Error("close GraphRAG outbox", "error", closeErr)
+			}
 			// Logged after the indexer has drained and before Close, so the
 			// counters describe the whole life of the pool: the graph store
 			// pool is allowed to exceed its open-store limit while stores are

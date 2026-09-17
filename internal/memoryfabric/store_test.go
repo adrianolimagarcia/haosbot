@@ -17,7 +17,7 @@ func openTestStore(t *testing.T, maxPending int) *Store {
 
 func TestAppendTurnEnforcesContentAndPendingByteBudgets(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(context.Background(), Config{Path: filepath.Join(dir, "memory-fabric.db"), MaxPending: 8, MaxPendingBytes: 8, MaxContentBytes: 4, MaxDiskBytes: 50 * 1024 * 1024})
+	s, err := Open(context.Background(), Config{Path: filepath.Join(dir, "memory-fabric.db"), MaxPending: 8, MaxPendingBytes: 7, MaxContentBytes: 4, MaxDiskBytes: 50 * 1024 * 1024})
 	if err != nil { t.Fatal(err) }
 	defer s.Close()
 	if err := s.AppendTurn(context.Background(), "too-large", "session-1", "12345"); err == nil { t.Fatal("expected content limit") }

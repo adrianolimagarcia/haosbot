@@ -32,6 +32,7 @@ type Registry struct {
 	projectionLatencyNanos atomic.Uint64
 	projectionLatencySamples atomic.Uint64
 	memoryPending atomic.Int64
+	memoryPendingBytes atomic.Int64
 	memoryRunning atomic.Int64
 	memorySucceeded atomic.Int64
 	memoryDead atomic.Int64
@@ -62,6 +63,7 @@ type Snapshot struct {
 	ProjectionFailures uint64 `json:"projection_failures"`
 	ProjectionLatencyAvgMs float64 `json:"projection_latency_avg_ms"`
 	MemoryPending int64 `json:"memory_pending"`
+	MemoryPendingBytes int64 `json:"memory_pending_bytes"`
 	MemoryRunning int64 `json:"memory_running"`
 	MemorySucceeded int64 `json:"memory_succeeded"`
 	MemoryDead int64 `json:"memory_dead"`
@@ -85,8 +87,9 @@ func (r *Registry) IncClaims() { r.claims.Add(1) }
 func (r *Registry) IncProjectionSuccess(d time.Duration) { r.projectionSuccess.Add(1); r.projectionLatencyNanos.Add(uint64(d)); r.projectionLatencySamples.Add(1) }
 func (r *Registry) IncProjectionRetry() { r.projectionRetries.Add(1); r.projectionFailures.Add(1) }
 func (r *Registry) IncProjectionDead() { r.projectionDead.Add(1); r.projectionFailures.Add(1) }
-func (r *Registry) SetMemoryStats(pending, running, succeeded, dead, oldestAgeSecs int64) {
+func (r *Registry) SetMemoryStats(pending, running, succeeded, dead, oldestAgeSecs, pendingBytes int64) {
 	r.memoryPending.Store(pending)
+	r.memoryPendingBytes.Store(pendingBytes)
 	r.memoryRunning.Store(running)
 	r.memorySucceeded.Store(succeeded)
 	r.memoryDead.Store(dead)
@@ -109,7 +112,7 @@ func (r *Registry) Snapshot() Snapshot {
 		EnqueueDeduplicated: r.enqueueDeduplicated.Load(), EnqueueRejected: r.enqueueRejected.Load(),
 		Claims: r.claims.Load(), ProjectionSuccess: r.projectionSuccess.Load(), ProjectionRetries: r.projectionRetries.Load(),
 		ProjectionDead: r.projectionDead.Load(), ProjectionFailures: r.projectionFailures.Load(), ProjectionLatencyAvgMs: avg,
-		MemoryPending: r.memoryPending.Load(), MemoryRunning: r.memoryRunning.Load(), MemorySucceeded: r.memorySucceeded.Load(),
+		MemoryPending: r.memoryPending.Load(), MemoryPendingBytes: r.memoryPendingBytes.Load(), MemoryRunning: r.memoryRunning.Load(), MemorySucceeded: r.memorySucceeded.Load(),
 		MemoryDead: r.memoryDead.Load(), MemoryOldestAgeSecs: r.memoryOldestAgeSecs.Load(),
 	}
 }

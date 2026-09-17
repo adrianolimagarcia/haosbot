@@ -69,6 +69,7 @@ type Job struct {
 
 type Stats struct {
 	Pending       int64 `json:"pending"`
+	PendingBytes  int64 `json:"pending_bytes"`
 	Running       int64 `json:"running"`
 	Succeeded     int64 `json:"succeeded"`
 	Dead          int64 `json:"dead"`
@@ -173,9 +174,23 @@ CREATE TABLE IF NOT EXISTS memory_projection_receipts (
   record_id TEXT NOT NULL,
   applied_at INTEGER NOT NULL,
   PRIMARY KEY(projection,record_id)
-);`); err != nil {
+);
+CREATE TABLE IF NOT EXISTS memory_queue_counters (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  pending_jobs INTEGER NOT NULL DEFAULT 0,
+  pending_bytes INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO memory_queue_counters(singleton) VALUES(1);`); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("memoryfabric: create schema: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+UPDATE memory_queue_counters SET
+  pending_jobs=(SELECT COUNT(*) FROM memory_outbox WHERE state IN (?,?)),
+  pending_bytes=(SELECT COALESCE(SUM(LENGTH(content)),0) FROM memory_records WHERE record_id IN (SELECT DISTINCT record_id FROM memory_outbox WHERE state IN (?,?)))
+WHERE singleton=1`, stateQueued, stateRunning, stateQueued, stateRunning); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("memoryfabric: rebuild queue counters: %w", err)
 	}
 	return s, nil
 }
@@ -211,7 +226,6 @@ func (s *Store) AppendTurn(ctx context.Context, recordID, sessionKey, content st
 	defer tx.Rollback()
 	var existingHash []byte
 	var existingSession string
-	inserted := false
 	err = tx.QueryRowContext(ctx, "SELECT session_key,content_hash FROM memory_records WHERE record_id=?", recordID).Scan(&existingSession, &existingHash)
 	if err == nil {
 		if existingSession != sessionKey || !sameBytes(existingHash, hash[:]) {
@@ -235,35 +249,44 @@ func (s *Store) AppendTurn(ctx context.Context, recordID, sessionKey, content st
 		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_records(record_id,session_key,content,content_hash,created_at) VALUES(?,?,?,?,?)`, recordID, sessionKey, content, hash[:], now); err != nil {
 			return fmt.Errorf("memoryfabric: insert record: %w", err)
 		}
-		inserted = true
 	}
 	var pending int64
-	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM memory_outbox WHERE state IN (?,?)", stateQueued, stateRunning).Scan(&pending); err != nil {
-		return fmt.Errorf("memoryfabric: count pending jobs: %w", err)
+	if err := tx.QueryRowContext(ctx, "SELECT pending_jobs FROM memory_queue_counters WHERE singleton=1").Scan(&pending); err != nil {
+		return fmt.Errorf("memoryfabric: read pending jobs: %w", err)
 	}
+	var missingJobs int64
 	for _, projection := range s.projections {
 		var exists int
 		if err := tx.QueryRowContext(ctx, "SELECT 1 FROM memory_outbox WHERE job_id=? AND projection=?", recordID, projection).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
-			pending++
+			missingJobs++
 		}
 	}
-	if pending > int64(s.maxPending) {
+	if pending+missingJobs > int64(s.maxPending) {
 		return fmt.Errorf("memoryfabric: outbox capacity reached (%d jobs)", s.maxPending)
 	}
 	var pendingBytes int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(LENGTH(content)),0) FROM memory_records WHERE record_id IN (SELECT DISTINCT record_id FROM memory_outbox WHERE state IN (?,?))`, stateQueued, stateRunning).Scan(&pendingBytes); err != nil {
-		return fmt.Errorf("memoryfabric: count pending bytes: %w", err)
+	if err := tx.QueryRowContext(ctx, "SELECT pending_bytes FROM memory_queue_counters WHERE singleton=1").Scan(&pendingBytes); err != nil {
+		return fmt.Errorf("memoryfabric: read pending bytes: %w", err)
 	}
 	var recordPending bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_outbox WHERE record_id=? AND state IN (?,?))`, recordID, stateQueued, stateRunning).Scan(&recordPending); err != nil {
 		return fmt.Errorf("memoryfabric: check pending record: %w", err)
 	}
-	if inserted && !recordPending && pendingBytes+int64(len(content)) > s.maxPendingBytes {
+	if missingJobs > 0 && !recordPending && pendingBytes+int64(len(content)) > s.maxPendingBytes {
 		return fmt.Errorf("memoryfabric: outbox byte budget reached (%d bytes)", s.maxPendingBytes)
 	}
 	for _, projection := range s.projections {
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO memory_outbox(job_id,projection,record_id,state,created_at,updated_at) VALUES(?,?,?,?,?,?)`, recordID, projection, recordID, stateQueued, now, now); err != nil {
 			return fmt.Errorf("memoryfabric: enqueue %s projection: %w", projection, err)
+		}
+	}
+	if missingJobs > 0 {
+		byteDelta := int64(0)
+		if !recordPending {
+			byteDelta = int64(len(content))
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE memory_queue_counters SET pending_jobs=pending_jobs+?,pending_bytes=pending_bytes+? WHERE singleton=1`, missingJobs, byteDelta); err != nil {
+			return fmt.Errorf("memoryfabric: update queue counters: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -319,12 +342,22 @@ func (s *Store) Ack(ctx context.Context, projection, jobID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE memory_outbox SET state=?,lease_until=0,last_error='',updated_at=? WHERE job_id=? AND projection=?`, stateSucceeded, now, jobID, projection)
+	var recordID string
+	var contentBytes int64
+	if err := tx.QueryRowContext(ctx, `SELECT o.record_id,LENGTH(r.content) FROM memory_outbox o JOIN memory_records r ON r.record_id=o.record_id WHERE o.job_id=? AND o.projection=? AND o.state IN (?,?)`, jobID, projection, stateQueued, stateRunning).Scan(&recordID, &contentBytes); errors.Is(err, sql.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE memory_outbox SET state=?,lease_until=0,last_error='',updated_at=? WHERE job_id=? AND projection=? AND state IN (?,?)`, stateSucceeded, now, jobID, projection, stateQueued, stateRunning)
 	if err != nil {
 		return err
 	}
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		return nil
+	}
+	if err := s.decrementPendingCounter(ctx, tx, recordID, contentBytes); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO memory_projection_receipts(projection,record_id,applied_at) SELECT ?,record_id,? FROM memory_outbox WHERE job_id=? AND projection=?`, projection, now, jobID, projection); err != nil {
 		return err
@@ -334,22 +367,58 @@ func (s *Store) Ack(ctx context.Context, projection, jobID string) error {
 
 func (s *Store) Retry(ctx context.Context, projection, jobID string, cause error) error {
 	now := time.Now().UnixMilli()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var attempts int
-	if err := s.db.QueryRowContext(ctx, "SELECT attempts FROM memory_outbox WHERE job_id=? AND projection=?", jobID, projection).Scan(&attempts); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	var state, recordID string
+	var contentBytes int64
+	if err := tx.QueryRowContext(ctx, `SELECT o.attempts,o.state,o.record_id,LENGTH(r.content) FROM memory_outbox o JOIN memory_records r ON r.record_id=o.record_id WHERE o.job_id=? AND o.projection=?`, jobID, projection).Scan(&attempts, &state, &recordID, &contentBytes); errors.Is(err, sql.ErrNoRows) {
+		return nil
+	} else if err != nil {
 		return err
 	}
 	if attempts >= s.maxAttempts {
-		_, err := s.db.ExecContext(ctx, `UPDATE memory_outbox SET state=?,lease_until=0,last_error=?,updated_at=? WHERE job_id=? AND projection=?`, stateDead, errorString(cause), now, jobID, projection)
-		return err
+		result, err := tx.ExecContext(ctx, `UPDATE memory_outbox SET state=?,lease_until=0,last_error=?,updated_at=? WHERE job_id=? AND projection=? AND state IN (?,?)`, stateDead, errorString(cause), now, jobID, projection, stateQueued, stateRunning)
+		if err != nil {
+			return err
+		}
+		if affected, _ := result.RowsAffected(); affected == 1 {
+			if err := s.decrementPendingCounter(ctx, tx, recordID, contentBytes); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
 	}
 	delay := retryDelaySeconds(attempts)
-	_, err := s.db.ExecContext(ctx, `UPDATE memory_outbox SET state=?,lease_until=0,next_attempt_at=?,last_error=?,updated_at=? WHERE job_id=? AND projection=?`, stateQueued, now+delay*1000, errorString(cause), now, jobID, projection)
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_outbox SET state=?,lease_until=0,next_attempt_at=?,last_error=?,updated_at=? WHERE job_id=? AND projection=? AND state IN (?,?)`, stateQueued, now+delay*1000, errorString(cause), now, jobID, projection, stateQueued, stateRunning); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) decrementPendingCounter(ctx context.Context, tx *sql.Tx, recordID string, contentBytes int64) error {
+	var stillPending bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_outbox WHERE record_id=? AND state IN (?,?))`, recordID, stateQueued, stateRunning).Scan(&stillPending); err != nil {
+		return err
+	}
+	byteDelta := int64(0)
+	if !stillPending {
+		byteDelta = contentBytes
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE memory_queue_counters SET pending_jobs=CASE WHEN pending_jobs>0 THEN pending_jobs-1 ELSE 0 END,pending_bytes=CASE WHEN pending_bytes>? THEN pending_bytes-? ELSE 0 END WHERE singleton=1`, byteDelta, byteDelta)
 	return err
 }
 
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	var out Stats
-	rows, err := s.db.QueryContext(ctx, "SELECT state,COUNT(*) FROM memory_outbox GROUP BY state")
+	var pendingTotal int64
+	if err := s.db.QueryRowContext(ctx, "SELECT pending_jobs,pending_bytes FROM memory_queue_counters WHERE singleton=1").Scan(&pendingTotal, &out.PendingBytes); err != nil {
+		return out, err
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT state,COUNT(*) FROM memory_outbox WHERE state IN (?,?,?) GROUP BY state", stateRunning, stateSucceeded, stateDead)
 	if err != nil {
 		return out, err
 	}
@@ -373,6 +442,10 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return out, err
+	}
+	out.Pending = pendingTotal - out.Running
+	if out.Pending < 0 {
+		out.Pending = 0
 	}
 	var oldest sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, "SELECT MIN(created_at) FROM memory_outbox WHERE state IN (?,?)", stateQueued, stateRunning).Scan(&oldest); err != nil {

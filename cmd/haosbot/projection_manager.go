@@ -17,8 +17,10 @@ import (
 )
 
 const (
-	defaultProjectionWorkers = 1
-	defaultProjectionPoll   = 500 * time.Millisecond
+	defaultProjectionWorkers   = 1
+	defaultProjectionPoll      = 500 * time.Millisecond
+	defaultProjectionStatsPoll = 30 * time.Second
+	maxProjectionIdleBackoff   = 30 * time.Second
 )
 
 // projectionManager runs independent durable consumers over the same
@@ -35,6 +37,8 @@ type projectionManager struct {
 	workers      int
 	poll         time.Duration
 	obsidian     bool
+	graphWake    chan struct{}
+	obsidianWake chan struct{}
 	closed       sync.Once
 }
 
@@ -58,15 +62,20 @@ func newProjectionManager(fabric *memoryfabric.Store, graphPool *graphStorePool,
 		return nil, fmt.Errorf("projection manager: create Obsidian directory: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	m := &projectionManager{fabric: fabric, graphPool: graphPool, obsidianDir: obsidianDir, metrics: metrics, ctx: ctx, cancel: cancel, workers: workers, poll: poll, obsidian: obsidian}
+	m := &projectionManager{
+		fabric: fabric, graphPool: graphPool, obsidianDir: obsidianDir,
+		metrics: metrics, ctx: ctx, cancel: cancel, workers: workers,
+		poll: poll, obsidian: obsidian, graphWake: make(chan struct{}, 1),
+		obsidianWake: make(chan struct{}, 1),
+	}
 	m.wg.Add(1)
 	go m.statsLoop()
 	for i := 0; i < workers; i++ {
 		m.wg.Add(1)
-		go m.worker(memoryfabric.ProjectionGraph, m.processGraph)
+		go m.worker(memoryfabric.ProjectionGraph, m.graphWake, m.processGraph)
 		if obsidian {
 			m.wg.Add(1)
-			go m.worker(memoryfabric.ProjectionObsidian, m.processObsidian)
+			go m.worker(memoryfabric.ProjectionObsidian, m.obsidianWake, m.processObsidian)
 		}
 	}
 	m.refreshStats()
@@ -75,7 +84,7 @@ func newProjectionManager(fabric *memoryfabric.Store, graphPool *graphStorePool,
 
 func (m *projectionManager) statsLoop() {
 	defer m.wg.Done()
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(defaultProjectionStatsPoll)
 	defer ticker.Stop()
 	for {
 		select {
@@ -91,7 +100,7 @@ func (m *projectionManager) refreshStats() {
 	if m.metrics == nil { return }
 	stats, err := m.fabric.Stats(context.Background())
 	if err == nil {
-		m.metrics.SetMemoryStats(stats.Pending, stats.Running, stats.Succeeded, stats.Dead, stats.OldestAgeSecs)
+		m.metrics.SetMemoryStats(stats.Pending, stats.Running, stats.Succeeded, stats.Dead, stats.OldestAgeSecs, stats.PendingBytes)
 	}
 }
 
@@ -103,6 +112,7 @@ func (m *projectionManager) EnqueueWithIDError(jobID, sessionKey, content string
 		return err
 	}
 	if m.metrics != nil { m.metrics.IncEnqueueAccepted() }
+	m.signalWake()
 	return nil
 }
 
@@ -114,8 +124,9 @@ func (m *projectionManager) Enqueue(sessionKey, content string) bool {
 	return m.EnqueueWithID(membersafeID(sessionKey, content), sessionKey, content)
 }
 
-func (m *projectionManager) worker(projection string, process func(context.Context, memoryfabric.Job) error) {
+func (m *projectionManager) worker(projection string, wake <-chan struct{}, process func(context.Context, memoryfabric.Job) error) {
 	defer m.wg.Done()
+	idle := m.poll
 	for {
 		select {
 		case <-m.ctx.Done():
@@ -125,13 +136,16 @@ func (m *projectionManager) worker(projection string, process func(context.Conte
 		job, ok, err := m.fabric.Claim(m.ctx, projection)
 		if err != nil {
 			if m.ctx.Err() != nil { return }
-			time.Sleep(m.poll)
+			if !m.waitForWork(wake, idle) { return }
+			idle = nextProjectionBackoff(idle)
 			continue
 		}
 		if !ok {
-			time.Sleep(m.poll)
+			if !m.waitForWork(wake, idle) { return }
+			idle = nextProjectionBackoff(idle)
 			continue
 		}
+		idle = m.poll
 		if m.metrics != nil { m.metrics.IncClaims() }
 		started := time.Now()
 		err = process(m.ctx, job)
@@ -153,6 +167,37 @@ func (m *projectionManager) worker(projection string, process func(context.Conte
 			m.metrics.IncProjectionRetry()
 		}
 	}
+}
+
+func (m *projectionManager) signalWake() {
+	select { case m.graphWake <- struct{}{}: default: }
+	if m.obsidian {
+		select { case m.obsidianWake <- struct{}{}: default: }
+	}
+}
+
+func (m *projectionManager) waitForWork(wake <-chan struct{}, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-m.ctx.Done():
+		return false
+	case <-wake:
+		return true
+	case <-timer.C:
+		return true
+	}
+}
+
+func nextProjectionBackoff(current time.Duration) time.Duration {
+	if current >= maxProjectionIdleBackoff {
+		return maxProjectionIdleBackoff
+	}
+	next := current * 2
+	if next > maxProjectionIdleBackoff {
+		return maxProjectionIdleBackoff
+	}
+	return next
 }
 
 func (m *projectionManager) processGraph(ctx context.Context, job memoryfabric.Job) error {

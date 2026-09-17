@@ -36,6 +36,9 @@ func TestAppendTurnSupportsGraphOnlyResourceProfile(t *testing.T) {
 func TestAppendTurnIsAtomicAndIdempotent(t *testing.T) {
 	s := openTestStore(t, 8)
 	if err := s.AppendTurn(context.Background(), "turn-1", "session-1", "hello"); err != nil { t.Fatal(err) }
+	stats, err := s.Stats(context.Background())
+	if err != nil { t.Fatal(err) }
+	if stats.Pending != 2 || stats.PendingBytes != 5 { t.Fatalf("after append stats=%+v", stats) }
 	if err := s.AppendTurn(context.Background(), "turn-1", "session-1", "hello"); err != nil { t.Fatal(err) }
 	job, ok, err := s.Claim(context.Background(), ProjectionGraph)
 	if err != nil || !ok { t.Fatalf("claim: ok=%v err=%v", ok, err) }
@@ -43,9 +46,25 @@ func TestAppendTurnIsAtomicAndIdempotent(t *testing.T) {
 	if _, ok, err := s.Claim(context.Background(), ProjectionGraph); err != nil || ok { t.Fatalf("duplicate claim: ok=%v err=%v", ok, err) }
 	if err := s.Ack(context.Background(), ProjectionGraph, "turn-1"); err != nil { t.Fatal(err) }
 	if err := s.Ack(context.Background(), ProjectionObsidian, "turn-1"); err != nil { t.Fatal(err) }
+	stats, err = s.Stats(context.Background())
+	if err != nil { t.Fatal(err) }
+	if stats.Pending != 0 || stats.PendingBytes != 0 || stats.Succeeded != 2 { t.Fatalf("stats=%+v", stats) }
+}
+
+func TestPendingCountersTrackRetriesAndDeadJobs(t *testing.T) {
+	s := openTestStore(t, 8)
+	s.maxAttempts = 1
+	if err := s.AppendTurn(context.Background(), "turn-counter", "session-1", "hello"); err != nil { t.Fatal(err) }
+	job, ok, err := s.Claim(context.Background(), ProjectionGraph)
+	if err != nil || !ok { t.Fatalf("claim: ok=%v err=%v", ok, err) }
+	if err := s.Retry(context.Background(), ProjectionGraph, job.ID, context.Canceled); err != nil { t.Fatal(err) }
 	stats, err := s.Stats(context.Background())
 	if err != nil { t.Fatal(err) }
-	if stats.Pending != 0 || stats.Succeeded != 2 { t.Fatalf("stats=%+v", stats) }
+	if stats.Pending != 1 || stats.PendingBytes != 5 || stats.Dead != 1 { t.Fatalf("after dead graph stats=%+v", stats) }
+	if err := s.Ack(context.Background(), ProjectionObsidian, "turn-counter"); err != nil { t.Fatal(err) }
+	stats, err = s.Stats(context.Background())
+	if err != nil { t.Fatal(err) }
+	if stats.Pending != 0 || stats.PendingBytes != 0 || stats.Dead != 1 { t.Fatalf("after ack stats=%+v", stats) }
 }
 
 func TestAppendTurnRepairsMissingProjectionAndRejectsConflict(t *testing.T) {

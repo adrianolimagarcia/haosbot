@@ -13,8 +13,8 @@ func TestSnapshotAndEndpoint(t *testing.T) {
 	r.SetEmbedderLoaded(true)
 	r.IncTurns()
 	r.IncProjectionSuccess(4 * time.Millisecond)
-	r.SetMemoryStats(2, 1, 3, 0, 7)
-	if got := r.Snapshot(); !got.VectorEnabled || got.Turns != 1 || got.MemoryPending != 2 || got.ProjectionSuccess != 1 {
+	r.SetMemoryStats(2, 1, 3, 0, 7, 9)
+	if got := r.Snapshot(); !got.VectorEnabled || got.Turns != 1 || got.MemoryPending != 2 || got.MemoryPendingBytes != 9 || got.ProjectionSuccess != 1 {
 		t.Fatalf("snapshot=%+v", got)
 	}
 	w := httptest.NewRecorder()

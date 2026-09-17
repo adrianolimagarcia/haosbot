@@ -50,7 +50,7 @@ func (c *Client) ChatStream(ctx context.Context, req provider.ChatRequest) (<-ch
 	}
 
 	events := make(chan core.StreamEvent)
-	go c.consumeStream(ctx, readCtx, cancel, resp.Body, resolveStreamIdleTimeout(), events)
+	go c.consumeStreamWithFormat(ctx, readCtx, cancel, resp.Body, resolveStreamIdleTimeout(), events, c.toolCallFormatForModel(req.Model))
 	return events, nil
 }
 
@@ -62,6 +62,18 @@ func (c *Client) consumeStream(
 	body io.ReadCloser,
 	idle time.Duration,
 	events chan<- core.StreamEvent,
+) {
+	c.consumeStreamWithFormat(ctx, readCtx, cancel, body, idle, events, ToolCallFormatAuto)
+}
+
+func (c *Client) consumeStreamWithFormat(
+	ctx context.Context,
+	readCtx context.Context,
+	cancel context.CancelFunc,
+	body io.ReadCloser,
+	idle time.Duration,
+	events chan<- core.StreamEvent,
+	format ToolCallFormat,
 ) {
 	defer close(events)
 	defer cancel()
@@ -153,7 +165,7 @@ func (c *Client) consumeStream(
 			Err: errors.New(errStreamEndedEarly),
 		})
 	default:
-		sendEvent(ctx, events, core.StreamEvent{Kind: core.StreamDone, Response: aggregate.response()})
+		sendEvent(ctx, events, core.StreamEvent{Kind: core.StreamDone, Response: aggregate.response(format)})
 	}
 }
 
@@ -459,7 +471,11 @@ func (a *streamAggregator) accumulate(fragment toolCallFragment, ctx context.Con
 }
 
 // response builds the aggregated response for the StreamDone event.
-func (a *streamAggregator) response() *core.Response {
+func (a *streamAggregator) response(formats ...ToolCallFormat) *core.Response {
+	format := ToolCallFormatAuto
+	if len(formats) > 0 {
+		format = formats[0]
+	}
 	content := a.content.String()
 
 	seen := make(map[string]bool, len(a.order))
@@ -480,7 +496,7 @@ func (a *streamAggregator) response() *core.Response {
 		})
 	}
 	if len(calls) == 0 {
-		content, calls = extractTextToolCalls(content)
+		content, calls = extractTextToolCallsWithFormat(content, format)
 	}
 
 	finish := a.finishReason

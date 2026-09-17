@@ -232,10 +232,29 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/a2a", h.handleJSONRPC)
 }
 
-func (h *Handler) handleAgentCard(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+// agentCardURL builds the address the card tells peers to use for this agent's
+// A2A endpoint.
+//
+// api.publicBaseUrl wins when it is set. Behind a reverse proxy or NAT the
+// locally bound host:port is not the address a peer can reach, so advertising
+// it makes discovery wrong in exactly the deployment where it matters most.
+// The configured value is a BASE, so a trailing slash is dropped before "/a2a"
+// is appended and a path component is preserved:
+//
+//	https://example.com       -> https://example.com/a2a
+//	https://example.com/      -> https://example.com/a2a
+//	https://example.com/base  -> https://example.com/base/a2a
+//
+// With no public base URL configured the card advertises the effective bind
+// address, byte for byte as it did before the key existed. That is why the
+// public URL is a separate field rather than something written into
+// cfg.API.Host/cfg.API.Port by the gateway runtime: those two carry the address
+// the process actually listens on (cmd/haosbot/runtime.go writes the resolved
+// --host/--port back into them), and overwriting them with the public URL would
+// make the listener disagree with the config.
+func (h *Handler) agentCardURL() string {
+	if base := strings.TrimRight(h.cfg.API.PublicBaseURL, "/"); base != "" {
+		return base + "/a2a"
 	}
 
 	host := h.cfg.API.Host
@@ -246,11 +265,19 @@ func (h *Handler) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 	if port <= 0 {
 		port = defaultAPIPort()
 	}
+	return fmt.Sprintf("http://%s:%d/a2a", host, port)
+}
+
+func (h *Handler) handleAgentCard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
 	card := AgentCard{
 		Name:        "haosbot",
 		Description: "Autonomous lightweight infrastructure, shell execution and Python/SQLite agent powered by haosbot",
-		URL:         fmt.Sprintf("http://%s:%d/a2a", host, port),
+		URL:         h.agentCardURL(),
 		Version:     "1.0.0",
 		Capabilities: AgentCapabilities{
 			Streaming:         false,

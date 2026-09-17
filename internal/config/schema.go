@@ -375,12 +375,55 @@ func (p ProvidersConfig) MarshalJSON() ([]byte, error) {
 // api / gateway
 // ---------------------------------------------------------------------------
 
-// ApiConfig mirrors schema.py:333-350.
+// ApiConfig mirrors schema.py:333-350, plus one port-only public base URL.
+//
+// PublicBaseURL is a DELIBERATE DIVERGENCE, for the same reason as the gateway
+// queue limits below: the reference has no A2A endpoint, so it has nothing to
+// advertise and no setting for it. Without the key, an agent card served from
+// behind a reverse proxy or NAT advertises the address the process bound
+// locally (http://127.0.0.1:<port>/a2a) — which is precisely the deployment
+// where A2A discovery matters most, and precisely the address a peer cannot
+// reach.
+//
+// It lives under `api` rather than `gateway` because `api` is the section that
+// owns the advertised address: the listener is built from cfg.API.Host /
+// cfg.API.Port (cmd/haosbot/runtime.go cmdGateway, which writes the effective
+// --host/--port back into cfg.API for exactly this reason), the A2A handler
+// builds the card from those same two fields, and cfg.Gateway.Host /
+// cfg.Gateway.Port are read by nothing in this port. Anywhere else would split
+// "the address this server answers on" across two sections.
+//
+// It cannot live at the root of Config: the reference's root is a BaseSettings
+// with extra="forbid" (schema.py:663-666), so a root-level key makes a config
+// file written by this port unreadable by the reference. Verified by running
+// upstream 1bb712d3 rather than by reading it: {"a2a": {...}} raises
+// extra_forbidden, while an unknown key inside `api` is accepted. ApiConfig
+// descends from `Base` (config_base.py:12-15), whose pydantic default is
+// extra="ignore", so the reference loads this key and ignores it.
 type ApiConfig struct {
 	Host    string       `json:"host"`
 	Port    int          `json:"port"`
 	Timeout pyjson.Float `json:"timeout"`
 	APIKey  string       `json:"apiKey"`
+
+	// PublicBaseURL is the absolute http(s) base URL peers must use to reach
+	// this server, e.g. "https://example.com", or
+	// "https://example.com/agent" when a reverse proxy mounts the service under
+	// a path prefix. The agent card advertises <PublicBaseURL>/a2a: a trailing
+	// slash is dropped before "/a2a" is appended, and a path component is
+	// PRESERVED and prefixed onto it.
+	//
+	// The value is the BASE, not the endpoint. Setting it to
+	// "https://example.com/a2a" advertises "https://example.com/a2a/a2a".
+	//
+	// Empty (or JSON null) means "not configured", and the card keeps
+	// advertising the effective bind address exactly as it did before this key
+	// existed.
+	//
+	// Validated by readPublicBaseURL: absolute, http or https, with a host, and
+	// without a query string or a fragment — appending "/a2a" to either would
+	// not produce the URL the operator meant.
+	PublicBaseURL string `json:"publicBaseUrl"`
 }
 
 // GatewayConfig mirrors schema.py:353-359, plus two port-only queue limits.

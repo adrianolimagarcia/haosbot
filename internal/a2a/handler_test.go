@@ -227,6 +227,31 @@ func fetchAgentCard(t *testing.T, cfg *config.Config) AgentCard {
 	return card
 }
 
+// fetchAgentCardRaw returns the agent card response body verbatim, so a test can
+// compare it byte for byte instead of comparing decoded fields.
+func fetchAgentCardRaw(t *testing.T, cfg *config.Config) []byte {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	NewHandler(cfg, nil).RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/.well-known/agent-card.json")
+	if err != nil {
+		t.Fatalf("GET agent card: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("agent card status=%d want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read agent card: %v", err)
+	}
+	return body
+}
+
 // ---------------------------------------------------------------------------
 // Cancellation
 // ---------------------------------------------------------------------------
@@ -331,6 +356,125 @@ func TestAgentCardPortFallbackMatchesLoaderDefault(t *testing.T) {
 	if card.URL != want {
 		t.Fatalf("agent card url=%q want %q (the fallback must match the loader's default api.port)", card.URL, want)
 	}
+}
+
+// preFixCardBody is the agent card body produced by the gateway binary built
+// from the commit BEFORE api.publicBaseUrl existed, bound to 127.0.0.1:41877.
+// It was captured by running the real binary and is reproduced here byte for
+// byte — including the trailing newline json.Encoder appends — so the
+// no-regression half of this feature is asserted against observed output rather
+// than against a re-derivation of it.
+const preFixCardBody = `{"name":"haosbot","description":"Autonomous lightweight infrastructure, shell execution and Python/SQLite agent powered by haosbot","url":"http://127.0.0.1:41877/a2a","version":"1.0.0","capabilities":{"streaming":false,"pushNotifications":false},"skills":[{"id":"exec","name":"Terminal Command Execution","description":"Execute shell commands, monitor system metrics, systemd and disk usage"},{"id":"python_exec","name":"Python SQLite Runner","description":"Execute isolated Python scripts with SQLite, JSON and networking support"},{"id":"file_ops","name":"Workspace File Operations","description":"Read, write and edit files safely inside the agent workspace"}]}` + "\n"
+
+// TestAgentCardUnsetIsByteIdenticalToPreFixOutput is the no-regression test for
+// the new key: with api.publicBaseUrl unset the card must be byte-for-byte what
+// the pre-fix binary emitted, so adding the key cannot quietly change the
+// existing effective-bind-address behaviour.
+func TestAgentCardUnsetIsByteIdenticalToPreFixOutput(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.API.Host = "127.0.0.1"
+	cfg.API.Port = 41877
+	if cfg.API.PublicBaseURL != "" {
+		t.Fatalf("precondition: DefaultConfig().API.PublicBaseURL = %q, want empty", cfg.API.PublicBaseURL)
+	}
+
+	got := fetchAgentCardRaw(t, cfg)
+	if string(got) != preFixCardBody {
+		t.Errorf("agent card body changed with api.publicBaseUrl unset.\n got: %s\nwant: %s", got, preFixCardBody)
+	}
+}
+
+// TestAgentCardPublicBaseURLJoining pins the joining rule for the shapes an
+// operator can reasonably configure. The value is a BASE: a trailing slash is
+// dropped, and a path component is preserved and prefixed onto "/a2a".
+func TestAgentCardPublicBaseURLJoining(t *testing.T) {
+	cases := []struct {
+		name string
+		base string
+		want string
+	}{
+		{"bare host", "https://example.com", "https://example.com/a2a"},
+		{"trailing slash", "https://example.com/", "https://example.com/a2a"},
+		{"path component", "https://example.com/base", "https://example.com/base/a2a"},
+		{"path with trailing slash", "https://example.com/base/", "https://example.com/base/a2a"},
+		{"several trailing slashes", "https://example.com/base///", "https://example.com/base/a2a"},
+		{"explicit port", "http://127.0.0.1:8900", "http://127.0.0.1:8900/a2a"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.API.PublicBaseURL = tc.base
+
+			card := fetchAgentCard(t, cfg)
+			if card.URL != tc.want {
+				t.Errorf("api.publicBaseUrl=%q: card url=%q want %q", tc.base, card.URL, tc.want)
+			}
+		})
+	}
+}
+
+// TestAgentCardPublicBaseURLWinsOverWildcardHost pins that the configured
+// public URL is used even when the bind address is a wildcard, which is the
+// usual shape behind a reverse proxy: the gateway binds 0.0.0.0 and the proxy
+// terminates TLS on a real hostname.
+func TestAgentCardPublicBaseURLWinsOverWildcardHost(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.API.Host = "0.0.0.0"
+	cfg.API.Port = 41877
+	cfg.API.PublicBaseURL = "https://example.com"
+
+	card := fetchAgentCard(t, cfg)
+	if want := "https://example.com/a2a"; card.URL != want {
+		t.Errorf("card url=%q want %q", card.URL, want)
+	}
+}
+
+// TestAgentCardPublicBaseURLAndEffectiveBindAddressDoNotFight is the
+// interaction test between this feature and the one before it.
+//
+// cmd/haosbot/runtime.go resolves --host/--port and writes the EFFECTIVE
+// address back into cfg.API just before the server starts, because the card is
+// built from cfg.API. That write-back must keep working, and the public URL
+// must neither clobber it nor be clobbered by it: they answer different
+// questions — "what do I bind" and "what do peers call me".
+func TestAgentCardPublicBaseURLAndEffectiveBindAddressDoNotFight(t *testing.T) {
+	// applyEffectiveBind reproduces cmdGateway's write-back.
+	applyEffectiveBind := func(cfg *config.Config, host string, port int) {
+		cfg.API.Host = host
+		cfg.API.Port = port
+	}
+
+	t.Run("unset: the card follows the effective bind address", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.API.Host = "127.0.0.1"
+		cfg.API.Port = 8900 // configured, and overridden below
+		applyEffectiveBind(cfg, "127.0.0.1", 41877)
+
+		if card := fetchAgentCard(t, cfg); card.URL != "http://127.0.0.1:41877/a2a" {
+			t.Errorf("card url=%q want http://127.0.0.1:41877/a2a — the effective-bind fix must still hold", card.URL)
+		}
+	})
+
+	t.Run("set: the public URL wins and the bind address is untouched", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.API.Host = "127.0.0.1"
+		cfg.API.Port = 8900
+		cfg.API.PublicBaseURL = "https://example.com/agent"
+		applyEffectiveBind(cfg, "127.0.0.1", 41877)
+
+		if card := fetchAgentCard(t, cfg); card.URL != "https://example.com/agent/a2a" {
+			t.Errorf("card url=%q want https://example.com/agent/a2a", card.URL)
+		}
+		// The write-back must still be visible in the config: the listener and
+		// every other cfg.API consumer read these two fields.
+		if cfg.API.Host != "127.0.0.1" || cfg.API.Port != 41877 {
+			t.Errorf("bind address = %s:%d after write-back, want 127.0.0.1:41877",
+				cfg.API.Host, cfg.API.Port)
+		}
+		if cfg.API.PublicBaseURL != "https://example.com/agent" {
+			t.Errorf("PublicBaseURL = %q after write-back, want it unchanged", cfg.API.PublicBaseURL)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

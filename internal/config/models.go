@@ -19,6 +19,7 @@ package config
 
 import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/pyjson"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -747,6 +748,8 @@ var apiFields = []fieldDef{
 	{name: "port"},
 	{name: "timeout"},
 	{name: "api_key"},
+	// Port-only extension; the reference ignores unknown keys inside `api`.
+	{name: "public_base_url"},
 }
 
 func decodeAPI(c *collector, o *jmap) ApiConfig {
@@ -755,6 +758,7 @@ func decodeAPI(c *collector, o *jmap) ApiConfig {
 	out.Port = c.readInt(o, apiFields[1], out.Port, intBound{}, intBound{})
 	out.Timeout = pyjson.Float(c.readFloat(o, apiFields[2], float64(out.Timeout)))
 	out.APIKey = c.readString(o, apiFields[3], out.APIKey)
+	out.PublicBaseURL = readPublicBaseURL(c, o, apiFields[4])
 
 	// ApiConfig.wildcard_host_requires_auth (schema.py:341-350).
 	if len(c.issues) == 0 {
@@ -764,6 +768,93 @@ func decodeAPI(c *collector, o *jmap) ApiConfig {
 		}
 	}
 	return out
+}
+
+// readPublicBaseURL reads api.public_base_url, the port-only public base URL the
+// A2A agent card is built from.
+//
+// The rules are pydantic's `AnyHttpUrl` rules — absolute, http or https, with a
+// host — plus one of this port's own: a query string or a fragment is rejected,
+// because the card is built by appending "/a2a" to this value and appending a
+// path to a query or a fragment does not produce the URL the operator meant
+// ("https://example.com?x=1" would yield "https://example.com?x=1/a2a", whose
+// path is still "/" and whose query became "x=1/a2a").
+//
+// A trailing slash and a path component are both ACCEPTED: the first is dropped
+// and the second is kept when the card joins the base with "/a2a"
+// (internal/a2a/handler.go agentCardURL), so "https://example.com",
+// "https://example.com/" and "https://example.com/base" all join correctly.
+//
+// The error codes are pydantic's own, verified by running pydantic 2.13.5:
+// `url_parsing` for a relative or unparseable URL and for an empty host,
+// `url_scheme` for a scheme other than http/https. That matters beyond
+// tidiness: errors.go FriendlyMessage replaces a custom validator's
+// `value_error` text with the generic sentence "Value does not satisfy this
+// setting's requirements.", which would leave the operator with no idea what is
+// wrong. These codes are passed through, so the message names the defect. (For
+// a URL Go cannot parse at all the message is pydantic's base "Input should be
+// a valid URL" without pydantic's specific reason, because Go's url.Parse
+// reports the cause in a different vocabulary.)
+//
+// This is a port-only field, so nothing here can disturb the differential
+// corpus: the reference never emits these codes for it, because it has no such
+// field.
+func readPublicBaseURL(c *collector, o *jmap, f fieldDef) string {
+	v, key, ok := f.get(o)
+	if !ok || isJSONNull(v) {
+		return ""
+	}
+	s, ok2, code, msg := asString(v)
+	if !ok2 {
+		c.add(c.at(o, key), code, msg)
+		return ""
+	}
+	// Surrounding whitespace is stripped rather than rejected, matching both
+	// pydantic's URL validation and the string->number coercion in decode.go.
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+
+	u, err := url.Parse(s)
+	if err != nil {
+		c.add(c.at(o, key), "url_parsing", "Input should be a valid URL")
+		return ""
+	}
+	if u.Scheme == "" {
+		c.add(c.at(o, key), "url_parsing", "Input should be a valid URL, relative URL without a base")
+		return ""
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		c.add(c.at(o, key), "url_scheme", "URL scheme should be 'http' or 'https'")
+		return ""
+	}
+	// Hostname() rather than Host, so that "https://:80" is reported as an
+	// empty host exactly as pydantic reports it.
+	if u.Hostname() == "" {
+		c.add(c.at(o, key), "url_parsing", "Input should be a valid URL, empty host")
+		return ""
+	}
+
+	// The query/fragment check scans the RAW string instead of testing
+	// u.RawQuery / u.Fragment, because an EMPTY delimiter is still a delimiter:
+	// url.Parse("https://example.com?") leaves RawQuery empty and only sets
+	// ForceQuery, and url.Parse("https://example.com#") leaves Fragment empty
+	// with no flag at all. Both pass a value-based check and then swallow the
+	// appended path — "https://example.com?/a2a" has path "" and query "/a2a",
+	// and "https://example.com#/a2a" is a fragment, not a path. A raw '?' or '#'
+	// is always a delimiter in a URL (a literal one must be percent-encoded as
+	// %3F / %23), so scanning the string is exact; "https://example.com/a%3Fb"
+	// is correctly left alone.
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		if s[i] == '?' {
+			c.add(c.at(o, key), "url_parsing", "Input should be a valid URL, it must not contain a query string")
+		} else {
+			c.add(c.at(o, key), "url_parsing", "Input should be a valid URL, it must not contain a fragment")
+		}
+		return ""
+	}
+	return s
 }
 
 var gatewayFields = []fieldDef{

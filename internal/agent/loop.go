@@ -76,6 +76,10 @@ type transcriptMessageMutator interface {
 	SetMessage(int, core.Message) error
 }
 
+type transcriptKeyLister interface {
+	List() ([]string, error)
+}
+
 type graphMemoryPending struct {
 	TurnID     string `json:"turn_id"`
 	SessionKey string `json:"session_key"`
@@ -83,6 +87,30 @@ type graphMemoryPending struct {
 }
 
 const graphMemoryPendingExtra = "_haosbot_graph_memory_pending"
+
+func (l *Loop) RecoverPendingGraphMemory() error {
+	if l.cfg.GraphMemoryEnqueueWithIDError == nil {
+		return nil
+	}
+	lister, ok := l.cfg.Store.(transcriptKeyLister)
+	if !ok {
+		return nil
+	}
+	keys, err := lister.List()
+	if err != nil {
+		return fmt.Errorf("agent: list sessions for GraphRAG recovery: %w", err)
+	}
+	for _, key := range keys {
+		transcript, err := l.cfg.Store.Open(key)
+		if err != nil {
+			return fmt.Errorf("agent: open session %q for GraphRAG recovery: %w", key, err)
+		}
+		if err := l.reconcilePendingGraphMemory(transcript); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func (l *Loop) reconcilePendingGraphMemory(transcript Transcript) error {
 	if l.cfg.GraphMemoryEnqueueWithIDError == nil {

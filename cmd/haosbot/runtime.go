@@ -49,6 +49,10 @@ func (t transcriptStore) Open(key string) (agent.Transcript, error) {
 	return sess, nil
 }
 
+func (t transcriptStore) List() ([]string, error) {
+	return t.s.List()
+}
+
 func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	d := cfg.Agents.Defaults
 
@@ -136,6 +140,9 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		GraphMemoryEnqueueWithIDError: graphIndexer.EnqueueWithIDError,
 		GraphMemoryMaxChars:       6000,
 	})
+	if err == nil {
+		err = loop.RecoverPendingGraphMemory()
+	}
 	if err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		graphIndexer.Close(shutdownCtx)

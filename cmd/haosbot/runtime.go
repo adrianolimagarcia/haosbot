@@ -221,9 +221,10 @@ func resolveProvider(cfg *config.Config) (provider.Provider, string, error) {
 	}
 
 	client := openai.New(openai.Options{
-		APIKey:  apiKey,
-		BaseURL: baseURL,
-		Model:   model,
+		APIKey:        apiKey,
+		BaseURL:       baseURL,
+		Model:         model,
+		ToolCallFormat: openai.ToolCallFormat(strings.TrimSpace(os.Getenv("NANOBOT_TOOL_CALL_FORMAT"))),
 	})
 	return client, model, nil
 }

@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "hardening/**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Python reference runtime
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Build canonical binary
+        run: go build ./cmd/haosbot
+
+      - name: Unit and differential tests
+        run: go test -count=1 ./...
+
+      - name: Race detector
+        run: go test -race -count=1 ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Shuffle internal tests
+        run: go test -shuffle=on -count=3 ./internal/...
+
+  static-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install analyzers
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Staticcheck
+        run: staticcheck ./...
+
+      - name: Govulncheck
+        run: govulncheck ./...

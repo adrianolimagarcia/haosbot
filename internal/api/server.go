@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/a2a"
@@ -25,6 +26,10 @@ type Server struct {
 	provider  provider.Provider
 	cmdRouter *command.Router
 	loop      *agent.Loop
+
+	// notReady is the process-owned readiness override read by /readyz
+	// (see ready.go). The zero value means "no override".
+	notReady atomic.Bool
 }
 
 func NewServer(cfg *config.Config, prov provider.Provider, loop *agent.Loop) *Server {
@@ -61,6 +66,7 @@ func (s *Server) Start(addr string) error {
 
 	mux := http.NewServeMux()
 	s.registerWebUI(mux)
+	s.registerReady(mux)
 	a2aHandler := a2a.NewHandler(s.cfg, s.loop)
 	a2aHandler.RegisterRoutes(mux)
 

@@ -82,11 +82,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if s.cmdRouter != nil && command.IsSlashCommand(content) {
 			reply, handled := s.cmdRouter.Execute(content, modelName, s.cfg.WorkspacePath())
 			if handled {
-				writeChatCompletionResponse(w, modelName, &core.Response{
-					Content:      reply,
-					HasContent:   reply != "",
-					FinishReason: core.FinishStop,
-				}, "chatcmpl-cmd")
+				writeChatCompletion(w, modelName, reply, "chatcmpl-cmd")
 				return
 			}
 		}

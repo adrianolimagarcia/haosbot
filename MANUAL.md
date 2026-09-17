@@ -217,12 +217,22 @@ No `~/.haosbot/config.json`, configure a seção do Telegram:
   "channels": {
     "telegram": {
       "enabled": true,
-      "botToken": "SEU_TELEGRAM_BOT_TOKEN",
-      "allowedUsers": ["seu_usuario_telegram"]
+      "token": "SEU_TELEGRAM_BOT_TOKEN",
+      "allowFrom": ["seu_usuario_telegram"]
     }
   }
 }
 ```
+As chaves são `token` e `allowFrom`, exatamente como na referência Python
+(`docs/chat-apps.md:145-153`). Nomes como `botToken` ou `allowedUsers` não são
+reconhecidos: a seção continua válida, o canal fica **habilitado** e só falha ao
+iniciar, com "telegram: bot token not configured".
+
+Uma seção `channels.telegram` só é ativada se `enabled` existir e for
+verdadeiro; sem `enabled`, o canal fica desligado. O valor é interpretado com a
+verdade de Python, então a string `"false"` **liga** o canal — use o booleano
+`false` para desligá-lo.
+
 Ao iniciar `haosbot gateway`, o canal do Telegram fará polling de mensagens e responderá diretamente pelo chat.
 
 ---

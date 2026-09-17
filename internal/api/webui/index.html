@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Haosbot - Control Center</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    :root {
+      --bg-main: #ffffff;
+      --bg-sidebar: #fbfbfb;
+      --border-color: #eaeaea;
+      --text-main: #1f2328;
+      --text-muted: #656d76;
+      --card-bg: #f6f8fa;
+    }
+    body {
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .sidebar {
+      background-color: var(--bg-sidebar);
+      border-right: 1px solid var(--border-color);
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.2rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      border: 1px solid #e5e7eb;
+      background-color: #f9fafb;
+    }
+    /* Prose styling */
+    .prose h1, .prose h2, .prose h3, .prose h4 {
+      color: #111827;
+      font-weight: 700;
+      margin-top: 1.2rem;
+      margin-bottom: 0.6rem;
+    }
+    .prose h3 { font-size: 1.25rem; }
+    .prose h4 { font-size: 1.05rem; }
+    .prose p { margin-bottom: 0.75rem; line-height: 1.625; color: #1f2937; }
+    .prose ul { list-style-type: disc; padding-left: 1.25rem; margin-bottom: 0.75rem; }
+    .prose li { margin-bottom: 0.35rem; }
+    .prose code {
+      background-color: #f3f4f6;
+      padding: 0.2rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.85em;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      color: #1f2937;
+    }
+    .prose pre {
+      background-color: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 1rem;
+      overflow-x: auto;
+      margin: 0.75rem 0;
+    }
+  </style>
+</head>
+<body class="flex h-full overflow-hidden text-sm">
+
+  <!-- Left Sidebar -->
+  <aside class="sidebar w-64 flex flex-col justify-between flex-shrink-0 z-20">
+    <div class="flex flex-col h-full">
+      <!-- Top Action Buttons -->
+      <div class="p-3 space-y-1">
+        <button onclick="newSession()" class="w-full flex items-center justify-start space-x-2 px-3 py-2 rounded-lg text-gray-700 hover:bg-gray-100 transition text-sm font-medium border border-gray-200 bg-white shadow-sm">
+          <i class="fa-solid fa-plus text-xs text-gray-500"></i>
+          <span>Novo chat</span>
+        </button>
+        <button onclick="focusSearch()" class="w-full flex items-center justify-start space-x-2 px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition text-xs">
+          <i class="fa-solid fa-magnifying-glass text-xs text-gray-400"></i>
+          <span>Pesquisar</span>
+        </button>
+        <button onclick="switchTab('devices')" class="w-full flex items-center justify-start space-x-2 px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition text-xs">
+          <i class="fa-solid fa-diagram-project text-xs text-gray-400"></i>
+          <span>Conexões de dispositivos</span>
+        </button>
+        <button onclick="switchTab('skills')" class="w-full flex items-center justify-start space-x-2 px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition text-xs">
+          <i class="fa-solid fa-robot text-xs text-gray-400"></i>
+          <span>Gerenciamento de agentes</span>
+        </button>
+        <button onclick="openSettings()" class="w-full flex items-center justify-start space-x-2 px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition text-xs">
+          <i class="fa-solid fa-sun text-xs text-gray-400"></i>
+          <span>Modelos &amp; Endpoints</span>
+        </button>
+        <button onclick="openSettings()" class="w-full flex items-center justify-start space-x-2 px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition text-xs">
+          <i class="fa-solid fa-arrow-up-right-from-square text-xs text-gray-400"></i>
+          <span>API Relay (Gateway)</span>
+        </button>
+      </div>
+
+      <!-- Profile Selector & Channels Row -->
+      <div class="px-3 py-2 border-t border-b border-gray-200 bg-gray-50/50">
+        <div class="flex items-center justify-between text-xs text-gray-500 mb-2 px-1">
+          <div class="flex items-center space-x-3">
+            <i class="fa-regular fa-comment text-gray-700 cursor-pointer" title="Chat"></i>
+            <i class="fa-solid fa-users text-gray-400 hover:text-gray-700 cursor-pointer" title="Perfis"></i>
+            <i class="fa-solid fa-share-nodes text-gray-400 hover:text-gray-700 cursor-pointer" title="Grafo"></i>
+            <i class="fa-regular fa-clock text-gray-400 hover:text-gray-700 cursor-pointer" title="Histórico"></i>
+          </div>
+        </div>
+        <div class="flex items-center justify-between bg-white border border-gray-200 rounded-md px-2.5 py-1 text-xs cursor-pointer shadow-sm">
+          <span class="text-gray-700 font-medium">Todos os perfis</span>
+          <i class="fa-solid fa-chevron-down text-[10px] text-gray-400"></i>
+        </div>
+      </div>
+
+      <!-- Recentes List -->
+      <div class="flex-1 overflow-y-auto px-2 py-2 space-y-3">
+        <div>
+          <div class="flex items-center justify-between px-2 text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1">
+            <span>Recentes</span>
+            <i class="fa-solid fa-gear text-[10px] cursor-pointer hover:text-gray-600"></i>
+          </div>
+          <div id="recent-session-item" class="p-2 bg-gray-200/60 rounded-lg cursor-pointer flex flex-col space-y-1">
+            <div class="flex items-center justify-between">
+              <span id="recent-title" class="font-medium text-xs text-gray-800 truncate">Sessão Atual</span>
+              <span class="text-[10px] text-gray-400">Agora</span>
+            </div>
+            <div class="flex items-center space-x-1.5 text-[10px] text-gray-500">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+              <span>default</span>
+              <span class="text-gray-300">•</span>
+              <span class="bg-gray-100 border border-gray-200 px-1 rounded text-[9px]">workspace</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Skills list in sidebar when toggled -->
+        <div id="sidebar-skills-panel" class="hidden">
+          <div class="px-2 text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Habilidades / Skills</div>
+          <div class="space-y-1.5 text-xs">
+            <div class="p-2 bg-white border border-gray-200 rounded shadow-sm">
+              <div class="font-semibold text-gray-800">python_exec</div>
+              <div class="text-[11px] text-gray-500">CPython Minimal + SQLite</div>
+            </div>
+            <div class="p-2 bg-white border border-gray-200 rounded shadow-sm">
+              <div class="font-semibold text-gray-800">exec</div>
+              <div class="text-[11px] text-gray-500">Comandos Shell &amp; Rede</div>
+            </div>
+            <div class="p-2 bg-white border border-gray-200 rounded shadow-sm">
+              <div class="font-semibold text-gray-800">file_ops</div>
+              <div class="text-[11px] text-gray-500">Manipulação de Arquivos</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom Settings Button -->
+      <div class="p-3 border-t border-gray-200 bg-white">
+        <button onclick="openSettings()" class="w-full flex items-center space-x-2 text-xs text-gray-600 hover:text-black py-1 px-1 transition">
+          <i class="fa-solid fa-gear text-gray-500"></i>
+          <span class="font-medium">Configurações</span>
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Chat Area -->
+  <main class="flex-1 flex flex-col h-full bg-white relative overflow-hidden">
+    
+    <!-- Top Header Bar -->
+    <header class="h-12 border-b border-gray-200 flex items-center justify-between px-6 bg-white z-10">
+      <div class="flex items-center space-x-3 text-xs text-gray-700">
+        <i class="fa-solid fa-table-cells-large text-gray-400"></i>
+        <span id="header-chat-title" class="font-semibold text-gray-900 truncate max-w-lg">Haosbot Autônomo - Gateway Online</span>
+        <span class="badge text-gray-500 flex items-center space-x-1">
+          <i class="fa-regular fa-folder text-gray-400"></i>
+          <span>workspace</span>
+        </span>
+      </div>
+      <div class="flex items-center space-x-3 text-gray-400">
+        <button onclick="toggleSidebar()" class="hover:text-gray-700" title="Expandir/Recolher">
+          <i class="fa-regular fa-window-maximize"></i>
+        </button>
+        <button onclick="openSettings()" class="hover:text-gray-700">
+          <i class="fa-solid fa-ellipsis"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Chat Messages Scroll Area -->
+    <div id="messages-container" class="flex-1 overflow-y-auto px-8 py-6 max-w-4xl mx-auto w-full space-y-6">
+      
+      <!-- Badges / Metrics Header Row -->
+      <div class="flex items-center space-x-2 text-xs">
+        <span class="badge font-medium text-gray-700">entidades / relações</span>
+        <span class="badge text-gray-500">15167 / 31619</span>
+        <span class="badge font-semibold text-gray-900 bg-gray-100">RSS &lt; 10 MB (Go)</span>
+      </div>
+
+      <!-- Welcome Banner -->
+      <div class="prose max-w-none">
+        <h3 class="text-xl font-bold text-gray-900">1. Haosbot Gateway Conectado</h3>
+        <p class="text-gray-700">
+          Ambiente em execução nativa com suporte completo a comandos slash (<code class="text-xs">/status</code>, <code class="text-xs">/skills</code>, <code class="text-xs">/model</code>, <code class="text-xs">/new</code>), CPython Minimal com SQLite integrado e persistência em <code class="text-xs">~/.nanobot/</code>.
+        </p>
+      </div>
+
+      <!-- Message History Render Container -->
+      <div id="chat-stream" class="space-y-6"></div>
+    </div>
+
+    <!-- Bottom Input Container matching image exactly -->
+    <footer class="border-t border-gray-200 bg-white p-4">
+      <div class="max-w-4xl mx-auto space-y-2">
+        <!-- Token context meter -->
+        <div class="flex justify-end items-center space-x-2 text-[11px] text-gray-400">
+          <span id="token-indicator">82.6k / 256.0k • restante 173.4k</span>
+          <div class="w-16 h-1 bg-gray-200 rounded-full overflow-hidden">
+            <div class="w-1/3 h-full bg-gray-400"></div>
+          </div>
+        </div>
+
+        <!-- Clean Textarea Box -->
+        <div class="border border-gray-200 rounded-xl p-3 bg-white shadow-sm focus-within:border-gray-400 transition">
+          <textarea id="user-input" rows="2" placeholder="Digite uma mensagem... (Enter para enviar, Shift+Enter para nova linha)"
+            class="w-full resize-none outline-none text-sm text-gray-800 placeholder-gray-400 bg-transparent"
+            onkeydown="if(event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); handleSend(); }"></textarea>
+          
+          <!-- Bottom Controls Inside Box -->
+          <div class="flex items-center justify-between pt-2 border-t border-gray-100 mt-2 text-xs">
+            <div class="flex items-center space-x-3 text-gray-500">
+              <button onclick="newSession()" class="hover:text-black p-1"><i class="fa-solid fa-plus"></i></button>
+              <div class="flex items-center space-x-1 cursor-pointer hover:text-black">
+                <i class="fa-regular fa-compass"></i>
+                <span class="font-medium">Padrão</span>
+                <i class="fa-solid fa-chevron-down text-[9px]"></i>
+              </div>
+              <div onclick="openSettings()" class="flex items-center space-x-1 cursor-pointer hover:text-black">
+                <i class="fa-solid fa-gear"></i>
+                <span>Configurações</span>
+                <i class="fa-solid fa-chevron-down text-[9px]"></i>
+              </div>
+              <div onclick="openSettings()" class="flex items-center space-x-1 cursor-pointer hover:text-black font-mono text-[11px]">
+                <i class="fa-solid fa-sun text-amber-500"></i>
+                <span id="model-selector-badge">deepseek-chat</span>
+                <i class="fa-solid fa-chevron-down text-[9px]"></i>
+              </div>
+            </div>
+
+            <!-- Send button -->
+            <div class="flex items-center space-x-2">
+              <button class="p-1.5 text-gray-400 hover:text-gray-600 rounded"><i class="fa-solid fa-microphone"></i></button>
+              <button onclick="handleSend()" id="send-button" class="w-7 h-7 rounded-full bg-gray-400 hover:bg-gray-800 text-white flex items-center justify-center transition shadow-sm">
+                <i class="fa-solid fa-arrow-up text-xs"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </footer>
+  </main>
+
+  <!-- Settings Modal Dialog -->
+  <div id="settings-dialog" class="fixed inset-0 bg-black/40 backdrop-blur-xs hidden flex items-center justify-center p-4 z-50">
+    <div class="bg-white border border-gray-200 rounded-xl max-w-lg w-full p-6 space-y-4 shadow-xl text-sm">
+      <div class="flex justify-between items-center border-b border-gray-100 pb-3">
+        <h3 class="font-semibold text-gray-900 text-base">Modelos &amp; Endpoint LLM Externo</h3>
+        <button onclick="closeSettings()" class="text-gray-400 hover:text-gray-700 text-lg">&times;</button>
+      </div>
+
+      <div class="space-y-3">
+        <!-- URL Base + Fetch Button -->
+        <div>
+          <label class="block font-medium text-gray-700 text-xs mb-1">URL Base da API (Endpoint LLM)</label>
+          <div class="flex space-x-2">
+            <input type="text" id="dlg-llm-base" placeholder="http://100.77.31.78:8790/v1" class="flex-1 border border-gray-300 rounded-lg p-2 text-xs font-mono outline-none focus:border-black">
+            <button onclick="fetchRemoteModels()" id="btn-fetch-models" class="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-medium flex items-center space-x-1 transition shadow-sm" title="Consultar lista de modelos no endpoint">
+              <i class="fa-solid fa-rotate text-[11px]"></i>
+              <span>Fetch</span>
+            </button>
+          </div>
+          <span id="fetch-feedback" class="text-[11px] text-gray-500 mt-1 block">Clique em Fetch para listar os modelos disponíveis neste endpoint.</span>
+        </div>
+
+        <!-- API Key -->
+        <div>
+          <label class="block font-medium text-gray-700 text-xs mb-1">Chave de API do Provedor (API Key)</label>
+          <input type="password" id="dlg-llm-key" placeholder="Opcional se seu endpoint não exigir senha" class="w-full border border-gray-300 rounded-lg p-2 text-xs font-mono outline-none focus:border-black">
+        </div>
+
+        <!-- Model Dropdown + Manual Input -->
+        <div>
+          <label class="block font-medium text-gray-700 text-xs mb-1">Modelo Selecionado</label>
+          <div class="space-y-1.5">
+            <select id="dlg-llm-model-select" onchange="onModelSelectChange(this.value)" class="w-full border border-gray-300 rounded-lg p-2 text-xs font-mono outline-none focus:border-black bg-white cursor-pointer">
+              <option value="">-- Selecione ou clique em Fetch acima --</option>
+            </select>
+            <input type="text" id="dlg-llm-model" placeholder="Ou digite o nome do modelo manualmente..." class="w-full border border-gray-200 rounded-lg p-1.5 text-xs font-mono outline-none focus:border-black text-gray-700">
+          </div>
+        </div>
+
+        <!-- Gateway Bearer Token -->
+        <div>
+          <label class="block font-medium text-gray-700 text-xs mb-1">Bearer Token do Gateway (opcional)</label>
+          <input type="password" id="dlg-gateway-key" placeholder="Deixe vazio se não quiser exigir senha" class="w-full border border-gray-300 rounded-lg p-2 text-xs font-mono outline-none focus:border-black">
+        </div>
+      </div>
+
+      <div class="flex justify-between items-center pt-3 border-t border-gray-100">
+        <div class="flex items-center space-x-2">
+          <button onclick="restartAgent()" id="btn-restart" class="px-3 py-1.5 rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 text-xs font-medium flex items-center space-x-1 transition" title="Reinicia o processo nanobot">
+            <i class="fa-solid fa-power-off text-[10px]"></i>
+            <span>Reiniciar Agente</span>
+          </button>
+          <span id="dlg-status" class="text-xs text-emerald-600 font-medium"></span>
+        </div>
+        <div class="flex space-x-2">
+          <button onclick="closeSettings()" class="px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 text-xs">Cancelar</button>
+          <button onclick="saveDialogSettings()" class="px-4 py-1.5 rounded-lg bg-gray-900 hover:bg-black text-white text-xs font-medium">Salvar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let chatHistory = [];
+
+    function getToken() { return localStorage.getItem('haosbot_token') || ''; }
+    function setToken(t) { localStorage.setItem('haosbot_token', t); }
+
+    function switchTab(tab) {
+      const skillsPanel = document.getElementById('sidebar-skills-panel');
+      if (tab === 'skills') {
+        skillsPanel.classList.toggle('hidden');
+      }
+    }
+
+    function toggleSidebar() {
+      document.querySelector('aside').classList.toggle('hidden');
+    }
+
+    function focusSearch() {
+      const p = prompt("Filtrar comandos ou mensagens:");
+      if (p) {
+        document.getElementById('user-input').value = p;
+      }
+    }
+
+    function onModelSelectChange(val) {
+      if (val) {
+        document.getElementById('dlg-llm-model').value = val;
+      }
+    }
+
+    async function fetchRemoteModels() {
+      const base = document.getElementById('dlg-llm-base').value.trim();
+      const key = document.getElementById('dlg-llm-key').value.trim();
+      const feedback = document.getElementById('fetch-feedback');
+      const select = document.getElementById('dlg-llm-model-select');
+      const fetchBtn = document.getElementById('btn-fetch-models');
+
+      if (!base) {
+        feedback.textContent = "Por favor, preencha a URL Base antes de buscar.";
+        feedback.className = "text-[11px] text-red-500 mt-1 block";
+        return;
+      }
+
+      feedback.textContent = "Consultando endpoint...";
+      feedback.className = "text-[11px] text-blue-500 mt-1 block";
+      fetchBtn.disabled = true;
+
+      try {
+        const res = await fetch('/api/fetch-models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baseUrl: base, apiKey: key })
+        });
+
+        fetchBtn.disabled = false;
+
+        if (res.ok) {
+          const data = await res.json();
+          const models = data.data || [];
+          select.innerHTML = '<option value="">-- Escolha um modelo da lista (' + models.length + ' encontrados) --</option>';
+          models.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.id;
+            select.appendChild(opt);
+          });
+          
+          if (models.length > 0) {
+            select.value = models[0].id;
+            document.getElementById('dlg-llm-model').value = models[0].id;
+            feedback.textContent = `✓ ${models.length} modelos carregados com sucesso!`;
+            feedback.className = "text-[11px] text-emerald-600 font-medium mt-1 block";
+          } else {
+            feedback.textContent = "Nenhum modelo retornado na lista.";
+            feedback.className = "text-[11px] text-amber-600 mt-1 block";
+          }
+        } else {
+          const errText = await res.text();
+          feedback.textContent = "Falha ao consultar modelos: " + errText;
+          feedback.className = "text-[11px] text-red-500 mt-1 block";
+        }
+      } catch (e) {
+        fetchBtn.disabled = false;
+        feedback.textContent = "Erro de conexão: " + e.message;
+        feedback.className = "text-[11px] text-red-500 mt-1 block";
+      }
+    }
+
+    async function openSettings() {
+      document.getElementById('dlg-status').textContent = '';
+      document.getElementById('settings-dialog').classList.remove('hidden');
+      try {
+        const res = await fetch('/api/config', {
+          headers: getToken() ? { 'Authorization': `Bearer ${getToken()}` } : {}
+        });
+        if (res.ok) {
+          const cfg = await res.json();
+          const curBase = cfg.providers?.openai?.apiBase || 'http://100.77.31.78:8790/v1';
+          const curKey = cfg.providers?.openai?.apiKey || '';
+          const curModel = cfg.agents?.defaults?.model || 'deepseek-chat';
+          
+          document.getElementById('dlg-llm-base').value = curBase;
+          document.getElementById('dlg-llm-key').value = curKey;
+          document.getElementById('dlg-llm-model').value = curModel;
+          document.getElementById('dlg-gateway-key').value = cfg.api?.apiKey || getToken();
+
+          // Auto-fetch if base is already filled
+          if (curBase) {
+            fetchRemoteModels();
+          }
+        }
+      } catch (e) {
+        console.log("Aviso ao carregar /api/config", e);
+      }
+    }
+
+    function closeSettings() {
+      document.getElementById('settings-dialog').classList.add('hidden');
+    }
+
+    async function restartAgent() {
+      if (!confirm("Deseja realmente reiniciar o serviço nanobot agora?")) return;
+      const statusSpan = document.getElementById("dlg-status");
+      statusSpan.textContent = "Reiniciando...";
+      statusSpan.className = "text-xs text-amber-600 font-medium";
+      try {
+        await fetch("/api/restart", {
+          method: "POST",
+          headers: getToken() ? { "Authorization": `Bearer ${getToken()}` } : {}
+        });
+        statusSpan.textContent = "Agente reiniciado! Reconectando...";
+        setTimeout(() => location.reload(), 2000);
+      } catch (e) {
+        statusSpan.textContent = "Agente reiniciando...";
+        setTimeout(() => location.reload(), 2500);
+      }
+    }
+
+    async function saveDialogSettings() {
+      const llmBase = document.getElementById('dlg-llm-base').value.trim();
+      const llmKey = document.getElementById('dlg-llm-key').value.trim();
+      const llmModel = document.getElementById('dlg-llm-model').value.trim() || 'deepseek-chat';
+      const gatewayKey = document.getElementById('dlg-gateway-key').value.trim();
+
+      const newConfig = {
+        agents: { defaults: { model: llmModel, temperature: 0.7 } },
+        providers: {
+          openai: {
+            apiKey: llmKey,
+            apiBase: llmBase
+          }
+        },
+        api: {
+          host: window.location.hostname || "127.0.0.1",
+          port: 8765,
+          apiKey: gatewayKey
+        }
+      };
+
+      try {
+        let headers = { 'Content-Type': 'application/json' };
+        if (getToken()) headers['Authorization'] = `Bearer ${getToken()}`;
+
+        let res = await fetch('/api/config', {
+          method: 'POST',
+          headers: headers,
+          body: JSON.stringify(newConfig)
+        });
+
+        // If 401 unauthorized, try with the gatewayKey typed in the dialog input
+        if (res.status === 401 && gatewayKey && gatewayKey !== getToken()) {
+          headers['Authorization'] = `Bearer ${gatewayKey}`;
+          res = await fetch('/api/config', {
+            method: 'POST',
+            headers: headers,
+            body: JSON.stringify(newConfig)
+          });
+        }
+
+        if (res.ok) {
+          setToken(gatewayKey);
+          document.getElementById('model-selector-badge').textContent = llmModel;
+          document.getElementById('dlg-status').textContent = 'Salvo com sucesso!';
+          setTimeout(() => closeSettings(), 1000);
+        } else {
+          document.getElementById('dlg-status').textContent = 'Erro ao salvar: ' + (await res.text());
+        }
+      } catch (e) {
+        document.getElementById('dlg-status').textContent = 'Erro de rede: ' + e.message;
+      }
+    }
+
+    function newSession() {
+      chatHistory = [];
+      document.getElementById('chat-stream').innerHTML = '';
+      document.getElementById('header-chat-title').textContent = 'Novo chat';
+    }
+
+    async function handleSend() {
+      const input = document.getElementById('user-input');
+      const text = input.value.trim();
+      if (!text) return;
+
+      input.value = '';
+      chatHistory.push({ role: 'user', content: text });
+
+      const stream = document.getElementById('chat-stream');
+      
+      // Render user turn
+      stream.innerHTML += `
+        <div class="flex justify-end">
+          <div class="bg-gray-100 text-gray-900 px-4 py-2.5 rounded-2xl max-w-xl text-sm border border-gray-200">
+            ${escapeHtml(text)}
+          </div>
+        </div>
+      `;
+
+      // Render loading placeholder
+      const loadId = "loader-" + Date.now();
+      stream.innerHTML += `
+        <div id="${loadId}" class="flex items-center space-x-2 text-xs text-gray-400">
+          <span class="w-2 h-2 rounded-full bg-gray-400 animate-pulse"></span>
+          <span>Processando turno...</span>
+        </div>
+      `;
+      document.getElementById('messages-container').scrollTop = document.getElementById('messages-container').scrollHeight;
+
+      try {
+        const model = document.getElementById('model-selector-badge').textContent || 'deepseek-chat';
+        const headers = { 'Content-Type': 'application/json' };
+        if (getToken()) {
+          headers['Authorization'] = `Bearer ${getToken()}`;
+        }
+
+        const res = await fetch('/v1/chat/completions', {
+          method: 'POST',
+          headers: headers,
+          body: JSON.stringify({ model, messages: chatHistory })
+        });
+
+        document.getElementById(loadId)?.remove();
+
+        if (res.ok) {
+          const data = await res.json();
+          const reply = data.choices[0]?.message?.content || '(sem resposta)';
+          chatHistory.push({ role: 'assistant', content: reply });
+
+          // Render assistant reply
+          stream.innerHTML += `
+            <div class="space-y-2">
+              <div class="flex items-center justify-between text-[11px] text-gray-400">
+                <span class="font-semibold text-gray-600">TEXT</span>
+                <button onclick="navigator.clipboard.writeText(this.getAttribute('data-raw'))" data-raw="${escapeHtml(reply)}" class="hover:text-black">Copiar</button>
+              </div>
+              <div class="prose max-w-none text-gray-800 text-sm">
+                ${marked.parse(reply)}
+              </div>
+              <div class="flex items-center space-x-3 text-gray-400 text-xs pt-2">
+                <i class="fa-regular fa-circle-play hover:text-black cursor-pointer"></i>
+                <i class="fa-regular fa-copy hover:text-black cursor-pointer"></i>
+                <i class="fa-solid fa-rotate-right hover:text-black cursor-pointer"></i>
+                <span class="text-[10px]">Agora</span>
+              </div>
+            </div>
+          `;
+        } else {
+          const err = await res.text();
+          stream.innerHTML += `
+            <div class="p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-xs">
+              Erro (${res.status}): ${err}
+            </div>
+          `;
+        }
+      } catch (e) {
+        document.getElementById(loadId)?.remove();
+        stream.innerHTML += `
+          <div class="p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-xs">
+            Erro de conexão: ${e.message}
+          </div>
+        `;
+      }
+
+      document.getElementById('messages-container').scrollTop = document.getElementById('messages-container').scrollHeight;
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+  </script>
+</body>
+</html>

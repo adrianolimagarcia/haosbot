@@ -28,7 +28,6 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools/builtin"
 	wsbootstrap "github.com/adrianolimagarcia/nanobot-go/internal/workspace"
 
-	micrographrag "github.com/adrianolimagarcia/micrographrag-go"
 	"strconv"
 )
 
@@ -108,7 +107,6 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("load GraphRAG embedder: %w", err)
 	}
-	var _ micrographrag.Embedder = graphEmbedder
 	graphPool := newGraphStorePoolWithEmbedder(filepath.Join(config.DefaultDataDir(), "graph-sessions"), resolveGraphPoolMaxOpenStores(), graphEmbedder)
 	graphOutbox, err := openGraphOutbox(filepath.Join(config.DefaultDataDir(), "graph-outbox.jsonl"))
 	if err != nil {

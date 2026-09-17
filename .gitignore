@@ -1,0 +1,20 @@
+# Go build/test artifacts
+/haosbot
+/haosbot-remote
+/haosbot-remote-bookworm
+/haosbot-standalone.tar.gz
+/nanobot-bin
+/nanobot-standalone.tar.gz
+/dist/
+/build/
+coverage.out
+*.prof
+
+# Python compatibility/generator caches
+__pycache__/
+*.py[cod]
+
+# Local/editor noise
+.DS_Store
+.vscode/
+.idea/

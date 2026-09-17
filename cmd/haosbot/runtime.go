@@ -317,6 +317,23 @@ func cmdGateway(args []string) error {
 	}
 	defer rt.Close()
 
+	// Channels are a gateway concern: the reference constructs the
+	// ChannelManager only in the gateway runtime (cli/gateway_runtime.py:715)
+	// and starts it as one of the gateway's tasks (:941). `haosbot run` and
+	// `haosbot chat` drive the agent loop directly and never touch a channel.
+	channelManager := buildChannelManager(cfg, rt.bus)
+	if names := channelManager.EnabledChannels(); len(names) > 0 {
+		fmt.Printf("haosbot %s channels enabled: %s\n", version, strings.Join(names, ", "))
+	}
+	// Registered after `defer rt.Close()` so that it runs BEFORE it (defers run
+	// LIFO): the reference closes the channel transports first and only then
+	// tears down the loop-owned resources (cli/gateway_runtime.py:305-308).
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = channelManager.StopAll(stopCtx)
+	}()
+
 	prov, _, err := resolveProvider(cfg)
 	if err != nil {
 		return err
@@ -353,6 +370,13 @@ func cmdGateway(args []string) error {
 		}
 	}()
 	go func() { errCh <- rt.loop.Run(ctx) }()
+	// Fire-and-forget, like the reference's `asyncio.create_task(
+	// channels.start_all(), name="nanobot-channels")` (cli/gateway_runtime.py:941).
+	// StartAll returns once every channel has finished, and a channel that fails
+	// to start is recorded and logged by the manager instead of taking the
+	// gateway down (manager.py:373-389), so its result must NOT be an errCh
+	// value: a nil from here would otherwise end the gateway's select.
+	go func() { _ = channelManager.StartAll(ctx) }()
 
 	select {
 	case <-ctx.Done():

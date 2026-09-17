@@ -10,6 +10,19 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 )
 
+// configTargetPath returns the exact config file that owns the running
+// configuration. This is important for installations still using the legacy
+// ~/.nanobot/config.json path: saving through the WebUI must update that file,
+// not silently fork state into a second ~/.haosbot/config.json.
+func configTargetPath(cfg *config.Config) string {
+	if cfg != nil {
+		if source := strings.TrimSpace(cfg.SourcePath()); source != "" {
+			return source
+		}
+	}
+	return config.DefaultConfigPath()
+}
+
 // redactedConfig returns a JSON-compatible configuration view without secret
 // values. For every redacted field a sibling <field>Configured boolean is added
 // so the WebUI can show whether a credential already exists without receiving it.

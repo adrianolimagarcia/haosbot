@@ -80,19 +80,12 @@
   }
 
   window.newSession = function newSession() {
-    window.chatHistory = [];
-    // The original page declares chatHistory with let, so keep it in sync by
-    // mutating the lexical binding through the existing global function path
-    // when available. handleSend below owns its own state to avoid dependence.
     sessionStorage.setItem(SESSION_KEY, randomSessionID());
     const stream = document.getElementById('chat-stream');
     if (stream) stream.replaceChildren();
     const title = document.getElementById('header-chat-title');
     if (title) title.textContent = 'Novo chat';
-    hardeningHistory.length = 0;
   };
-
-  const hardeningHistory = [];
 
   window.handleSend = async function handleSend() {
     const input = document.getElementById('user-input');
@@ -100,7 +93,6 @@
     if (!text) return;
 
     input.value = '';
-    hardeningHistory.push({ role: 'user', content: text });
     const stream = document.getElementById('chat-stream');
     appendTextMessage(stream, text, 'user');
 
@@ -110,15 +102,15 @@
     stream.appendChild(loader);
 
     try {
-      const model = document.getElementById('model-selector-badge').textContent || 'deepseek-chat';
+      const sessionID = getSessionID();
       const headers = authHeaders({
         'Content-Type': 'application/json',
-        'X-HAOS-Session-ID': getSessionID(),
+        'X-HAOS-Session-ID': sessionID,
       });
-      const res = await fetch('/v1/chat/completions', {
+      const res = await fetch('/api/agent/turn', {
         method: 'POST',
         headers,
-        body: JSON.stringify({ model, messages: hardeningHistory }),
+        body: JSON.stringify({ sessionId: sessionID, message: text }),
       });
       loader.remove();
 
@@ -126,9 +118,7 @@
         appendTextMessage(stream, `Erro (${res.status}): ${await res.text()}`, 'error');
       } else {
         const data = await res.json();
-        const reply = data.choices?.[0]?.message?.content || '(sem resposta)';
-        hardeningHistory.push({ role: 'assistant', content: reply });
-        appendTextMessage(stream, reply, 'assistant');
+        appendTextMessage(stream, data.content || '(sem resposta)', 'assistant');
       }
     } catch (err) {
       loader.remove();
@@ -221,7 +211,7 @@
       api: { apiKey: gatewayKey },
     };
 
-    let headers = authHeaders({ 'Content-Type': 'application/json' });
+    const headers = authHeaders({ 'Content-Type': 'application/json' });
     if (!headers.Authorization && gatewayKey) headers.Authorization = `Bearer ${gatewayKey}`;
     const status = document.getElementById('dlg-status');
     try {

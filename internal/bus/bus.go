@@ -4,9 +4,12 @@
 //
 // Reference semantics worth noting: the Python bus uses unbounded
 // asyncio.Queues, so producers never block. That is a real memory risk on the
-// small devices this port targets, so the Go bus reproduces unbounded behavior
-// by default (compatibility first) while offering an explicit capacity limit
-// for constrained deployments.
+// small devices this port targets, so the Go bus offers an explicit capacity
+// limit. A zero Options field still means unbounded — that is the library
+// default, pinned by TestUnboundedByDefault — but the gateway runtime no longer
+// relies on it: cmd/haosbot/runtime.go builds its bus from
+// config.Config.BusOptions, whose defaults are non-zero (see
+// internal/config/bus.go for why that is a deliberate divergence).
 package bus
 
 import (
@@ -42,6 +45,9 @@ type EventHandler func(ctx context.Context, event Event)
 type Options struct {
 	// MaxInbound caps pending inbound messages. Zero means unbounded,
 	// matching the Python default. Set this on memory-constrained devices.
+	//
+	// The gateway runtime does not leave this at zero: it passes
+	// config.Config.BusOptions, so a deployed haosbot always has a bound.
 	MaxInbound int
 	// MaxOutbound caps pending outbound messages. Zero means unbounded.
 	MaxOutbound int
@@ -92,11 +98,32 @@ func (b *Bus) broadcastLocked() {
 // ---------------------------------------------------------------------------
 
 // PublishInbound queues a message from a channel to the agent.
+//
+// Check ordering, and why:
+//
+//  1. closed — a terminal bus state. No enqueue can ever succeed, whatever the
+//     caller's context says, so this outranks every other rejection.
+//  2. ctx — checked BEFORE the capacity check and, critically, BEFORE the
+//     append. A caller whose context is already done gets ctx.Err() and the
+//     message is NOT queued. The previous revision appended and woke the bus
+//     first and only then returned ctx.Err(), so a cancelled caller saw an
+//     error for a message that had in fact been delivered; retrying on that
+//     error delivered it twice.
+//  3. capacity — only meaningful once the publish could otherwise succeed.
+//
+// The ctx check and the append both happen under b.mu, and a successful append
+// returns nil unconditionally, so a cancellation that lands after the append
+// cannot turn an accepted message into a reported failure: exactly one of
+// "queued, nil" or "not queued, ctx.Err()" is possible.
 func (b *Bus) PublishInbound(ctx context.Context, msg core.InboundMessage) error {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
 		return ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		b.mu.Unlock()
+		return err
 	}
 	if b.maxInbound > 0 && len(b.inbound) >= b.maxInbound {
 		b.mu.Unlock()
@@ -105,7 +132,7 @@ func (b *Bus) PublishInbound(ctx context.Context, msg core.InboundMessage) error
 	b.inbound = append(b.inbound, msg)
 	b.broadcastLocked()
 	b.mu.Unlock()
-	return ctx.Err()
+	return nil
 }
 
 // ConsumeInbound blocks until a message is available, ctx is done, or the bus
@@ -146,11 +173,20 @@ func (b *Bus) InboundSize() int {
 // ---------------------------------------------------------------------------
 
 // PublishOutbound queues a routed message for its channel.
+//
+// Same check ordering and same rationale as PublishInbound: closed, then ctx
+// (before the append), then capacity. This twin carried the identical
+// commit-then-report-ctx.Err() bug; both are fixed together because the root
+// cause is shared.
 func (b *Bus) PublishOutbound(ctx context.Context, msg core.OutboundMessage) error {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
 		return ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		b.mu.Unlock()
+		return err
 	}
 	if b.maxOutbound > 0 && len(b.outbound) >= b.maxOutbound {
 		b.mu.Unlock()
@@ -159,7 +195,7 @@ func (b *Bus) PublishOutbound(ctx context.Context, msg core.OutboundMessage) err
 	b.outbound = append(b.outbound, msg)
 	b.broadcastLocked()
 	b.mu.Unlock()
-	return ctx.Err()
+	return nil
 }
 
 // ConsumeOutbound blocks until a message is available, ctx is done, or the bus
@@ -249,19 +285,33 @@ func (b *Bus) Subscribe(handler EventHandler) func() {
 // awaiting each. A panicking handler is isolated so one bad subscriber cannot
 // break delivery to the others; the Python version logs and continues, and
 // this preserves that containment without a logger dependency.
+//
+// The active set is resolved while b.mu is held, and only the handler
+// functions are carried out of the critical section. Reading subscription.active
+// after unlocking raced with the unsubscribe closure, which clears it under the
+// same mutex (see TestConcurrentUnsubscribeAndPublish).
+//
+// Consequence worth naming: the set of handlers is fixed at snapshot time, so
+// unsubscribing handler B from inside handler A during the same Publish no
+// longer suppresses B in that dispatch. The reference (queue.py:126-134) checks
+// each entry's flag as it is called, so it does suppress B. The difference is
+// only reachable when a subscriber unsubscribes a peer from within a handler;
+// deciding the set up front is what makes the read safe without taking b.mu once
+// per handler, and it keeps registration order and panic isolation intact.
 func (b *Bus) Publish(ctx context.Context, event Event) {
 	b.mu.Lock()
-	handlers := make([]*subscription, len(b.handlers))
-	copy(handlers, b.handlers)
+	handlers := make([]EventHandler, 0, len(b.handlers))
+	for _, h := range b.handlers {
+		if h.active {
+			handlers = append(handlers, h.handler)
+		}
+	}
 	b.mu.Unlock()
 
 	for _, h := range handlers {
-		if !h.active {
-			continue
-		}
 		func() {
 			defer func() { _ = recover() }()
-			h.handler(ctx, event)
+			h(ctx, event)
 		}()
 	}
 }

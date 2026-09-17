@@ -289,6 +289,269 @@ func TestOutboundRoundTrip(t *testing.T) {
 	}
 }
 
+// TestConcurrentUnsubscribeAndPublish is the regression test for the
+// unsynchronised read of subscription.active in Publish.
+//
+// Publish used to snapshot the handler list under b.mu and then read each
+// subscription's active flag AFTER unlocking, while the unsubscribe closure
+// clears that flag under the same mutex. The two accesses are then unordered,
+// which is a data race; this test must be run with -race.
+//
+// The slow first handler keeps Publish inside the dispatch loop between its
+// snapshot and the read of a later subscription's flag, so the overlap is
+// deterministic rather than left to scheduling luck.
+func TestConcurrentUnsubscribeAndPublish(t *testing.T) {
+	b := New(Options{})
+	defer b.Close()
+	ctx := context.Background()
+
+	// Signals that Publish has taken its snapshot and entered the first handler.
+	inHandler := make(chan struct{}, 1)
+	b.Subscribe(func(context.Context, Event) {
+		select {
+		case inHandler <- struct{}{}:
+		default:
+		}
+		time.Sleep(2 * time.Millisecond)
+	})
+
+	const rounds = 25
+	for i := 0; i < rounds; i++ {
+		victim := b.Subscribe(func(context.Context, Event) {})
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			b.Publish(ctx, testEvent{})
+		}()
+
+		// By the time the first handler runs, Publish has already copied
+		// b.handlers — victim is in its snapshot — and has not yet read
+		// victim's active flag.
+		<-inHandler
+		victim()
+		<-done
+	}
+}
+
+// enqueueProbeCtx is a context that reports cancellation only once the bus
+// queue is already non-empty, i.e. exactly in the window where the previous
+// revision consulted ctx.Err() — after the message had been committed.
+type enqueueProbeCtx struct {
+	context.Context
+	bus *Bus
+	// sawEnqueued records that Err was consulted after the append, meaning the
+	// publish committed before it checked the caller's context.
+	sawEnqueued atomic.Bool
+}
+
+func (c *enqueueProbeCtx) Err() error {
+	// White-box on purpose. Err is only called from the publishing goroutine
+	// while it holds b.mu, so b.inbound cannot be inspected through
+	// InboundSize (which needs the same mutex), and there is no concurrent
+	// writer for the read to race with.
+	if len(c.bus.inbound) > 0 {
+		c.sawEnqueued.Store(true)
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestPublishInboundChecksContextBeforeEnqueue pins the check ordering: the
+// context must be consulted BEFORE the message is committed. The probe only
+// reports cancellation once a message is already queued, so an implementation
+// that commits first and checks ctx afterwards returns an error for a message
+// it has already delivered.
+func TestPublishInboundChecksContextBeforeEnqueue(t *testing.T) {
+	b := New(Options{})
+	defer b.Close()
+
+	ctx := &enqueueProbeCtx{Context: context.Background(), bus: b}
+	if err := b.PublishInbound(ctx, core.InboundMessage{Content: "once"}); err != nil {
+		t.Fatalf("publish = %v, want nil: ctx must be checked before the commit", err)
+	}
+	if ctx.sawEnqueued.Load() {
+		t.Fatal("ctx.Err() was consulted after the message was already queued")
+	}
+	if got := b.InboundSize(); got != 1 {
+		t.Fatalf("queue holds %d messages, want 1", got)
+	}
+
+	msg, err := b.ConsumeInbound(context.Background())
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if msg.Content != "once" {
+		t.Errorf("content = %q, want %q", msg.Content, "once")
+	}
+
+	drainCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := b.ConsumeInbound(drainCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second consume = %v, want the queue to be empty", err)
+	}
+}
+
+// TestPublishInboundCancelledContextDoesNotEnqueue is the duplicate-delivery
+// regression test. A caller whose context is already done must get an error
+// AND find the queue untouched, so that retrying on that error cannot deliver
+// the same message twice.
+func TestPublishInboundCancelledContextDoesNotEnqueue(t *testing.T) {
+	b := New(Options{})
+	defer b.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := b.PublishInbound(ctx, core.InboundMessage{Content: "dup"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if got := b.InboundSize(); got != 0 {
+		t.Fatalf("queue holds %d messages after a rejected publish, want 0", got)
+	}
+
+	// The retry a caller performs on that error must deliver exactly one copy.
+	if err := b.PublishInbound(context.Background(), core.InboundMessage{Content: "dup"}); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	msg, err := b.ConsumeInbound(context.Background())
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if msg.Content != "dup" {
+		t.Errorf("content = %q, want %q", msg.Content, "dup")
+	}
+
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelDrain()
+	if _, err := b.ConsumeInbound(drainCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second consume = %v, want exactly one delivery", err)
+	}
+}
+
+// TestPublishOutboundCancelledContextDoesNotEnqueue is the outbound twin; the
+// root cause is shared, so it gets its own coverage.
+func TestPublishOutboundCancelledContextDoesNotEnqueue(t *testing.T) {
+	b := New(Options{})
+	defer b.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := b.PublishOutbound(ctx, core.OutboundMessage{Content: "dup"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if got := b.OutboundSize(); got != 0 {
+		t.Fatalf("queue holds %d messages after a rejected publish, want 0", got)
+	}
+
+	if err := b.PublishOutbound(context.Background(), core.OutboundMessage{Content: "dup"}); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	msg, err := b.ConsumeOutbound(context.Background())
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if msg.Content != "dup" {
+		t.Errorf("content = %q, want %q", msg.Content, "dup")
+	}
+
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelDrain()
+	if _, err := b.ConsumeOutbound(drainCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second consume = %v, want exactly one delivery", err)
+	}
+}
+
+// TestPublishCancelAfterEnqueueIsNotAnError covers the other half of the
+// contract: a cancellation that arrives once the message has been accepted
+// must not retroactively turn the accepted publish into a reported failure.
+func TestPublishCancelAfterEnqueueIsNotAnError(t *testing.T) {
+	b := New(Options{})
+	defer b.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := b.PublishInbound(ctx, core.InboundMessage{Content: "once"}); err != nil {
+		t.Fatalf("inbound publish: %v", err)
+	}
+	if err := b.PublishOutbound(ctx, core.OutboundMessage{Content: "once"}); err != nil {
+		t.Fatalf("outbound publish: %v", err)
+	}
+	cancel()
+
+	in, err := b.ConsumeInbound(context.Background())
+	if err != nil {
+		t.Fatalf("consume inbound: %v", err)
+	}
+	if in.Content != "once" {
+		t.Errorf("inbound content = %q, want %q", in.Content, "once")
+	}
+	out, err := b.ConsumeOutbound(context.Background())
+	if err != nil {
+		t.Fatalf("consume outbound: %v", err)
+	}
+	if out.Content != "once" {
+		t.Errorf("outbound content = %q, want %q", out.Content, "once")
+	}
+
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelDrain()
+	if _, err := b.ConsumeInbound(drainCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second inbound consume = %v, want exactly one delivery", err)
+	}
+	if _, err := b.ConsumeOutbound(drainCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second outbound consume = %v, want exactly one delivery", err)
+	}
+}
+
+// TestPublishCheckOrdering pins the documented order closed -> ctx -> capacity,
+// and that ErrClosed and ErrFull still behave for a live context.
+func TestPublishCheckOrdering(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// A closed bus outranks a cancelled context: no publish can ever succeed.
+	closed := New(Options{})
+	closed.Close()
+	if err := closed.PublishInbound(cancelled, core.InboundMessage{}); !errors.Is(err, ErrClosed) {
+		t.Errorf("closed+cancelled inbound = %v, want ErrClosed", err)
+	}
+	if err := closed.PublishOutbound(cancelled, core.OutboundMessage{}); !errors.Is(err, ErrClosed) {
+		t.Errorf("closed+cancelled outbound = %v, want ErrClosed", err)
+	}
+
+	// A cancelled context outranks a full queue, and neither enqueues.
+	full := New(Options{MaxInbound: 1, MaxOutbound: 1})
+	defer full.Close()
+	live := context.Background()
+	if err := full.PublishInbound(live, core.InboundMessage{Content: "a"}); err != nil {
+		t.Fatalf("inbound fill: %v", err)
+	}
+	if err := full.PublishOutbound(live, core.OutboundMessage{Content: "a"}); err != nil {
+		t.Fatalf("outbound fill: %v", err)
+	}
+	if err := full.PublishInbound(cancelled, core.InboundMessage{Content: "b"}); !errors.Is(err, context.Canceled) {
+		t.Errorf("full+cancelled inbound = %v, want context.Canceled", err)
+	}
+	if err := full.PublishOutbound(cancelled, core.OutboundMessage{Content: "b"}); !errors.Is(err, context.Canceled) {
+		t.Errorf("full+cancelled outbound = %v, want context.Canceled", err)
+	}
+	if got := full.InboundSize(); got != 1 {
+		t.Errorf("inbound size = %d, want 1", got)
+	}
+	if got := full.OutboundSize(); got != 1 {
+		t.Errorf("outbound size = %d, want 1", got)
+	}
+
+	// Full with a live context still reports ErrFull.
+	if err := full.PublishInbound(live, core.InboundMessage{Content: "c"}); !errors.Is(err, ErrFull) {
+		t.Errorf("full inbound = %v, want ErrFull", err)
+	}
+	if err := full.PublishOutbound(live, core.OutboundMessage{Content: "c"}); !errors.Is(err, ErrFull) {
+		t.Errorf("full outbound = %v, want ErrFull", err)
+	}
+}
+
 // TestConcurrentPublishConsume exercises the queue under the race detector.
 func TestConcurrentPublishConsume(t *testing.T) {
 	b := New(Options{})

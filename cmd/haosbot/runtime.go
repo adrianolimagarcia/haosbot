@@ -95,7 +95,10 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		EnableNetwork:       cfg.Tools.Web.Enable,
 	})
 
-	messageBus := bus.New(bus.Options{})
+	// Bounded by default: the queue limits come from gateway.maxInboundQueue /
+	// gateway.maxOutboundQueue, which default to a non-zero cap. The reference
+	// runs these queues unbounded; see internal/config/bus.go.
+	messageBus := bus.New(cfg.BusOptions())
 	graphPool := newGraphStorePool(filepath.Join(config.DefaultDataDir(), "graph-sessions"))
 	graphIndexer := newGraphIndexer(graphPool, 2, 64)
 

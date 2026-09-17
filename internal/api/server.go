@@ -18,6 +18,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/command"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/netpolicy"
+	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
 	"github.com/adrianolimagarcia/nanobot-go/internal/provider"
 )
 
@@ -38,6 +39,7 @@ type Server struct {
 	loop    atomic.Pointer[agent.Loop]
 	bus     atomic.Pointer[bus.Bus]
 	dataDir atomic.Pointer[string]
+	metrics atomic.Pointer[observability.Registry]
 
 	// notReady is the process-owned readiness override read by /readyz
 	// (see ready.go). The zero value means "no override".
@@ -69,6 +71,11 @@ func (s *Server) SetBus(b *bus.Bus) { s.bus.Store(b) }
 // <data dir>/sessions). /readyz proves it accepts a write.
 func (s *Server) SetDataDir(dir string) { s.dataDir.Store(&dir) }
 
+// SetMetrics attaches the allocation-light diagnostics registry owned by the
+// runtime. The endpoint is injected instead of recreated here so it observes
+// the same projection workers and memory fabric as the gateway.
+func (s *Server) SetMetrics(metrics *observability.Registry) { s.metrics.Store(metrics) }
+
 func (s *Server) checkAuth(r *http.Request) bool {
 	apiKey := s.cfg.API.APIKey
 	if apiKey == "" {
@@ -98,6 +105,19 @@ func (s *Server) Start(addr string) error {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok","runtime":"haosbot"}`))
+	})
+
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if !s.checkAuth(r) {
+			writeUnauthorized(w)
+			return
+		}
+		metrics := s.metrics.Load()
+		if metrics == nil {
+			writeAPIError(w, http.StatusServiceUnavailable, "server_error", "metrics_unavailable", "Runtime metrics are not configured")
+			return
+		}
+		metrics.ServeHTTP(w, r)
 	})
 
 	mux.HandleFunc("/api/fetch-models", func(w http.ResponseWriter, r *http.Request) {

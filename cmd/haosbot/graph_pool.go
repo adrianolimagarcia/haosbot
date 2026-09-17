@@ -42,9 +42,9 @@ const graphPoolMaxOpenStoresEnv = "NANOBOT_GRAPH_MAX_OPEN_STORES"
 // least recently used ones beyond that. The map used to grow forever — one open
 // store per session key, never closed — which exhausts file descriptors and
 // memory on a long-running server. Evicting (and closing) a store is safe
-// because the graph is derived data: the authoritative state is the session
-// JSONL plus workspace/memory/MEMORY.md, and a reopened store is simply rebuilt
-// by the indexer's next AddMemory.
+// because the graph is derived data: the authoritative state is the
+// Memory Fabric SQLite record plus the session transcript, and a reopened
+// store is simply rebuilt by the projection manager's next GraphRAG job.
 //
 // Lifecycle, which is what keeps an eviction from closing a store that an
 // in-flight operation is still using:
@@ -444,7 +444,8 @@ func (p *graphStorePool) Store(ctx context.Context, sessionKey string) (*microgr
 }
 
 // Close closes every open store and marks the pool unusable. It is the shutdown
-// path (buildRuntime calls it after graphIndexer.Close has drained the queue).
+// path (buildRuntime calls it after the projection manager has drained the
+// durable queue).
 // Unlike eviction it does not skip pinned entries: at shutdown nothing may
 // survive, so callers must stop issuing work before calling it.
 //

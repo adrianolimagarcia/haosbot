@@ -1,0 +1,355 @@
+// Package memoryfabric owns the transactional memory write path.
+//
+// A completed turn is one canonical record followed by durable projection
+// jobs. The record and all projection jobs are committed in the same SQLite
+// transaction. GraphRAG, Obsidian and future projections are consumers, never
+// alternate sources of truth.
+package memoryfabric
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
+)
+
+const (
+	ProjectionGraph    = "graph"
+	ProjectionObsidian = "obsidian"
+	stateQueued        = "queued"
+	stateRunning       = "running"
+	stateSucceeded     = "succeeded"
+	stateDead          = "dead"
+	defaultLease       = 2 * time.Minute
+	defaultMaxAttempts = 8
+	defaultMaxPending  = 512
+)
+
+type Config struct {
+	Path        string
+	BusyTimeout time.Duration
+	CacheKB     int
+	MaxPending  int
+	MaxAttempts int
+	Lease       time.Duration
+}
+
+type Record struct {
+	ID         string
+	SessionKey string
+	Content    string
+	CreatedAt  time.Time
+}
+
+type Job struct {
+	ID         string
+	Projection string
+	RecordID   string
+	SessionKey string
+	Content    string
+	Attempts   int
+	CreatedAt  time.Time
+}
+
+type Stats struct {
+	Pending       int64 `json:"pending"`
+	Running       int64 `json:"running"`
+	Succeeded     int64 `json:"succeeded"`
+	Dead          int64 `json:"dead"`
+	OldestAgeSecs int64 `json:"oldest_age_seconds"`
+}
+
+type Store struct {
+	db          *sql.DB
+	path        string
+	maxPending  int
+	maxAttempts int
+	lease       time.Duration
+	closeOnce   sync.Once
+}
+
+func Open(ctx context.Context, cfg Config) (*Store, error) {
+	if strings.TrimSpace(cfg.Path) == "" {
+		return nil, errors.New("memoryfabric: path is empty")
+	}
+	if cfg.BusyTimeout <= 0 {
+		cfg.BusyTimeout = 5 * time.Second
+	}
+	if cfg.CacheKB <= 0 {
+		cfg.CacheKB = 512
+	}
+	if cfg.MaxPending <= 0 {
+		cfg.MaxPending = defaultMaxPending
+	}
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = defaultMaxAttempts
+	}
+	if cfg.Lease <= 0 {
+		cfg.Lease = defaultLease
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg.Path), 0o700); err != nil {
+		return nil, fmt.Errorf("memoryfabric: create data directory: %w", err)
+	}
+	db, err := sql.Open("sqlite3", cfg.Path)
+	if err != nil {
+		return nil, fmt.Errorf("memoryfabric: open sqlite: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	s := &Store{db: db, path: cfg.Path, maxPending: cfg.MaxPending, maxAttempts: cfg.MaxAttempts, lease: cfg.Lease}
+	for _, pragma := range []string{
+		"PRAGMA foreign_keys=ON",
+		fmt.Sprintf("PRAGMA busy_timeout=%d", cfg.BusyTimeout.Milliseconds()),
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA synchronous=NORMAL",
+		"PRAGMA temp_store=FILE",
+		fmt.Sprintf("PRAGMA cache_size=-%d", cfg.CacheKB),
+		"PRAGMA cache_spill=ON",
+	} {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("memoryfabric: %s: %w", pragma, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS memory_records (
+  record_id TEXT PRIMARY KEY,
+  session_key TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_hash BLOB NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_records_session ON memory_records(session_key,created_at);
+CREATE TABLE IF NOT EXISTS memory_outbox (
+  job_id TEXT NOT NULL,
+  projection TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lease_until INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(job_id,projection),
+  FOREIGN KEY(record_id) REFERENCES memory_records(record_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_memory_outbox_claim ON memory_outbox(projection,state,next_attempt_at,lease_until,created_at);
+CREATE TABLE IF NOT EXISTS memory_projection_receipts (
+  projection TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  applied_at INTEGER NOT NULL,
+  PRIMARY KEY(projection,record_id)
+);`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("memoryfabric: create schema: %w", err)
+	}
+	return s, nil
+}
+
+func (s *Store) Close() error {
+	var err error
+	s.closeOnce.Do(func() { err = s.db.Close() })
+	return err
+}
+
+// AppendTurn atomically writes the canonical memory record and all projection
+// jobs. Repeating the same deterministic record is safe and repairs a missing
+// projection row without duplicating the record.
+func (s *Store) AppendTurn(ctx context.Context, recordID, sessionKey, content string) error {
+	if strings.TrimSpace(recordID) == "" {
+		recordID = DeterministicID(sessionKey, content)
+	}
+	if strings.TrimSpace(sessionKey) == "" {
+		return errors.New("memoryfabric: session key is empty")
+	}
+	if strings.TrimSpace(content) == "" {
+		return errors.New("memoryfabric: content is empty")
+	}
+	hash := sha256.Sum256([]byte(content))
+	now := time.Now().UnixMilli()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("memoryfabric: begin append: %w", err)
+	}
+	defer tx.Rollback()
+	var existingHash []byte
+	var existingSession string
+	err = tx.QueryRowContext(ctx, "SELECT session_key,content_hash FROM memory_records WHERE record_id=?", recordID).Scan(&existingSession, &existingHash)
+	if err == nil {
+		if existingSession != sessionKey || !sameBytes(existingHash, hash[:]) {
+			return fmt.Errorf("memoryfabric: record %s already exists with different identity or content", recordID)
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("memoryfabric: check record: %w", err)
+	} else if _, err := tx.ExecContext(ctx, `INSERT INTO memory_records(record_id,session_key,content,content_hash,created_at) VALUES(?,?,?,?,?)`, recordID, sessionKey, content, hash[:], now); err != nil {
+		return fmt.Errorf("memoryfabric: insert record: %w", err)
+	}
+	var pending int64
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM memory_outbox WHERE state IN (?,?)", stateQueued, stateRunning).Scan(&pending); err != nil {
+		return fmt.Errorf("memoryfabric: count pending jobs: %w", err)
+	}
+	for _, projection := range []string{ProjectionGraph, ProjectionObsidian} {
+		var exists int
+		if err := tx.QueryRowContext(ctx, "SELECT 1 FROM memory_outbox WHERE job_id=? AND projection=?", recordID, projection).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+			pending++
+		}
+	}
+	if pending > int64(s.maxPending) {
+		return fmt.Errorf("memoryfabric: outbox capacity reached (%d jobs)", s.maxPending)
+	}
+	for _, projection := range []string{ProjectionGraph, ProjectionObsidian} {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO memory_outbox(job_id,projection,record_id,state,created_at,updated_at) VALUES(?,?,?,?,?,?)`, recordID, projection, recordID, stateQueued, now, now); err != nil {
+			return fmt.Errorf("memoryfabric: enqueue %s projection: %w", projection, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("memoryfabric: commit append: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) Claim(ctx context.Context, projection string) (Job, bool, error) {
+	if projection == "" {
+		return Job{}, false, errors.New("memoryfabric: projection is empty")
+	}
+	now := time.Now().UnixMilli()
+	leaseUntil := now + s.lease.Milliseconds()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Job{}, false, err
+	}
+	defer tx.Rollback()
+	var jobID string
+	err = tx.QueryRowContext(ctx, `SELECT job_id FROM memory_outbox WHERE projection=? AND ((state=? AND next_attempt_at<=?) OR (state=? AND lease_until<=?)) ORDER BY created_at,job_id LIMIT 1`, projection, stateQueued, now, stateRunning, now).Scan(&jobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Job{}, false, nil
+	}
+	if err != nil {
+		return Job{}, false, err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE memory_outbox SET state=?,attempts=attempts+1,lease_until=?,updated_at=? WHERE job_id=? AND projection=? AND ((state=? AND next_attempt_at<=?) OR (state=? AND lease_until<=?))`, stateRunning, leaseUntil, now, jobID, projection, stateQueued, now, stateRunning, now)
+	if err != nil {
+		return Job{}, false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected != 1 {
+		return Job{}, false, err
+	}
+	var job Job
+	var createdAt int64
+	err = tx.QueryRowContext(ctx, `SELECT o.job_id,o.projection,o.record_id,r.session_key,r.content,o.attempts,o.created_at FROM memory_outbox o JOIN memory_records r ON r.record_id=o.record_id WHERE o.job_id=? AND o.projection=?`, jobID, projection).Scan(&job.ID, &job.Projection, &job.RecordID, &job.SessionKey, &job.Content, &job.Attempts, &createdAt)
+	if err != nil {
+		return Job{}, false, err
+	}
+	job.CreatedAt = time.UnixMilli(createdAt).UTC()
+	if err := tx.Commit(); err != nil {
+		return Job{}, false, err
+	}
+	return job, true, nil
+}
+
+func (s *Store) Ack(ctx context.Context, projection, jobID string) error {
+	now := time.Now().UnixMilli()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE memory_outbox SET state=?,lease_until=0,last_error='',updated_at=? WHERE job_id=? AND projection=?`, stateSucceeded, now, jobID, projection)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO memory_projection_receipts(projection,record_id,applied_at) SELECT ?,record_id,? FROM memory_outbox WHERE job_id=? AND projection=?`, projection, now, jobID, projection); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) Retry(ctx context.Context, projection, jobID string, cause error) error {
+	now := time.Now().UnixMilli()
+	var attempts int
+	if err := s.db.QueryRowContext(ctx, "SELECT attempts FROM memory_outbox WHERE job_id=? AND projection=?", jobID, projection).Scan(&attempts); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if attempts >= s.maxAttempts {
+		_, err := s.db.ExecContext(ctx, `UPDATE memory_outbox SET state=?,lease_until=0,last_error=?,updated_at=? WHERE job_id=? AND projection=?`, stateDead, errorString(cause), now, jobID, projection)
+		return err
+	}
+	delay := retryDelaySeconds(attempts)
+	_, err := s.db.ExecContext(ctx, `UPDATE memory_outbox SET state=?,lease_until=0,next_attempt_at=?,last_error=?,updated_at=? WHERE job_id=? AND projection=?`, stateQueued, now+delay*1000, errorString(cause), now, jobID, projection)
+	return err
+}
+
+func (s *Store) Stats(ctx context.Context) (Stats, error) {
+	var out Stats
+	rows, err := s.db.QueryContext(ctx, "SELECT state,COUNT(*) FROM memory_outbox GROUP BY state")
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var state string
+		var count int64
+		if err := rows.Scan(&state, &count); err != nil {
+			return out, err
+		}
+		switch state {
+		case stateQueued:
+			out.Pending += count
+		case stateRunning:
+			out.Running += count
+		case stateSucceeded:
+			out.Succeeded += count
+		case stateDead:
+			out.Dead += count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	var oldest sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, "SELECT MIN(created_at) FROM memory_outbox WHERE state IN (?,?)", stateQueued, stateRunning).Scan(&oldest); err != nil {
+		return out, err
+	}
+	if oldest.Valid {
+		out.OldestAgeSecs = (time.Now().UnixMilli() - oldest.Int64) / 1000
+		if out.OldestAgeSecs < 0 {
+			out.OldestAgeSecs = 0
+		}
+	}
+	return out, nil
+}
+
+func DeterministicID(sessionKey, content string) string {
+	h := sha256.Sum256([]byte(sessionKey + "\x00" + content))
+	return "mem-" + hex.EncodeToString(h[:16])
+}
+
+func sameBytes(a, b []byte) bool { return string(a) == string(b) }
+func errorString(err error) string { if err == nil { return "" }; return err.Error() }
+
+func retryDelaySeconds(attempt int) int64 {
+	switch {
+	case attempt <= 1:
+		return 1
+	case attempt == 2:
+		return 5
+	case attempt == 3:
+		return 30
+	default:
+		return 120
+	}
+}

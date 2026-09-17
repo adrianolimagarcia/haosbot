@@ -20,6 +20,8 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/bus"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
+	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
+	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
 	"github.com/adrianolimagarcia/nanobot-go/internal/prompt"
 	"github.com/adrianolimagarcia/nanobot-go/internal/provider"
 	"github.com/adrianolimagarcia/nanobot-go/internal/provider/openai"
@@ -36,6 +38,7 @@ type agentRuntime struct {
 	bus    *bus.Bus
 	loop   *agent.Loop
 	store  *session.Store
+	metrics *observability.Registry
 	closeF func()
 }
 
@@ -112,13 +115,34 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		return nil, fmt.Errorf("load GraphRAG embedder: %w", err)
 	}
 	graphPool := newGraphStorePoolWithEmbedder(filepath.Join(config.DefaultDataDir(), "graph-sessions"), resolveGraphPoolMaxOpenStores(), graphEmbedder)
-	graphOutbox, err := openGraphOutbox(filepath.Join(config.DefaultDataDir(), "graph-outbox.jsonl"))
+	metrics := observability.New()
+	metrics.SetVectorEnabled(graphEmbedder != nil)
+	metrics.SetEmbedderLoaded(graphEmbedder != nil)
+	profile := resolveResourceProfile()
+	memoryFabric, err := memoryfabric.Open(context.Background(), memoryfabric.Config{
+		Path: filepath.Join(config.DefaultDataDir(), "memory-fabric.db"),
+		CacheKB: profile.MemoryCacheKB,
+		MaxPending: profile.MemoryMaxPending,
+		MaxAttempts: 8,
+	})
 	if err != nil {
 		_ = graphPool.Close()
 		messageBus.Close()
-		return nil, fmt.Errorf("open GraphRAG outbox: %w", err)
+		return nil, fmt.Errorf("open memory fabric: %w", err)
 	}
-	graphIndexer := newGraphIndexer(graphPool, 2, 64, graphOutbox)
+	if err := migrateLegacyGraphOutbox(filepath.Join(config.DefaultDataDir(), "graph-outbox.jsonl"), memoryFabric); err != nil {
+		_ = memoryFabric.Close()
+		_ = graphPool.Close()
+		messageBus.Close()
+		return nil, fmt.Errorf("migrate legacy GraphRAG outbox: %w", err)
+	}
+	projections, err := newProjectionManager(memoryFabric, graphPool, filepath.Join(config.DefaultDataDir(), "obsidian-memory"), profile.ProjectionWorkers, metrics)
+	if err != nil {
+		_ = memoryFabric.Close()
+		_ = graphPool.Close()
+		messageBus.Close()
+		return nil, fmt.Errorf("start memory projections: %w", err)
+	}
 
 	loop, err := agent.NewLoop(agent.LoopConfig{
 		Bus:                   messageBus,
@@ -135,26 +159,24 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		MaxToolResultChars:    d.MaxToolResultChars,
 		SequentialTools:       false,
 		GraphMemoryForSession:     graphPool.Store,
-		GraphMemoryEnqueue:           graphIndexer.Enqueue,
-		GraphMemoryEnqueueWithID:     graphIndexer.EnqueueWithID,
-		GraphMemoryEnqueueWithIDError: graphIndexer.EnqueueWithIDError,
+		GraphMemoryEnqueue:           projections.Enqueue,
+		GraphMemoryEnqueueWithID:     projections.EnqueueWithID,
+		GraphMemoryEnqueueWithIDError: projections.EnqueueWithIDError,
 		GraphMemoryMaxChars:       6000,
+		Metrics:                   metrics,
 	})
 	if err == nil {
 		err = loop.RecoverPendingGraphMemory()
 	}
 	if err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		graphIndexer.Close(shutdownCtx)
+		projections.Close(shutdownCtx)
 		cancel()
-		if compactErr := graphOutbox.Compact(); compactErr != nil {
-			slog.Error("compact GraphRAG outbox", "error", compactErr)
-		}
-		if closeErr := graphOutbox.Close(); closeErr != nil {
-			slog.Error("close GraphRAG outbox", "error", closeErr)
-		}
 		graphPool.LogShutdownStats()
 		_ = graphPool.Close()
+		if closeErr := memoryFabric.Close(); closeErr != nil {
+			slog.Error("close memory fabric", "error", closeErr)
+		}
 		messageBus.Close()
 		return nil, fmt.Errorf("build agent loop: %w", err)
 	}
@@ -164,16 +186,11 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		bus:   messageBus,
 		loop:  loop,
 		store: store,
+		metrics: metrics,
 		closeF: func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			graphIndexer.Close(shutdownCtx)
+			projections.Close(shutdownCtx)
 			cancel()
-			if compactErr := graphOutbox.Compact(); compactErr != nil {
-				slog.Error("compact GraphRAG outbox", "error", compactErr)
-			}
-			if closeErr := graphOutbox.Close(); closeErr != nil {
-				slog.Error("close GraphRAG outbox", "error", closeErr)
-			}
 			// Logged after the indexer has drained and before Close, so the
 			// counters describe the whole life of the pool: the graph store
 			// pool is allowed to exceed its open-store limit while stores are
@@ -181,7 +198,11 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 			// often (graph_pool.go: OvershootStats).
 			graphPool.LogShutdownStats()
 			_ = graphPool.Close()
+			if closeErr := memoryFabric.Close(); closeErr != nil {
+				slog.Error("close memory fabric", "error", closeErr)
+			}
 			messageBus.Close()
+			metrics.SetEmbedderLoaded(false)
 		},
 	}, nil
 }
@@ -392,6 +413,7 @@ func cmdGateway(args []string) error {
 	// checks report "missing" and take a healthy gateway out of rotation.
 	apiServer.SetBus(rt.bus)
 	apiServer.SetDataDir(config.DefaultDataDir())
+	apiServer.SetMetrics(rt.metrics)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -413,7 +435,7 @@ func cmdGateway(args []string) error {
 	}
 
 	addr := fmt.Sprintf("%s:%s", host, port)
-	fmt.Printf("haosbot %s gateway starting HTTP server on http://%s (endpoints: /v1/chat/completions, /v1/models, /health, /readyz, /a2a)\n", version, addr)
+	fmt.Printf("haosbot %s gateway starting HTTP server on http://%s (endpoints: /v1/chat/completions, /v1/models, /health, /metrics, /readyz, /a2a)\n", version, addr)
 
 	// Publish the EFFECTIVE address back into the config before the server
 	// starts. --host/--port override cfg.API for the listener, but the A2A agent

@@ -22,7 +22,7 @@ require github.com/adrianolimagarcia/micrographrag-go v0.0.0-20260916231938-fdb8
 
 require (
 	github.com/asg017/sqlite-vec-go-bindings v0.0.0-20260326160809-b64d0e563e61 // indirect
-	github.com/mattn/go-sqlite3 v1.14.49 // indirect
+	github.com/mattn/go-sqlite3 v1.14.49
 	github.com/nlpodyssey/safetensors v0.0.0-20250209183917-bfb01cc25f7c // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/tphakala/simd v1.3.0 // indirect

@@ -10,6 +10,9 @@ A lightweight, standalone Go reimplementation of haosbot preserving behavior, co
 - **Memory & Dream Subsytem**: Full port of `MemoryArchiver` and `Consolidator` with atomic JSONL persistence and git store.
 - **Channels**: Telegram bot transport with ordered ingress queue and safe concurrent handling.
 - **HTTP API Server**: OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/models`, `/health`) with configurable port and optional Bearer token authentication.
+- **Memory Fabric**: One SQLite WAL transaction writes the canonical turn and durable GraphRAG/Obsidian projection jobs. Consumers have leases, retries, ACKs, deduplication and crash recovery.
+- **Local Vector Retrieval**: Optional offline Potion/Model2Vec embeddings (64D INT8) with sqlite-vec. No model is downloaded in `auto` mode.
+- **Operational Metrics**: `/metrics` exposes runtime memory, turns, provider timeouts, projection backlog/failures and vector status as JSON.
 
 ---
 
@@ -65,3 +68,25 @@ When `apiKey` is configured, clients must include the header:
 Authorization: Bearer YOUR_SECRET_BEARER_TOKEN
 ```
 If `apiKey` is empty or omitted, endpoints are open for local access.
+
+### Low-resource profile
+
+The runtime defaults to one worker per projection and small SQLite caches. Tune
+only when measurements justify it:
+
+```bash
+export NANOBOT_PROJECTION_WORKERS=1
+export NANOBOT_MEMORY_MAX_PENDING=512
+export NANOBOT_MEMORY_CACHE_KB=512
+```
+
+Graph vector search is enabled only when a local model is present. Put the
+64-dimensional model at `$GO_POTION_HOME/BASE2M/` (`model.safetensors` and
+`tokenizer.json`) and leave `NANOBOT_GRAPH_EMBEDDER=auto`. Use
+`NANOBOT_GRAPH_EMBEDDER=off` to force FTS + graph retrieval. The explicit
+`potion` mode may resolve the model through the dependency and is not the
+recommended mode for offline or resource-constrained deployments.
+
+The canonical memory database is `~/.haosbot/memory-fabric.db`; projection
+artifacts live under `~/.haosbot/obsidian-memory/` and the per-session
+GraphRAG databases under `~/.haosbot/graph-sessions/`.

@@ -1,7 +1,7 @@
 # Test runner RAM: the 40 GB is the runner, not the program
 
 ## TL;DR
-- The **built binary** peaks at **~5 MB RSS** (measured via `VmHWM`). The RAM objective is met by the code itself.
+- The minimal **built binary** previously peaked at **~5 MB RSS** (measured via `VmHWM`). Vector/GraphRAG mode has additional CGO, SQLite and optional model pages; measure that mode on the target device.
 - The **heaviest single test** (`compat` BPE sweeps, 5.5 MB → 5.4 M tokens) peaks at **~27 MB RSS**.
 - The **40 GB spikes** come from `go test ./...` / `go test ./internal/...` compiling **and** running **24 packages in parallel** (`nproc` = 8), **multiplied across sibling sessions** that run the same suites at the same time, with **no cgroup memory cap** to stop it.
 
@@ -29,5 +29,5 @@ The cgroup `system.slice/dsh-web.service` has `memory.max = max` (unlimited) and
    and verify with `awk '{printf "%.1f GB\n", $1/1073741824}' /sys/fs/cgroup/system.slice/dsh-web.service/memory.current`.
 
 ## Why it is not a leak
-- The port is stdlib-only, lazy-loads the BPE vocab (`sync.Once`), and the binary peaks at 5 MB.
+- The lightweight core keeps lazy loading and bounded queues. Optional GraphRAG/vector mode adds SQLite, sqlite-vec and model pages, so its RSS must be measured separately.
 - The spike is purely the **test runner**: Go compiles 24 packages in parallel (each `compile` can use ~1 GB for large packages like `compat`), then runs all test binaries in parallel, and sibling sessions multiply that by N.

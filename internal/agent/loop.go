@@ -15,6 +15,7 @@ import (
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/bus"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
+	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
 	"github.com/adrianolimagarcia/nanobot-go/internal/prompt"
 	"github.com/adrianolimagarcia/nanobot-go/internal/provider"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
@@ -179,6 +180,7 @@ type LoopConfig struct {
 	GraphMemoryEnqueueWithID      func(string, string, string) bool
 	GraphMemoryEnqueueWithIDError func(string, string, string) error
 	GraphMemoryMaxChars           int
+	Metrics                       *observability.Registry
 }
 
 type activeTurn struct {
@@ -304,6 +306,9 @@ func (l *Loop) Handle(ctx context.Context, msg core.InboundMessage) error {
 }
 
 func (l *Loop) ProcessMessage(ctx context.Context, msg core.InboundMessage) (*core.OutboundMessage, error) {
+	if l.cfg.Metrics != nil {
+		l.cfg.Metrics.IncTurns()
+	}
 	key := msg.SessionKey()
 
 	transcript, err := l.cfg.Store.Open(key)
@@ -397,7 +402,18 @@ func (l *Loop) ProcessMessage(ctx context.Context, msg core.InboundMessage) (*co
 		SessionKey:          key,
 	})
 	if err != nil {
+		if l.cfg.Metrics != nil {
+			l.cfg.Metrics.IncTurnErrors()
+			if errors.Is(err, context.DeadlineExceeded) {
+				l.cfg.Metrics.IncProviderTimeouts()
+			}
+		}
 		return nil, fmt.Errorf("agent: run: %w", err)
+	}
+	if l.cfg.Metrics != nil {
+		for _, message := range res.Messages {
+			l.cfg.Metrics.AddToolCalls(len(message.ToolCalls))
+		}
 	}
 
 	if len(res.Messages) >= len(modelMessages) {

@@ -344,13 +344,3 @@ func graphMemoryJobID(sessionKey, turnID, content string) string {
 	_, _ = io.WriteString(h, content)
 	return "gm-" + hex.EncodeToString(h.Sum(nil)[:16])
 }
-
-func graphMemoryTurnID(sessionKey string, historyLen int, content string) string {
-	h := sha256.New()
-	_, _ = io.WriteString(h, sessionKey)
-	_, _ = io.WriteString(h, "\x00")
-	_, _ = fmt.Fprintf(h, "%d", historyLen)
-	_, _ = io.WriteString(h, "\x00")
-	_, _ = io.WriteString(h, content)
-	return "turn-" + hex.EncodeToString(h.Sum(nil)[:16])
-}

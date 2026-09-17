@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,10 @@ type Channel struct {
 	// stop coordination
 	stopCtx    context.Context
 	cancelStop context.CancelFunc
+
+	// webhook receiver, non-nil only while webhook mode is serving
+	webhookMu     sync.Mutex
+	webhookServer *http.Server
 }
 
 // queuedUpdate represents a staged inbound item before drain.
@@ -116,6 +121,24 @@ func (c *Channel) Start(ctx context.Context) error {
 			return errors.New("telegram: bot token was rejected by the server")
 		}
 
+		// A webhook that cannot bind its port, or a setWebhook Telegram
+		// rejects, never heals by retrying. The reference classifies exactly
+		// these as terminal (runtime.py:628-633, 771-778) and fails the channel
+		// instead of retrying forever. Falling through to the retry loop below
+		// would spin, and falling back to long polling would silently discard
+		// the operator's mode setting — the defect this branch exists to
+		// prevent.
+		if errors.Is(err, errWebhookStartup) {
+			if c.stopCtx.Err() != nil {
+				// Stop raced the startup, so this is a cancelled lifecycle and
+				// not a startup failure. Reporting it as one would make an
+				// ordinary shutdown look like a broken configuration.
+				return nil
+			}
+			c.Logger().Error("telegram webhook startup failed", "error", err)
+			return err
+		}
+
 		c.Logger().Error("telegram lifecycle failed; retrying", "error", err, "backoff_sec", backoff)
 		select {
 		case <-c.stopCtx.Done():
@@ -128,7 +151,42 @@ func (c *Channel) Start(ctx context.Context) error {
 	return nil
 }
 
+// StartErrorMessage returns an actionable public message for a startup failure.
+//
+// It shadows channels.Base's empty default so a webhook startup failure reaches
+// the operator through the channel manager instead of the generic
+// "Channel failed to start. Check gateway logs." placeholder.
+func (c *Channel) StartErrorMessage(err error) string {
+	if errors.Is(err, errWebhookStartup) {
+		return fmt.Sprintf(
+			"Telegram webhook mode failed to start: %v. Check webhook_listen_host, webhook_listen_port and webhook_url.",
+			err)
+	}
+	return ""
+}
+
+// allowedUpdates is the reference's `allowed_updates` (runtime.py:719-724):
+// "callback_query" joins the list only when inline keyboards are enabled. Both
+// transports must call this one helper — duplicating the rule is how polling
+// and webhook mode drift apart.
+func (c *Channel) allowedUpdates() []string {
+	if c.cfg.InlineKeyboards {
+		return []string{"message", "callback_query"}
+	}
+	return []string{"message"}
+}
+
 func (c *Channel) runLifecycle(ctx context.Context) error {
+	// The reference announces the mode before it initializes the application
+	// (runtime.py:726-729). An operator must be able to tell which transport is
+	// live from the log alone, which is precisely the question this defect made
+	// unanswerable.
+	if c.cfg.Mode == "webhook" {
+		c.Logger().Info("starting bot in webhook mode")
+	} else {
+		c.Logger().Info("starting bot in polling mode")
+	}
+
 	// Initialize bot info
 	user, err := c.client.GetMe(ctx)
 	if err != nil {
@@ -145,6 +203,15 @@ func (c *Channel) runLifecycle(ctx context.Context) error {
 		c.Logger().Warn("failed to register bot commands", "error", err)
 	}
 
+	if c.cfg.Mode == "webhook" {
+		// Webhook mode serves updates; it must NOT delete the webhook, which is
+		// what the old unconditional delete did. PTB's bootstrap deletes only
+		// when no webhook_url is set, i.e. only for polling (verified against
+		// PTB 22.8: webhook mode sends set_webhook alone, polling mode sends
+		// delete_webhook alone).
+		return c.startWebhook(ctx)
+	}
+
 	// Delete webhook if needed to switch to polling
 	if err := c.client.DeleteWebhook(ctx, DeleteWebhookParams{DropPendingUpdates: false}); err != nil {
 		c.Logger().Debug("deleteWebhook before polling", "error", err)
@@ -156,12 +223,7 @@ func (c *Channel) runLifecycle(ctx context.Context) error {
 // pollLoop performs long polling with getUpdates.
 func (c *Channel) pollLoop(ctx context.Context) error {
 	var offset int64 = 0
-	allowedUpdates := []string{"message"}
-	if c.cfg.InlineKeyboards {
-		allowedUpdates = append(allowedUpdates, "callback_query")
-	}
-
-	c.Logger().Info("starting bot in polling mode")
+	allowedUpdates := c.allowedUpdates()
 
 	pollTimeout := 10 // seconds for long polling
 	for c.IsRunning() && ctx.Err() == nil {
@@ -339,7 +401,9 @@ func (c *Channel) Stop(ctx context.Context) error {
 	c.inboundBuffers = make(map[string][]*queuedUpdate)
 	c.inboundMu.Unlock()
 
-	return nil
+	// Webhook mode owns an HTTP listener; polling mode has nothing to stop
+	// here. stopWebhook is idempotent and context-aware.
+	return c.stopWebhook(ctx)
 }
 
 // ---------------------------------------------------------------------------

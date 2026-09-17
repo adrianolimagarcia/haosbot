@@ -3,6 +3,7 @@ package prompt
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -171,15 +172,37 @@ func TestSkillsSummary(t *testing.T) {
 	}
 
 	// Directory order, NOT sorted order. The reference's order is whatever the
-	// filesystem returns; on this fixture that is creation order.
-	iMid := strings.Index(got, "mid/SKILL.md")
-	iZeta := strings.Index(got, "zeta/SKILL.md")
-	iAlpha := strings.Index(got, "alpha/SKILL.md")
-	if !(iMid < iZeta && iZeta < iAlpha) {
-		t.Errorf("workspace skills are not in directory order: mid=%d zeta=%d alpha=%d", iMid, iZeta, iAlpha)
+	// filesystem returns (base.iterdir(), never sorted), so the expected order
+	// must be DERIVED FROM THE FILESYSTEM rather than assumed.
+	//
+	// This test used to assert that the fixture came back in creation order
+	// (mid/zeta/alpha) and reported a violation as "workspace skills were
+	// sorted". That assumption is false in general: readdir order is not
+	// creation order — on ext4 with dir_index it is a hash order — so the test
+	// passed on a developer machine and failed on the CI runner with a message
+	// that named the wrong cause. The product code was correct throughout:
+	// internal/prompt contains no sort call at all, and internal/skills/loader.go
+	// deliberately uses os.File.ReadDir (unsorted) rather than os.ReadDir, which
+	// sorts.
+	fsOrder := skillDirsInReaddirOrder(t, filepath.Join(agentWS, "skills"))
+	positions := make([]int, len(fsOrder))
+	for i, name := range fsOrder {
+		positions[i] = strings.Index(got, name+"/SKILL.md")
 	}
-	if strings.Index(got, "alpha/SKILL.md") < strings.Index(got, "mid/SKILL.md") {
-		t.Error("workspace skills were sorted; the reference does not sort them")
+	for i := 1; i < len(positions); i++ {
+		if positions[i-1] >= positions[i] {
+			t.Errorf("skills are not listed in filesystem order: %v appear at %v in the prompt",
+				fsOrder, positions)
+			break
+		}
+	}
+	// Only a filesystem whose readdir order differs from sorted order can show
+	// whether the port sorts; when readdir happens to return sorted order the
+	// two hypotheses are indistinguishable, so say so instead of passing
+	// silently and implying the sorting question was settled.
+	if sort.StringsAreSorted(fsOrder) {
+		t.Logf("readdir returned already-sorted order %v on this filesystem, so this run cannot "+
+			"distinguish sorted from unsorted output; the assertion above still holds", fsOrder)
 	}
 
 	// The group header names the RELATIVE root, because the agent and project
@@ -187,6 +210,42 @@ func TestSkillsSummary(t *testing.T) {
 	if !strings.Contains(got, "### Workspace skills (`skills`)") {
 		t.Errorf("workspace group header missing or not relative:\n%s", got)
 	}
+}
+
+// skillDirsInReaddirOrder returns the skill directory names under dir in the
+// order the FILESYSTEM reports them, restricted to directories that contain a
+// SKILL.md.
+//
+// It deliberately uses os.File.ReadDir (unsorted) rather than os.ReadDir, which
+// sorts — the same reason internal/skills/loader.go does. Deriving the expected
+// order this way is what makes the ordering assertion above independent of the
+// host filesystem: readdir order is not creation order, and two machines with
+// different filesystems legitimately disagree.
+func skillDirsInReaddirOrder(t *testing.T, dir string) []string {
+	t.Helper()
+	h, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	entries, err := h.ReadDir(-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, e.Name(), "SKILL.md")); err != nil {
+			continue
+		}
+		out = append(out, e.Name())
+	}
+	if len(out) == 0 {
+		t.Fatalf("no skill directories found under %s; the fixture is wrong", dir)
+	}
+	return out
 }
 
 func TestDisabledSkillsExcluded(t *testing.T) {

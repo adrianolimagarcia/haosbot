@@ -59,7 +59,11 @@ func resolveResourceProfile() resourceProfile {
 		p.MemoryMaxContentBytes = 32 * 1024
 		p.MemoryCacheKB = 256
 		p.ObsidianEnabled = false
-		p.MemoryRetrievalEnabled = false
+		// Retrieval remains enabled by default even in low-resource mode. The
+		// profile still disables the embedder and keeps the SQLite/outbox bounds
+		// conservative; operators can explicitly opt out with
+		// NANOBOT_MEMORY_RETRIEVAL=0.
+		p.MemoryRetrievalEnabled = true
 	}
 	p.ProjectionWorkers = boundedEnvInt(projectionWorkersEnv, p.ProjectionWorkers, 1, 4)
 	p.ProjectionPollMs = boundedEnvInt(projectionPollMsEnv, p.ProjectionPollMs, 1000, 10000)

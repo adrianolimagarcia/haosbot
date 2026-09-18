@@ -253,6 +253,21 @@ func runDumper(t *testing.T) []byte {
 	return out
 }
 
+// HAOSBot intentionally diverges from the frozen Nanobot reference in a very
+// small set of product defaults. Keep these overrides explicit so differential
+// tests still fail on every other upstream mismatch.
+var intentionalDefaultDivergences = map[string]any{
+	"workspace":             "~/.haosbot/workspace",
+	"context_window_tokens": float64(128_000),
+	"bot_name":              "haosbot",
+}
+
+var intentionalSerializedDefaultDivergences = map[string]any{
+	"workspace":            "~/.haosbot/workspace",
+	"contextWindowTokens": float64(128_000),
+	"botName":             "haosbot",
+}
+
 // ---------------------------------------------------------------------------
 // 1. Defaults
 // ---------------------------------------------------------------------------
@@ -296,6 +311,12 @@ func TestDefaultsMatchPythonReference(t *testing.T) {
 		gotVal, ok := got[key]
 		if !ok {
 			t.Errorf("field %q is in the Python reference but not compared by this test", key)
+			continue
+		}
+		if expected, intentional := intentionalDefaultDivergences[key]; intentional {
+			if !reflect.DeepEqual(expected, gotVal) {
+				t.Errorf("intentional HAOSBot default %q changed: want=%#v (%T)  got=%#v (%T)", key, expected, expected, gotVal, gotVal)
+			}
 			continue
 		}
 		if !reflect.DeepEqual(want, gotVal) {
@@ -358,6 +379,12 @@ func TestSerializationMatchesPythonReference(t *testing.T) {
 		gotVal, ok := got[k]
 		if !ok {
 			continue // already reported above
+		}
+		if expected, intentional := intentionalSerializedDefaultDivergences[k]; intentional {
+			if !reflect.DeepEqual(expected, gotVal) {
+				t.Errorf("intentional HAOSBot serialized default %q changed: want=%#v (%T)  got=%#v (%T)", k, expected, expected, gotVal, gotVal)
+			}
+			continue
 		}
 		if !reflect.DeepEqual(want, gotVal) {
 			t.Errorf("serialized %q: python=%#v (%T)  go=%#v (%T)", k, want, want, gotVal, gotVal)

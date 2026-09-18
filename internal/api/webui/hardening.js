@@ -104,6 +104,45 @@
     }
   }
 
+  function appendStreamingMessage(stream) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'space-y-2';
+    const top = document.createElement('div');
+    top.className = 'flex items-center justify-between text-[11px] text-gray-400';
+    const label = document.createElement('span');
+    label.className = 'font-semibold text-gray-600';
+    label.textContent = 'TEXT';
+    top.appendChild(label);
+    const body = document.createElement('div');
+    body.className = 'prose max-w-none text-gray-800 text-sm whitespace-pre-wrap';
+    const footer = document.createElement('div');
+    footer.className = 'text-gray-400 text-[10px] pt-2';
+    footer.textContent = 'Gerando...';
+    wrapper.append(top, body, footer);
+    stream.appendChild(wrapper);
+    return { body, footer };
+  }
+
+  async function consumeAgentStream(response, onEvent) {
+    if (!response.body) throw new Error('resposta sem corpo de streaming');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        onEvent(JSON.parse(trimmed));
+      }
+      if (done) break;
+    }
+    if (buffer.trim()) onEvent(JSON.parse(buffer.trim()));
+  }
+
   window.newSession = function newSession() {
     sessionStorage.setItem(SESSION_KEY, randomSessionID());
     const stream = document.getElementById('chat-stream');
@@ -112,11 +151,18 @@
     if (title) title.textContent = 'Novo chat';
   };
 
+  let sendInFlight = false;
+
   window.handleSend = async function handleSend() {
+    if (sendInFlight) return;
     const input = document.getElementById('user-input');
     const text = input.value.trim();
     if (!text) return;
 
+    sendInFlight = true;
+    input.disabled = true;
+    const sendButton = document.getElementById('send-button');
+    if (sendButton) sendButton.disabled = true;
     input.value = '';
     const stream = document.getElementById('chat-stream');
     await appendTextMessage(stream, text, 'user');
@@ -132,22 +178,52 @@
         'Content-Type': 'application/json',
         'X-HAOS-Session-ID': sessionID,
       });
-      const res = await fetch('/api/agent/turn', {
+      const res = await fetch('/api/agent/turn/stream', {
         method: 'POST',
         headers,
         body: JSON.stringify({ sessionId: sessionID, message: text }),
       });
-      loader.remove();
-
       if (!res.ok) {
+        loader.remove();
         await appendTextMessage(stream, `Erro (${res.status}): ${await res.text()}`, 'error');
       } else {
-        const data = await res.json();
-        await appendTextMessage(stream, data.content || '(sem resposta)', 'assistant');
+        const assistant = appendStreamingMessage(stream);
+        loader.remove();
+        let content = '';
+        let failed = null;
+        await consumeAgentStream(res, event => {
+          if (event.type === 'text_delta') {
+            content += event.delta || '';
+            assistant.body.textContent = content;
+          } else if (event.type === 'reasoning_delta') {
+            assistant.footer.textContent = 'Raciocinando...';
+          } else if (event.type === 'tool_start') {
+            assistant.footer.textContent = `Executando ${event.toolName || 'ferramenta'}...`;
+          } else if (event.type === 'tool_end') {
+            assistant.footer.textContent = 'Continuando...';
+          } else if (event.type === 'done') {
+            content = event.content || content || '(sem resposta)';
+            assistant.body.textContent = content;
+            assistant.footer.textContent = 'Agora';
+          } else if (event.type === 'error') {
+            failed = event.error || 'erro no turno';
+          }
+        });
+        if (failed) {
+          assistant.body.textContent = `Erro: ${failed}`;
+          assistant.body.className = 'text-red-700 text-sm whitespace-pre-wrap';
+        } else {
+          const html = await renderMarkdown(content || '(sem resposta)');
+          if (html !== null) assistant.body.innerHTML = html;
+        }
       }
     } catch (err) {
-      loader.remove();
+      if (loader.isConnected) loader.remove();
       await appendTextMessage(stream, `Erro de conexão: ${err.message}`, 'error');
+    } finally {
+      sendInFlight = false;
+      input.disabled = false;
+      if (sendButton) sendButton.disabled = false;
     }
 
     const container = document.getElementById('messages-container');

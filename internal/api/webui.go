@@ -54,6 +54,7 @@ func (s *Server) registerWebUI(mux *http.ServeMux) {
 	// Stateful browser traffic has an explicit endpoint instead of sharing the
 	// OpenAI-compatible route's historical fixed webui_session.
 	s.registerAgentTurn(mux)
+	s.registerAgentTurnStream(mux)
 	s.registerWebUIRender(mux)
 
 	serveAsset := func(path, contentType string, body []byte) {

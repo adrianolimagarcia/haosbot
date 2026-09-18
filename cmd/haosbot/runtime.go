@@ -166,6 +166,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		MaxIterations:         d.MaxToolIterations,
 		MaxToolResultChars:    d.MaxToolResultChars,
 		SequentialTools:       false,
+		IncludeMemory:         profile.MemoryRetrievalEnabled,
 		GraphMemoryForSession:     graphPool.Store,
 		GraphMemoryEnqueue:           projections.Enqueue,
 		GraphMemoryEnqueueWithID:     projections.EnqueueWithID,

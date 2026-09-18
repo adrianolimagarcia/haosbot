@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/adrianolimagarcia/nanobot-go/internal/agent"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
 )
 
@@ -36,27 +38,8 @@ func (s *Server) registerAgentTurn(mux *http.ServeMux) {
 			return
 		}
 
-		var req agentTurnRequest
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			http.Error(w, fmt.Sprintf("Invalid JSON request: %v", err), http.StatusBadRequest)
-			return
-		}
-
-		sessionID := strings.TrimSpace(req.SessionID)
-		if sessionID == "" {
-			sessionID = strings.TrimSpace(r.Header.Get("X-HAOS-Session-ID"))
-		}
-		if !webSessionIDPattern.MatchString(sessionID) {
-			http.Error(w, "Invalid or missing sessionId", http.StatusBadRequest)
-			return
-		}
-		message := strings.TrimSpace(req.Message)
-		if message == "" {
-			http.Error(w, "message is required", http.StatusBadRequest)
-			return
-		}
+		sessionID, message, ok := decodeAgentTurnRequest(w, r)
+		if !ok { return }
 
 		ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
 		defer cancel()
@@ -72,7 +55,9 @@ func (s *Server) registerAgentTurn(mux *http.ServeMux) {
 			},
 		})
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Agent turn error: %v", err), http.StatusInternalServerError)
+			status := http.StatusInternalServerError
+			if errors.Is(err, agent.ErrTurnActive) { status = http.StatusConflict }
+			http.Error(w, fmt.Sprintf("Agent turn error: %v", err), status)
 			return
 		}
 
@@ -86,4 +71,26 @@ func (s *Server) registerAgentTurn(mux *http.ServeMux) {
 			Content:   content,
 		})
 	})
+}
+
+func decodeAgentTurnRequest(w http.ResponseWriter, r *http.Request) (string, string, bool) {
+	var req agentTurnRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid JSON request: %v", err), http.StatusBadRequest)
+		return "", "", false
+	}
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" { sessionID = strings.TrimSpace(r.Header.Get("X-HAOS-Session-ID")) }
+	if !webSessionIDPattern.MatchString(sessionID) {
+		http.Error(w, "Invalid or missing sessionId", http.StatusBadRequest)
+		return "", "", false
+	}
+	message := strings.TrimSpace(req.Message)
+	if message == "" {
+		http.Error(w, "message is required", http.StatusBadRequest)
+		return "", "", false
+	}
+	return sessionID, message, true
 }

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,6 +29,8 @@ const (
 	sessionSuffix          = ".jsonl"
 	checkpointSuffix       = ".checkpoint.json"
 	migrationLockTimeout   = 30 * time.Second
+	sessionCacheMaxEntries = 4
+	sessionCacheMaxBytes   = 256 << 10
 )
 
 var workspaceIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -48,6 +51,17 @@ type Store struct {
 	workspace string
 	dir       string
 	initErr   error
+	cacheMu   sync.Mutex
+	cache     map[string]cachedSession
+	cacheSeq  uint64
+}
+
+type cachedSession struct {
+	sess    *Session
+	exists  bool
+	size    int64
+	modTime time.Time
+	used    uint64
 }
 
 // NewStore returns a store for workspace, persisting under sessionsRoot.
@@ -64,7 +78,7 @@ type Store struct {
 // error, the failure is recorded and returned by every method that touches
 // storage, so the store fails closed rather than writing into the workspace.
 func NewStore(workspace, sessionsRoot string) *Store {
-	s := &Store{}
+	s := &Store{cache: make(map[string]cachedSession)}
 	ws, err := canonicalPath(workspace)
 	if err != nil {
 		s.initErr = err
@@ -189,11 +203,22 @@ func (s *Store) Open(key string) (*Session, error) {
 	}
 	var sess *Session
 	err := s.withLock(func() error {
+		path := s.Path(key)
+		info, statErr := os.Stat(path)
+		exists := statErr == nil
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return fmt.Errorf("session: stat %s: %w", path, statErr)
+		}
+		if cached, ok := s.cachedSession(key, exists, info); ok {
+			sess = cached
+			return nil
+		}
 		loaded, err := s.loadLocked(key)
 		if err != nil {
 			return err
 		}
 		sess = loaded
+		s.rememberSession(key, loaded, exists, info)
 		return nil
 	})
 	if err != nil {
@@ -285,6 +310,7 @@ func (s *Store) Delete(key string) error {
 		return err
 	}
 	return s.withLock(func() error {
+		defer s.forgetSession(key)
 		var firstErr error
 		for _, path := range []string{s.Path(key), s.checkpointPath(key), s.legacyLossyPath(key)} {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -295,6 +321,64 @@ func (s *Store) Delete(key string) error {
 		}
 		return firstErr
 	})
+}
+
+func (s *Store) cachedSession(key string, exists bool, info os.FileInfo) (*Session, bool) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	cached, ok := s.cache[key]
+	if !ok || cached.exists != exists {
+		return nil, false
+	}
+	if exists && (info == nil || cached.size != info.Size() || !cached.modTime.Equal(info.ModTime())) {
+		delete(s.cache, key)
+		return nil, false
+	}
+	s.cacheSeq++
+	cached.used = s.cacheSeq
+	s.cache[key] = cached
+	return cached.sess, true
+}
+
+func (s *Store) rememberSession(key string, sess *Session, exists bool, info os.FileInfo) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	if exists && (info == nil || info.Size() > sessionCacheMaxBytes) {
+		delete(s.cache, key)
+		return
+	}
+	s.cacheSeq++
+	entry := cachedSession{sess: sess, exists: exists, used: s.cacheSeq}
+	if info != nil {
+		entry.size, entry.modTime = info.Size(), info.ModTime()
+	}
+	if len(s.cache) >= sessionCacheMaxEntries {
+		oldestKey := ""
+		var oldest uint64
+		for candidate, cached := range s.cache {
+			if oldestKey == "" || cached.used < oldest {
+				oldestKey, oldest = candidate, cached.used
+			}
+		}
+		if oldestKey != "" && oldestKey != key { delete(s.cache, oldestKey) }
+	}
+	s.cache[key] = entry
+}
+
+func (s *Store) rememberSaved(sess *Session) {
+	path := s.Path(sess.Key())
+	info, err := os.Stat(path)
+	if err != nil {
+		s.forgetSession(sess.Key())
+		return
+	}
+	s.rememberSession(sess.Key(), sess, true, info)
+}
+
+func (s *Store) forgetSession(key string) {
+	s.cacheMu.Lock()
+	delete(s.cache, key)
+	s.cacheMu.Unlock()
 }
 
 // withLock runs fn while holding the session-files lock.

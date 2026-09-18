@@ -42,3 +42,17 @@ func TestActiveTurnOldGenerationCannotDeleteReplacement(t *testing.T) {
 		t.Fatal("cancelActive did not cancel replacement")
 	}
 }
+
+func TestTryRegisterActiveRejectsDuplicateWithoutCancellation(t *testing.T) {
+	l := &Loop{active: map[string]activeTurn{}}
+	firstCanceled := false
+	if _, ok := l.tryRegisterActive("session", func() { firstCanceled = true }); !ok {
+		t.Fatal("first turn was rejected")
+	}
+	if _, ok := l.tryRegisterActive("session", func() {}); ok {
+		t.Fatal("duplicate turn was accepted")
+	}
+	if firstCanceled {
+		t.Fatal("duplicate turn canceled the in-flight provider")
+	}
+}

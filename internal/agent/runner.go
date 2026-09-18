@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
+	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
 	"github.com/adrianolimagarcia/nanobot-go/internal/provider"
 	"github.com/adrianolimagarcia/nanobot-go/internal/textutil"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
@@ -178,6 +179,8 @@ type RunSpec struct {
 	SessionKey string
 	// Hook observes progress.
 	Hook Hook
+	// Metrics receives allocation-light latency observations when configured.
+	Metrics *observability.Registry
 	// ErrorMessage overrides DefaultError.
 	ErrorMessage string
 	// MaxIterationsMessage overrides the default budget-exhausted message.
@@ -680,14 +683,28 @@ func (r *Runner) requestModelOnce(
 
 	sp, ok := spec.Provider.(provider.StreamingProvider)
 	if !ok {
-		return spec.Provider.Chat(ctx, req)
+		started := time.Now()
+		resp, err := spec.Provider.Chat(ctx, req)
+		if spec.Metrics != nil {
+			spec.Metrics.ObserveProviderTTFT(time.Since(started))
+			spec.Metrics.ObserveProviderTotal(time.Since(started))
+		}
+		return resp, err
 	}
 
+	started := time.Now()
 	stream, err := sp.ChatStream(ctx, req)
 	if err != nil {
+		if spec.Metrics != nil { spec.Metrics.ObserveProviderTotal(time.Since(started)) }
 		return nil, err
 	}
-	return consumeStream(ctx, stream, hook, streamedReasoning)
+	var firstEvent func()
+	if spec.Metrics != nil {
+		firstEvent = func() { spec.Metrics.ObserveProviderTTFT(time.Since(started)) }
+	}
+	resp, err := consumeStream(ctx, stream, hook, streamedReasoning, firstEvent)
+	if spec.Metrics != nil { spec.Metrics.ObserveProviderTotal(time.Since(started)) }
+	return resp, err
 }
 
 // streamPartial accumulates the fragments of one streamed tool call.
@@ -719,7 +736,7 @@ type streamPartial struct {
 // The reference asserts this ordering directly in
 // tests/agent/test_runner_reasoning.py:423-458 (reasoning, reasoning_end, then
 // content) and :572-608 (close before propagating cancellation).
-func consumeStream(ctx context.Context, stream <-chan core.StreamEvent, hook Hook, streamedReasoning *bool) (*core.Response, error) {
+func consumeStream(ctx context.Context, stream <-chan core.StreamEvent, hook Hook, streamedReasoning *bool, firstEvent func()) (*core.Response, error) {
 	var text strings.Builder
 	var reasoning strings.Builder
 	partials := map[int]*streamPartial{}
@@ -746,8 +763,9 @@ func consumeStream(ctx context.Context, stream <-chan core.StreamEvent, hook Hoo
 				closeNativeReasoning()
 				return finishStream(final, text.String(), reasoning.String(), partials, order), nil
 			}
-			switch ev.Kind {
+		switch ev.Kind {
 			case core.StreamText:
+				if firstEvent != nil { firstEvent(); firstEvent = nil }
 				text.WriteString(ev.Text)
 				// Close BEFORE forwarding the text, so the channel ends the
 				// reasoning group rather than streaming the answer into it.
@@ -756,6 +774,7 @@ func consumeStream(ctx context.Context, stream <-chan core.StreamEvent, hook Hoo
 				}
 				hook.OnTextDelta(ctx, ev.Text)
 			case core.StreamReasoning:
+				if firstEvent != nil { firstEvent(); firstEvent = nil }
 				reasoning.WriteString(ev.Text)
 				hook.OnReasoningDelta(ctx, ev.Text)
 				if ev.Text != "" {
@@ -763,6 +782,7 @@ func consumeStream(ctx context.Context, stream <-chan core.StreamEvent, hook Hoo
 					nativeReasoningOpen = true
 				}
 			case core.StreamToolCall:
+				if firstEvent != nil { firstEvent(); firstEvent = nil }
 				p, exists := partials[ev.Index]
 				if !exists {
 					p = &streamPartial{}
@@ -777,6 +797,7 @@ func consumeStream(ctx context.Context, stream <-chan core.StreamEvent, hook Hoo
 				}
 				p.args.WriteString(ev.ArgumentsDelta)
 			case core.StreamDone:
+				if firstEvent != nil { firstEvent(); firstEvent = nil }
 				if ev.Response != nil {
 					final = ev.Response
 				}
@@ -840,6 +861,10 @@ func (r *Runner) executeTools(
 	calls []core.ToolCall,
 	hook Hook,
 ) []core.ToolResult {
+	started := time.Now()
+	defer func() {
+		if spec.Metrics != nil { spec.Metrics.ObserveTools(time.Since(started)) }
+	}()
 	if spec.Tools == nil {
 		out := make([]core.ToolResult, len(calls))
 		for i, c := range calls {

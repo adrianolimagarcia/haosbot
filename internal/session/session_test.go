@@ -64,6 +64,20 @@ func newTestStore(t *testing.T) *Store {
 	return store
 }
 
+func TestOpenReusesSmallWarmSession(t *testing.T) {
+	store := newTestStore(t)
+	first, err := store.Open("warm-cache")
+	if err != nil { t.Fatal(err) }
+	first.AddMessage(*core.NewMessage(core.RoleUser, "hello"))
+	if err := first.Save(); err != nil { t.Fatal(err) }
+	second, err := store.Open("warm-cache")
+	if err != nil { t.Fatal(err) }
+	if first != second {
+		t.Fatal("warm session was reparsed instead of reusing the bounded cache")
+	}
+	if got := len(second.Messages()); got != 1 { t.Fatalf("messages=%d, want 1", got) }
+}
+
 func TestStorageKeyMatchesPython(t *testing.T) {
 	// Expected stems verified with CPython 3.14.7:
 	//   base64.urlsafe_b64encode(key.encode()).decode().rstrip("=")

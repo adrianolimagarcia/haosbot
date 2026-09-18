@@ -15,6 +15,7 @@ const (
 	memoryMaxContentBytesEnv = "NANOBOT_MEMORY_MAX_CONTENT_BYTES"
 	memoryCacheKBEnv           = "NANOBOT_MEMORY_CACHE_KB"
 	obsidianProjectionEnv      = "NANOBOT_OBSIDIAN_PROJECTION"
+	memoryRetrievalEnv         = "NANOBOT_MEMORY_RETRIEVAL"
 )
 
 const (
@@ -36,6 +37,7 @@ type resourceProfile struct {
 	MemoryMaxContentBytes int
 	MemoryCacheKB     int
 	ObsidianEnabled   bool
+	MemoryRetrievalEnabled bool
 	FutureRAMBytes    int64
 	FutureDiskBytes   int64
 }
@@ -45,7 +47,7 @@ func resolveResourceProfile() resourceProfile {
 		Name: "balanced", ProjectionWorkers: 1, ProjectionPollMs: 2000,
 		MemoryMaxPending: 512, MemoryMaxPendingBytes: 4 * 1024 * 1024,
 		MemoryMaxContentBytes: 64 * 1024, MemoryCacheKB: 512,
-		ObsidianEnabled: true, FutureRAMBytes: defaultFutureRAMBytes,
+		ObsidianEnabled: true, MemoryRetrievalEnabled: true, FutureRAMBytes: defaultFutureRAMBytes,
 		FutureDiskBytes: defaultFutureDiskBytes,
 	}
 	name := strings.ToLower(strings.TrimSpace(os.Getenv(resourceProfileEnv)))
@@ -57,6 +59,7 @@ func resolveResourceProfile() resourceProfile {
 		p.MemoryMaxContentBytes = 32 * 1024
 		p.MemoryCacheKB = 256
 		p.ObsidianEnabled = false
+		p.MemoryRetrievalEnabled = false
 	}
 	p.ProjectionWorkers = boundedEnvInt(projectionWorkersEnv, p.ProjectionWorkers, 1, 4)
 	p.ProjectionPollMs = boundedEnvInt(projectionPollMsEnv, p.ProjectionPollMs, 1000, 10000)
@@ -65,6 +68,7 @@ func resolveResourceProfile() resourceProfile {
 	p.MemoryMaxContentBytes = boundedEnvInt(memoryMaxContentBytesEnv, p.MemoryMaxContentBytes, 4*1024, 256*1024)
 	p.MemoryCacheKB = boundedEnvInt(memoryCacheKBEnv, p.MemoryCacheKB, 128, 4096)
 	p.ObsidianEnabled = boundedEnvBool(obsidianProjectionEnv, p.ObsidianEnabled)
+	p.MemoryRetrievalEnabled = boundedEnvBool(memoryRetrievalEnv, p.MemoryRetrievalEnabled)
 	return p
 }
 

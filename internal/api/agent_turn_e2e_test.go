@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -74,6 +75,20 @@ func (s *e2eTranscriptStore) Open(key string) (agent.Transcript, error) {
 type e2eExecTool struct {
 	tools.Base
 	calls atomic.Int32
+}
+
+type e2eStreamingProvider struct{}
+
+func (e2eStreamingProvider) Name() string { return "e2e-stream" }
+func (e2eStreamingProvider) Chat(context.Context, provider.ChatRequest) (*core.Response, error) {
+	return &core.Response{Content: "streamed", FinishReason: core.FinishStop, HasContent: true}, nil
+}
+func (e2eStreamingProvider) ChatStream(context.Context, provider.ChatRequest) (<-chan core.StreamEvent, error) {
+	ch := make(chan core.StreamEvent, 2)
+	ch <- core.StreamEvent{Kind: core.StreamText, Text: "stream"}
+	ch <- core.StreamEvent{Kind: core.StreamDone, Response: &core.Response{Content: "streamed", FinishReason: core.FinishStop, HasContent: true}}
+	close(ch)
+	return ch, nil
 }
 
 func (t *e2eExecTool) Name() string { return "exec" }
@@ -184,6 +199,39 @@ func TestAgentTurnEndpointXMLToolCallExecutesExactlyOnce(t *testing.T) {
 	if advertisedExec.Load() != 2 {
 		t.Fatalf("exec was not advertised in both rounds: %d", advertisedExec.Load())
 	}
+}
+
+func TestAgentTurnStreamEndpointForwardsStatefulDeltas(t *testing.T) {
+	cfg := config.DefaultConfig()
+	loop, err := agent.NewLoop(agent.LoopConfig{
+		Bus: bus.New(bus.Options{}), Store: &e2eTranscriptStore{},
+		Provider: e2eStreamingProvider{}, Tools: tools.NewRegistry(),
+		Prompt: prompt.New(t.TempDir()), Model: "stream-model",
+		SystemPrompt: "test", MaxIterations: 2, MaxTokens: 64,
+	})
+	if err != nil { t.Fatal(err) }
+	server := NewServer(cfg, e2eStreamingProvider{}, loop)
+	mux := http.NewServeMux()
+	server.registerWebUI(mux)
+	handler := server.securityMiddleware(mux)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/agent/turn/stream", strings.NewReader(`{"sessionId":"stream-session-0001","message":"hello"}`))
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK { t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String()) }
+	scanner := bufio.NewScanner(strings.NewReader(rec.Body.String()))
+	var events []agentTurnStreamEvent
+	for scanner.Scan() {
+		var event agentTurnStreamEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil { t.Fatal(err) }
+		events = append(events, event)
+	}
+	if err := scanner.Err(); err != nil { t.Fatal(err) }
+	if len(events) < 2 || events[0].Type != "text_delta" || events[0].Delta != "stream" {
+		t.Fatalf("events=%+v, want text delta first", events)
+	}
+	last := events[len(events)-1]
+	if last.Type != "done" || last.Content != "streamed" { t.Fatalf("last event=%+v", last) }
 }
 
 func mustJSONString(s string) string {

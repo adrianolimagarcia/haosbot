@@ -18,7 +18,7 @@ func TestResourceProfileLowDisablesOptionalObsidianProjection(t *testing.T) {
 	t.Setenv(resourceProfileEnv, "low")
 	t.Setenv(obsidianProjectionEnv, "")
 	p := resolveResourceProfile()
-	if p.Name != "low" || p.ObsidianEnabled || p.ProjectionPollMs != 5000 {
+	if p.Name != "low" || p.ObsidianEnabled || p.MemoryRetrievalEnabled || p.ProjectionPollMs != 5000 {
 		t.Fatalf("unexpected low profile: %+v", p)
 	}
 	if p.MemoryMaxContentBytes != 32*1024 || p.MemoryMaxPendingBytes != 2*1024*1024 {

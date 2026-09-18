@@ -431,6 +431,7 @@ func (s *Session) saveLocked() error {
 	if err := os.Remove(s.store.checkpointPath(key)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("session: remove checkpoint: %w", err)
 	}
+	s.store.rememberSaved(s)
 	return nil
 }
 

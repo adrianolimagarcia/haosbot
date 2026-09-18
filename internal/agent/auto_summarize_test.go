@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -200,6 +202,199 @@ func (p *summarizingProvider) Chat(ctx context.Context, req provider.ChatRequest
 
 func (p *summarizingProvider) Model() string { return "test-model" }
 func (p *summarizingProvider) Name() string  { return "test-provider" }
+
+// streamingOnlySummarizer models the deployed provider: a non-streaming call
+// with a large max_tokens never returns, while the streamed form answers
+// promptly. It records whether the summarize call took the streaming path.
+type streamingOnlySummarizer struct {
+	mu              sync.Mutex
+	chatCalls       int
+	streamCalls     int
+	turnStreamCalls int
+	summary         string
+	maxTokensSeen   int
+}
+
+func (p *streamingOnlySummarizer) Name() string { return "streaming-only" }
+
+// Chat always fails, exactly like a non-streaming request that the provider
+// never answers within the client's 120 s request timeout.
+func (p *streamingOnlySummarizer) Chat(ctx context.Context, req provider.ChatRequest) (*core.Response, error) {
+	p.mu.Lock()
+	p.chatCalls++
+	p.mu.Unlock()
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (p *streamingOnlySummarizer) ChatStream(ctx context.Context, req provider.ChatRequest) (<-chan core.StreamEvent, error) {
+	isSummary := false
+	for _, m := range req.Messages {
+		if strings.Contains(m.Content.Text, "conversational summarizer") {
+			isSummary = true
+		}
+	}
+
+	p.mu.Lock()
+	if isSummary {
+		p.streamCalls++
+		p.maxTokensSeen = req.MaxTokens
+	} else {
+		p.turnStreamCalls++
+	}
+	summary := p.summary
+	if summary == "" {
+		summary = "streamed checkpoint summary"
+	}
+	p.mu.Unlock()
+
+	reply := "turn reply"
+	if isSummary {
+		reply = summary
+	}
+
+	events := make(chan core.StreamEvent, 2)
+	go func() {
+		defer close(events)
+		events <- core.StreamEvent{Kind: core.StreamText, Text: reply}
+		events <- core.StreamEvent{Kind: core.StreamDone, Response: &core.Response{
+			Content:      reply,
+			FinishReason: core.FinishStop,
+		}}
+	}()
+	return events, nil
+}
+
+func (p *streamingOnlySummarizer) counts() (int, int, int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.chatCalls, p.streamCalls, p.maxTokensSeen
+}
+
+// TestAutoSummarizeUsesStreamingWhenAvailable is the regression test for the
+// deployed failure: the summarize call must stream, because a non-streaming
+// call with a large max_tokens never returns on that provider and burns the
+// whole turn deadline.
+func TestAutoSummarizeUsesStreamingWhenAvailable(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeSessionStore()
+	prov := &streamingOnlySummarizer{summary: "streamed summary text"}
+
+	b := bus.New(bus.Options{})
+	defer b.Close()
+
+	loop, err := NewLoop(LoopConfig{
+		Bus:                  b,
+		Store:                store,
+		Provider:             prov,
+		Tools:                tools.NewRegistry(),
+		Prompt:               prompt.New(t.TempDir()),
+		Model:                "test-model",
+		ContextWindowTokens:  128_000,
+		AutoSummarizeTokens:  100,
+		AutoSummarizeTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewLoop: %v", err)
+	}
+
+	tr, _ := store.Open("webui:stream-test")
+	sess := tr.(*fakeSessionTranscript)
+	big := strings.Repeat("conversation filler text ", 200)
+	sess.AddMessage(*core.NewMessage(core.RoleUser, big))
+	sess.AddMessage(*core.NewMessage(core.RoleAssistant, big))
+
+	if _, err := loop.ProcessMessage(ctx, core.InboundMessage{
+		Channel: "webui", ChatID: "stream-test", Content: "next",
+	}); err != nil {
+		t.Fatalf("ProcessMessage: %v", err)
+	}
+
+	chatCalls, streamCalls, maxTokens := prov.counts()
+	if chatCalls != 0 {
+		t.Errorf("summarize used the non-streaming path %d time(s); it must stream", chatCalls)
+	}
+	if streamCalls != 1 {
+		t.Fatalf("streamCalls=%d want 1", streamCalls)
+	}
+	if maxTokens != DefaultSummarizeMaxTokens {
+		t.Errorf("summarize max_tokens=%d want %d", maxTokens, DefaultSummarizeMaxTokens)
+	}
+	if len(sess.checkpoints) != 1 || sess.checkpoints[0] != "streamed summary text" {
+		t.Errorf("checkpoints=%v", sess.checkpoints)
+	}
+}
+
+// TestAutoSummarizeFailureDoesNotRetryEveryTurn covers the wedging defect: once
+// a summarize attempt fails, the session stays over the threshold on every
+// following turn, so an unconditional retry would spend the turn deadline
+// again and again.
+func TestAutoSummarizeFailureDoesNotRetryEveryTurn(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeSessionStore()
+	prov := &failingSummarizer{}
+
+	b := bus.New(bus.Options{})
+	defer b.Close()
+
+	loop, err := NewLoop(LoopConfig{
+		Bus:                  b,
+		Store:                store,
+		Provider:             prov,
+		Tools:                tools.NewRegistry(),
+		Prompt:               prompt.New(t.TempDir()),
+		Model:                "test-model",
+		ContextWindowTokens:  128_000,
+		AutoSummarizeTokens:  100,
+		AutoSummarizeTimeout: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewLoop: %v", err)
+	}
+
+	tr, _ := store.Open("webui:wedge-test")
+	sess := tr.(*fakeSessionTranscript)
+	big := strings.Repeat("conversation filler text ", 200)
+	sess.AddMessage(*core.NewMessage(core.RoleUser, big))
+	sess.AddMessage(*core.NewMessage(core.RoleAssistant, big))
+
+	for i := 0; i < 4; i++ {
+		if _, err := loop.ProcessMessage(ctx, core.InboundMessage{
+			Channel: "webui", ChatID: "wedge-test", Content: fmt.Sprintf("turn %d", i),
+		}); err != nil {
+			t.Fatalf("ProcessMessage %d: %v", i, err)
+		}
+	}
+
+	if got := prov.summarizeCalls(); got != 1 {
+		t.Errorf("summarize attempted %d times across 4 turns; want 1 (hysteresis)", got)
+	}
+}
+
+type failingSummarizer struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *failingSummarizer) Name() string { return "failing" }
+
+func (p *failingSummarizer) Chat(ctx context.Context, req provider.ChatRequest) (*core.Response, error) {
+	for _, m := range req.Messages {
+		if strings.Contains(m.Content.Text, "conversational summarizer") {
+			p.mu.Lock()
+			p.calls++
+			p.mu.Unlock()
+			return nil, errors.New("summarize unavailable")
+		}
+	}
+	return &core.Response{Content: "ok", FinishReason: core.FinishStop}, nil
+}
+
+func (p *failingSummarizer) summarizeCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
 
 func TestWebUIAutoSummarizeTrigger(t *testing.T) {
 	ctx := context.Background()

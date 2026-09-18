@@ -173,6 +173,52 @@ type sessionTranscript interface {
 
 const DefaultWebUIAutoSummarizeTokens = 120_000
 
+// Summarization call bounds.
+//
+// The summarize call is a plain completion, so it must not be shaped like the
+// agent turn it is replacing. Two measured facts about the deployed provider
+// (an OpenAI-compatible proxy) drive these numbers:
+//
+//   - A NON-streaming request whose max_tokens is large never comes back. The
+//     same payload answered in 7 s at max_tokens=128 and 16 s at 512, but did
+//     not return within 90 s at 1024 and was still absent after 300 s at 1024.
+//     The OpenAI client caps a non-streaming call at requestTimeout=120 s
+//     (client.go:54), so the 2048-token summarize request this code used to
+//     send was guaranteed to abort and burn two thirds of the gateway's 180 s
+//     turn budget (api/agent_turn.go:44) before the real turn even started.
+//   - The SAME request streamed returns 200 in 32 s with finish_reason=stop.
+//
+// So the summarize call streams whenever the provider supports it, and its
+// output is capped at a size that is useful for a checkpoint summary without
+// inviting an unbounded generation. DefaultSummarizeTimeout is a second,
+// independent bound: even a stalled stream may not consume the whole turn.
+const (
+	// DefaultSummarizeMaxTokens caps the checkpoint summary length.
+	DefaultSummarizeMaxTokens = 1024
+	// DefaultSummarizeTimeout bounds the whole summarize call. It is kept well
+	// below the gateway's 180 s turn deadline so a slow summary degrades into
+	// "keep the full history" instead of "the turn never answers".
+	DefaultSummarizeTimeout = 90 * time.Second
+	// DefaultSummarizeInputTokens caps how much transcript is folded into one
+	// summarize call. Older turns beyond the budget are dropped from the
+	// request and the prompt says so, rather than growing the call without
+	// bound.
+	DefaultSummarizeInputTokens = 48_000
+	// summarizeRetryGrowthRatio and summarizeRetryCooldown add hysteresis
+	// around a FAILED attempt. Without them a session that is over the
+	// threshold but cannot be summarized retries on every single turn, which
+	// makes the session permanently unusable.
+	summarizeRetryGrowthRatio = 1.25
+	summarizeRetryCooldown    = 10 * time.Minute
+)
+
+// summarizeAttempt records the last summarize attempt for one session.
+type summarizeAttempt struct {
+	tokens int
+	at     time.Time
+	failed bool
+}
+
 func pyTruthy(raw json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
@@ -231,6 +277,12 @@ type LoopConfig struct {
 
 	ContextWindowTokens int
 	AutoSummarizeTokens int
+	// AutoSummarizeMaxTokens, AutoSummarizeTimeout and
+	// AutoSummarizeInputTokens bound the summarize call itself. Zero selects
+	// the Default* constants above.
+	AutoSummarizeMaxTokens   int
+	AutoSummarizeTimeout     time.Duration
+	AutoSummarizeInputTokens int
 	Model               string
 	MaxTokens           int
 	Temperature         float64
@@ -264,6 +316,9 @@ type Loop struct {
 	mu             sync.Mutex
 	active         map[string]activeTurn
 	nextGeneration uint64
+
+	summarizeMu       sync.Mutex
+	summarizeAttempts map[string]summarizeAttempt
 }
 
 func NewLoop(cfg LoopConfig) (*Loop, error) {
@@ -297,7 +352,11 @@ func NewLoop(cfg LoopConfig) (*Loop, error) {
 	if !cfg.SequentialTools {
 		cfg.ConcurrentTools = true
 	}
-	return &Loop{cfg: cfg, active: map[string]activeTurn{}}, nil
+	return &Loop{
+		cfg:               cfg,
+		active:            map[string]activeTurn{},
+		summarizeAttempts: map[string]summarizeAttempt{},
+	}, nil
 }
 
 // graphStoreForSession returns the derived-memory store for a session together
@@ -517,12 +576,14 @@ func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook
 			toolSchemas = l.cfg.Tools.Schemas()
 		}
 		estTokens, _ := EstimatePromptTokens(modelMessages, toolSchemas)
-		if estTokens >= threshold {
+		if estTokens >= threshold && l.shouldAttemptSummarize(key, estTokens) {
 			slog.Info("agent: auto-summarizing web session exceeding token threshold",
 				"session", key, "tokens", estTokens, "threshold", threshold)
 			if err := l.autoSummarize(runCtx, sessTranscript, reusedUser); err != nil {
+				l.recordSummarizeAttempt(key, estTokens, true)
 				slog.Warn("agent: auto-summarize failed", "session", key, "error", err)
 			} else {
+				l.recordSummarizeAttempt(key, estTokens, false)
 				if text, lastActive := sessionSummaryFromMeta(sessTranscript.Metadata()); text != "" {
 					promptSummary = &prompt.Summary{
 						Text:       text,
@@ -728,6 +789,115 @@ func (l *Loop) autoSummarizeThreshold(isWeb bool) int {
 	return 0
 }
 
+func (l *Loop) summarizeMaxTokens() int {
+	if l.cfg.AutoSummarizeMaxTokens > 0 {
+		return l.cfg.AutoSummarizeMaxTokens
+	}
+	return DefaultSummarizeMaxTokens
+}
+
+func (l *Loop) summarizeTimeout() time.Duration {
+	if l.cfg.AutoSummarizeTimeout > 0 {
+		return l.cfg.AutoSummarizeTimeout
+	}
+	return DefaultSummarizeTimeout
+}
+
+func (l *Loop) summarizeInputTokens() int {
+	if l.cfg.AutoSummarizeInputTokens > 0 {
+		return l.cfg.AutoSummarizeInputTokens
+	}
+	return DefaultSummarizeInputTokens
+}
+
+// summarizeSourceBudget reports how many transcript characters may be folded
+// into one summarize call. It converts the token budget with a deliberately
+// conservative 1 token ~= 2 characters ratio, which is the worst case the
+// tokenizer produces for JSON-heavy transcripts.
+func (l *Loop) summarizeSourceBudget() int {
+	return l.summarizeInputTokens() * 2
+}
+
+// shouldAttemptSummarize applies hysteresis around a FAILED attempt.
+//
+// The threshold alone is not enough to decide. Once a session is over it the
+// estimate stays over it on every following turn (the runner trims the
+// model-facing copy, never the stored transcript), so an attempt that keeps
+// failing would be retried forever and every retry costs the turn its whole
+// deadline. After a failure a retry needs either real growth or a cooldown.
+func (l *Loop) shouldAttemptSummarize(key string, tokens int) bool {
+	l.summarizeMu.Lock()
+	defer l.summarizeMu.Unlock()
+	prev, ok := l.summarizeAttempts[key]
+	if !ok || !prev.failed {
+		return true
+	}
+	if tokens >= int(float64(prev.tokens)*summarizeRetryGrowthRatio) {
+		return true
+	}
+	return time.Since(prev.at) >= summarizeRetryCooldown
+}
+
+func (l *Loop) recordSummarizeAttempt(key string, tokens int, failed bool) {
+	l.summarizeMu.Lock()
+	defer l.summarizeMu.Unlock()
+	l.summarizeAttempts[key] = summarizeAttempt{tokens: tokens, at: time.Now(), failed: failed}
+}
+
+// summarize performs the checkpoint-summary completion.
+//
+// It streams whenever the provider can, for the reason documented on the
+// DefaultSummarize* constants, and bounds the whole call independently of the
+// caller's deadline.
+func (l *Loop) summarize(ctx context.Context, req provider.ChatRequest) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, l.summarizeTimeout())
+	defer cancel()
+
+	sp, ok := l.cfg.Provider.(provider.StreamingProvider)
+	if !ok {
+		resp, err := l.cfg.Provider.Chat(ctx, req)
+		if err != nil {
+			return "", err
+		}
+		return resp.Content, nil
+	}
+
+	stream, err := sp.ChatStream(ctx, req)
+	if err != nil {
+		return "", err
+	}
+
+	// The provider closes the channel; keep reading until it does even after a
+	// cancellation, or the producer goroutine leaks.
+	var text strings.Builder
+	var done *core.Response
+	var streamErr error
+	for ev := range stream {
+		switch ev.Kind {
+		case core.StreamText:
+			text.WriteString(ev.Text)
+		case core.StreamDone:
+			done = ev.Response
+		default:
+			// Reasoning, tool-call fragments and usage are not part of the
+			// summary.
+		}
+		if ev.Err != nil && streamErr == nil {
+			streamErr = ev.Err
+		}
+	}
+	if streamErr != nil {
+		return "", streamErr
+	}
+	if text.Len() > 0 {
+		return text.String(), nil
+	}
+	if done != nil {
+		return done.Content, nil
+	}
+	return "", nil
+}
+
 func (l *Loop) autoSummarize(ctx context.Context, sess sessionTranscript, reusedUser bool) error {
 	if l.cfg.Provider == nil {
 		return errors.New("agent: autoSummarize: no provider configured")
@@ -765,8 +935,11 @@ func (l *Loop) autoSummarize(ctx context.Context, sess sessionTranscript, reused
 		return nil
 	}
 
-	var sb strings.Builder
-	for _, m := range sourceMsgs {
+	// Render the transcript, then keep only the newest entries that fit the
+	// summarize input budget. The request has to stay bounded: an unbounded
+	// summarize call is part of what made the session unusable.
+	rendered := make([]string, len(sourceMsgs))
+	for i, m := range sourceMsgs {
 		role := strings.ToUpper(string(m.Role))
 		text := m.Content.Text
 		if len(m.ToolCalls) > 0 {
@@ -779,9 +952,24 @@ func (l *Loop) autoSummarize(ctx context.Context, sess sessionTranscript, reused
 		if len(text) > 4000 {
 			text = text[:4000] + "... [truncated]"
 		}
-		fmt.Fprintf(&sb, "%s: %s\n\n", role, text)
+		rendered[i] = fmt.Sprintf("%s: %s\n\n", role, text)
 	}
-	formattedConversation := sb.String()
+
+	// Walk backwards so the newest turns are always the ones kept. The last
+	// entry is kept unconditionally, so firstKept never reaches len(rendered).
+	budget := l.summarizeSourceBudget()
+	used := 0
+	firstKept := len(rendered)
+	for i := len(rendered) - 1; i >= 0; i-- {
+		if used+len(rendered[i]) > budget && i != len(rendered)-1 {
+			break
+		}
+		used += len(rendered[i])
+		firstKept = i
+	}
+	dropped := firstKept
+
+	formattedConversation := strings.Join(rendered[firstKept:], "")
 
 	var prevSummary string
 	if text, _ := sessionSummaryFromMeta(sess.Metadata()); text != "" {
@@ -795,13 +983,19 @@ Guidelines:
 - When a previous summary is present, merge and synthesize it with the new conversation history.
 - Preserve key user requirements, preferences, decisions made, architecture choices, file paths, code details, and unresolved blockers.
 - Structure with clear bullet points.
-- Do not invent facts that are not present in the conversation.`
+- Do not invent facts that are not present in the conversation.
+- Keep the summary under 900 words.`
 
 	var userPrompt strings.Builder
 	if prevSummary != "" {
 		userPrompt.WriteString("## Previous Summary\n")
 		userPrompt.WriteString(prevSummary)
 		userPrompt.WriteString("\n\n")
+	}
+	if dropped > 0 {
+		fmt.Fprintf(&userPrompt,
+			"NOTE: the transcript below is the most recent portion only; %d earlier message(s) were elided because of a size limit. Do not claim to know what those contained.\n\n",
+			dropped)
 	}
 	userPrompt.WriteString("## Conversation History to Summarize\n")
 	userPrompt.WriteString(formattedConversation)
@@ -813,15 +1007,19 @@ Guidelines:
 			*core.NewMessage(core.RoleUser, userPrompt.String()),
 		},
 		Model:       l.cfg.Model,
-		MaxTokens:   2048,
+		MaxTokens:   l.summarizeMaxTokens(),
 		Temperature: 0.2,
 	}
 
-	resp, err := l.cfg.Provider.Chat(ctx, req)
+	started := time.Now()
+	summary, err := l.summarize(ctx, req)
+	if l.cfg.Metrics != nil {
+		l.cfg.Metrics.ObserveProviderTotal(time.Since(started))
+	}
 	if err != nil {
 		return fmt.Errorf("provider chat: %w", err)
 	}
-	summaryText := strings.TrimSpace(resp.Content)
+	summaryText := strings.TrimSpace(summary)
 	if summaryText == "" {
 		return errors.New("provider returned empty summary")
 	}

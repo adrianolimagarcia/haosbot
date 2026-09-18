@@ -912,8 +912,12 @@ func (l *Loop) cancelActive(key string) bool {
 	defer l.mu.Unlock()
 	current, ok := l.active[key]
 	if ok {
+		// Keep the generation registered until the canceled turn actually
+		// unwinds and unregisterActive runs. Deleting it here would let a new
+		// turn enter the same session while the old provider/tool/persistence
+		// path is still returning, reintroducing the exact same-session race
+		// the active-turn gate is meant to prevent.
 		current.cancel()
-		delete(l.active, key)
 	}
 	return ok
 }

@@ -138,8 +138,13 @@ func (b *Builder) BuildSystemPrompt(channel string, summary *Summary, projectWor
 	// omits the section, so the error is surfaced through SkillsLoader and the
 	// section is dropped here. This is the ONLY input that can produce it.
 	if summary, err := loader.BuildSkillsSummary(exclude, root); err == nil && summary != "" {
+		// The built-in skills are a byte-identical copy of the reference, so
+		// their descriptions still carry the reference's product name. Rebrand
+		// on the way into the prompt rather than on disk, which keeps the
+		// SHA-256 drift check in internal/skills meaningful.
 		parts = append(parts, strings.ReplaceAll(
-			strings.TrimRight(skillsSectionTemplate, "\n"), "{{ skills_summary }}", summary))
+			strings.TrimRight(skillsSectionTemplate, "\n"), "{{ skills_summary }}",
+			RebrandReferenceText(summary)))
 	}
 
 	if summary != nil && summary.Text != "" && summary.Text != "(nothing)" {
@@ -147,6 +152,11 @@ func (b *Builder) BuildSystemPrompt(channel string, summary *Summary, projectWor
 			fmt.Sprintf("Previous conversation summary (last active %s):\n%s",
 				summary.LastActive, summary.Text))
 	}
+
+	// Port-specific guidance, appended LAST so NormalizePortGuidance can strip it
+	// as a suffix. See port_guidance.go for the measurements behind it and for why
+	// the divergence from the reference is deliberate and bounded.
+	parts = append(parts, portGuidanceSection)
 
 	return strings.Join(parts, sectionSeparator)
 }

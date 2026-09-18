@@ -3,7 +3,7 @@
 
 ## Workspace
 {% if agent_workspace_path != workspace_path %}
-Nanobot's agent workspace is at: {{ agent_workspace_path }}
+Haosbot's agent workspace is at: {{ agent_workspace_path }}
 - Agent profile: {{ agent_workspace_path }}/SOUL.md and {{ agent_workspace_path }}/USER.md
 - Long-term memory: {{ agent_workspace_path }}/memory/MEMORY.md
 - History log: {{ agent_workspace_path }}/memory/history.jsonl (append-only JSONL; prefer built-in `grep` for search).

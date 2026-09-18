@@ -120,10 +120,41 @@ func BundledTemplate(name string) (content string, ok bool) {
 // suite. The substitutions are reversed here instead of duplicating the
 // reference files, so the shipped templates stay the single source of truth.
 var brandingRewrites = []struct{ shipped, reference string }{
+	// The identity line is a full rewrite, not a word swap: this port describes
+	// itself differently from the reference. It MUST stay first — the
+	// word-level entries below would otherwise rewrite its "haosbot" before
+	// this entry could match the whole line.
 	{
 		shipped:   "I am haosbot 🤖, a autonomous infrastructure AI agent for HAOS.",
 		reference: "I am nanobot 🐈, a personal AI assistant.",
 	},
+	// Every other occurrence is the bare product name, in both spellings the
+	// templates use. These are word-level rather than per-line so that a new
+	// mention of the product name cannot silently reintroduce the reference's
+	// branding: reversing them still restores the reference bytes exactly,
+	// which is what TestBundledTemplatesMatchReference checks.
+	{shipped: "haosbot", reference: "nanobot"},
+	{shipped: "Haosbot", reference: "Nanobot"},
+}
+
+// RebrandReferenceText rewrites the reference's product name to this port's in
+// text that is kept byte-identical to the reference ON DISK.
+//
+// The built-in skills are a verbatim copy of upstream/nanobot/nanobot/skills/,
+// verified by SHA-256 in internal/skills/builtin_test.go, so they cannot be
+// rebranded at rest without losing that drift check. Their descriptions still
+// reach the model through the skills section, so the rewrite happens here, on
+// the way into the prompt. Rewrites are applied in table order for the same
+// reason referenceVariant is: the identity line must be consumed before the
+// word-level entries can touch it.
+func RebrandReferenceText(content string) string {
+	for _, rewrite := range brandingRewrites {
+		if rewrite.shipped == "" || rewrite.reference == "" {
+			continue
+		}
+		content = strings.ReplaceAll(content, rewrite.reference, rewrite.shipped)
+	}
+	return content
 }
 
 // brandingPlaceholder is what NormalizeBranding substitutes for both spellings

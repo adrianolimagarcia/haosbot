@@ -419,7 +419,7 @@ func (h *Handler) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	switch req.Method {
-	case "tasks/send", "tasks/create":
+	case "tasks/send", "tasks/create", "SendMessage", "message/send":
 		h.handleTaskSend(r.Context(), w, req)
 	case "tasks/get":
 		h.handleTaskGet(w, req)
@@ -455,7 +455,10 @@ func (h *Handler) requestTimeout() time.Duration {
 func (h *Handler) handleTaskSend(ctx context.Context, w http.ResponseWriter, req JSONRPCRequest) {
 	var params struct {
 		Message struct {
-			Text string `json:"text"`
+			Text  string `json:"text"`
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
 		} `json:"message"`
 		Input string `json:"input"`
 	}
@@ -465,6 +468,15 @@ func (h *Handler) handleTaskSend(ctx context.Context, w http.ResponseWriter, req
 	}
 
 	inputText := strings.TrimSpace(params.Message.Text)
+	if inputText == "" && len(params.Message.Parts) > 0 {
+		var partsTexts []string
+		for _, p := range params.Message.Parts {
+			if strings.TrimSpace(p.Text) != "" {
+				partsTexts = append(partsTexts, strings.TrimSpace(p.Text))
+			}
+		}
+		inputText = strings.Join(partsTexts, "\n")
+	}
 	if inputText == "" {
 		inputText = strings.TrimSpace(params.Input)
 	}

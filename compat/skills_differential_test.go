@@ -771,9 +771,12 @@ func TestSkillsCasesMatchReference(t *testing.T) {
 				BuiltinSkillsDir: c.BuiltinSkillsDir,
 			}
 			full := skNormalizeRuntime(builder.BuildSystemPrompt(c.Channel, nil, c.ProjectWorkspace, c.IncludeMemory))
-			// Rebranding is deliberate, so the shipped SOUL line can never match
-			// the reference's. Discount exactly that line and nothing else.
-			gotPrompt := prompt.NormalizeBranding(full)
+			// TWO deliberate, documented divergences are discounted here, and
+			// nothing else: the rebranded wording (NormalizeBranding) and this
+			// port's execution-efficiency/measurement guidance section
+			// (NormalizePortGuidance, see internal/prompt/port_guidance.go).
+			// Every remaining byte must still match the reference exactly.
+			gotPrompt := prompt.NormalizePortGuidance(prompt.NormalizeBranding(full))
 			wantPrompt := prompt.NormalizeBranding(*c.Prompt)
 			if gotPrompt != wantPrompt {
 				t.Errorf("full system prompt differs (go %d bytes, reference %d bytes)\n%s",
@@ -1250,18 +1253,26 @@ func TestFreshInstallSkillsSection(t *testing.T) {
 	}
 	index := strings.Index(full, "# Skills")
 	section := full[index:]
-	if !strings.Contains(section, summary) {
-		t.Error("the rendered # Skills section does not contain the summary verbatim")
+	// The section is the template with the summary substituted in. The summary
+	// itself is byte-identical to the reference's (asserted above), but the
+	// built-in skills are a verbatim copy of the reference and are rebranded on
+	// the way into the prompt, so the prompt carries the BRANDED form. That is
+	// the same documented branding divergence discounted at the full-prompt
+	// comparison below, applied here to the one section that carries it.
+	if !strings.Contains(section, prompt.RebrandReferenceText(summary)) {
+		t.Error("the rendered # Skills section does not contain the summary verbatim (modulo branding)")
 	}
 
 	// The full prompt against the reference's, with the built-in group's ORDER
 	// normalised (both sides read the same directory here, so this is a no-op in
 	// practice; it is what keeps the comparison from depending on a filesystem
-	// property) and with the two documented divergences discounted: the runtime
-	// line and the shipped branding. Everything else — every section, every
-	// description, availability suffix and relative path — must match exactly,
-	// which is what catches a missing section or altered skill content.
-	gotPrompt := skNormalizeBuiltinSkillOrder(prompt.NormalizeBranding(skNormalizeRuntime(full)))
+	// property) and with the three documented divergences discounted: the runtime
+	// line, the shipped branding, and this port's execution-efficiency/measurement
+	// guidance section (see internal/prompt/port_guidance.go). Everything else —
+	// every section, every description, availability suffix and relative path —
+	// must match exactly, which is what catches a missing section or altered skill
+	// content.
+	gotPrompt := skNormalizeBuiltinSkillOrder(prompt.NormalizePortGuidance(prompt.NormalizeBranding(skNormalizeRuntime(full))))
 	wantPrompt := skNormalizeBuiltinSkillOrder(prompt.NormalizeBranding(*fresh.Prompt))
 	if gotPrompt != wantPrompt {
 		t.Errorf("the fresh-install prompt differs from the reference's (go %d bytes, reference %d bytes)\n%s",

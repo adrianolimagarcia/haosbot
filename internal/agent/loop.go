@@ -394,11 +394,20 @@ func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook
 	}
 	key := msg.SessionKey()
 	isCommand := msg.IsUserInput() && msg.Channel != "system" && strings.HasPrefix(strings.TrimSpace(msg.Content), "/")
+	cmd := ""
+	if isCommand {
+		cmd = firstWord(msg.Content)
+	}
+	// Mutating session commands must share the same exclusivity gate as normal
+	// turns. /stop, /status and /help remain callable while a turn is active,
+	// but /new and /compact cannot race provider/tool/persistence work on the
+	// same transcript.
+	requiresExclusiveTurn := !isCommand || cmd == "/new" || cmd == "/compact"
 	var runCtx context.Context = ctx
 	var cancel context.CancelFunc
 	var generation uint64
 	keepActiveForMemoryACK := false
-	if !isCommand {
+	if requiresExclusiveTurn {
 		runCtx, cancel = context.WithCancel(ctx)
 		var accepted bool
 		generation, accepted = l.tryRegisterActive(key, cancel)
@@ -837,7 +846,8 @@ func (l *Loop) dispatchCommand(ctx context.Context, t Transcript, msg core.Inbou
 
 	switch cmd {
 	case "/new":
-		l.cancelActive(t.Key())
+		// /new is registered as an exclusive turn before dispatch reaches here,
+		// so no provider/tool/persistence path can still be mutating this session.
 		t.Clear()
 		if err := t.Save(); err != nil {
 			return reply(fmt.Sprintf("Error: could not reset session: %v", err))
@@ -912,8 +922,12 @@ func (l *Loop) cancelActive(key string) bool {
 	defer l.mu.Unlock()
 	current, ok := l.active[key]
 	if ok {
+		// Keep the generation registered until the canceled turn actually
+		// unwinds and unregisterActive runs. Deleting it here would let a new
+		// turn enter the same session while the old provider/tool/persistence
+		// path is still returning, reintroducing the exact same-session race
+		// the active-turn gate is meant to prevent.
 		current.cancel()
-		delete(l.active, key)
 	}
 	return ok
 }

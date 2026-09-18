@@ -2,7 +2,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"testing"
+
+	"github.com/adrianolimagarcia/nanobot-go/internal/core"
 )
 
 func TestActiveTurnOldGenerationCannotDeleteReplacement(t *testing.T) {
@@ -67,5 +70,37 @@ func TestTryRegisterActiveRejectsDuplicateWithoutCancellation(t *testing.T) {
 	}
 	if firstCanceled {
 		t.Fatal("duplicate turn canceled the in-flight provider")
+	}
+}
+
+func TestMutatingCommandsRejectWhileTurnActive(t *testing.T) {
+	for _, command := range []string{"/new", "/compact"} {
+		t.Run(command, func(t *testing.T) {
+			store := newFakeStore()
+			l := newTestLoop(t, store, nil)
+			msg := core.InboundMessage{Channel: "cli", ChatID: "same-session", Content: command}
+			key := msg.SessionKey()
+
+			activeCanceled := false
+			gen, ok := l.tryRegisterActive(key, func() { activeCanceled = true })
+			if !ok {
+				t.Fatal("could not seed active turn")
+			}
+			defer l.unregisterActive(key, gen)
+
+			out, err := l.ProcessMessage(context.Background(), msg)
+			if !errors.Is(err, ErrTurnActive) {
+				t.Fatalf("%s error = %v, want ErrTurnActive", command, err)
+			}
+			if out != nil {
+				t.Fatalf("%s returned output while another turn was active: %#v", command, out)
+			}
+			if activeCanceled {
+				t.Fatalf("%s canceled the existing turn instead of waiting for exclusivity", command)
+			}
+			if got := store.get(key); got != nil {
+				t.Fatalf("%s opened or mutated transcript despite active turn: %#v", command, got)
+			}
+		})
 	}
 }

@@ -29,5 +29,4 @@ require (
 	github.com/trengrj/go-potion v0.0.0-20260823122308-c3ca68d3e5df // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.39.0 // indirect
-	golang.org/x/text v0.25.0 // indirect
 )

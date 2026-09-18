@@ -209,9 +209,12 @@ func (s *Store) Open(key string) (*Session, error) {
 		if statErr != nil && !os.IsNotExist(statErr) {
 			return fmt.Errorf("session: stat %s: %w", path, statErr)
 		}
-		if cached, ok := s.cachedSession(key, exists, info); ok {
-			sess = cached
-			return nil
+		_, checkpointErr := os.Stat(s.checkpointPath(key))
+		if checkpointErr != nil && os.IsNotExist(checkpointErr) {
+			if cached, ok := s.cachedSession(key, exists, info); ok {
+				sess = cached
+				return nil
+			}
 		}
 		loaded, err := s.loadLocked(key)
 		if err != nil {

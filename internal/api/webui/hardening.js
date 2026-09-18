@@ -84,7 +84,7 @@
 
     if (assistantBody) {
       const html = await renderMarkdown(text);
-      if (html !== null) assistantBody.innerHTML = html;
+      applyRenderedHTML(assistantBody, html);
     }
   }
 
@@ -102,6 +102,10 @@
       console.warn('Falha ao renderizar a resposta:', err);
       return null;
     }
+  }
+
+  function applyRenderedHTML(element, html) {
+    if (html !== null) element.innerHTML = html;
   }
 
   function appendStreamingMessage(stream) {
@@ -214,7 +218,7 @@
           assistant.body.className = 'text-red-700 text-sm whitespace-pre-wrap';
         } else {
           const html = await renderMarkdown(content || '(sem resposta)');
-          if (html !== null) assistant.body.innerHTML = html;
+          applyRenderedHTML(assistant.body, html);
         }
       }
     } catch (err) {

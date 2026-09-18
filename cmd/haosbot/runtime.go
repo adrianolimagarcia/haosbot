@@ -161,6 +161,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		Model:                 model,
 		MaxTokens:             d.MaxTokens,
 		ContextWindowTokens:   d.ContextWindowTokens,
+		AutoSummarizeTokens:   120_000,
 		Temperature:           float64(d.Temperature),
 		Workspace:             workspace,
 		MaxIterations:         d.MaxToolIterations,

@@ -1,0 +1,453 @@
+package agent
+
+import (
+	"context"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/adrianolimagarcia/nanobot-go/internal/bus"
+	"github.com/adrianolimagarcia/nanobot-go/internal/core"
+	"github.com/adrianolimagarcia/nanobot-go/internal/prompt"
+	"github.com/adrianolimagarcia/nanobot-go/internal/provider"
+	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
+)
+
+type fakeSessionTranscript struct {
+	mu           sync.Mutex
+	key          string
+	messages     []core.Message
+	meta         map[string]any
+	updatedAt    time.Time
+	lastArchived int
+	saves        int
+	checkpoints  []string
+}
+
+func newFakeSessionTranscript(key string) *fakeSessionTranscript {
+	return &fakeSessionTranscript{
+		key:       key,
+		meta:      make(map[string]any),
+		updatedAt: time.Now(),
+	}
+}
+
+func (f *fakeSessionTranscript) Key() string { return f.key }
+
+func (f *fakeSessionTranscript) Messages() []core.Message {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]core.Message, len(f.messages))
+	copy(out, f.messages)
+	return out
+}
+
+func (f *fakeSessionTranscript) AddMessage(m core.Message) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.messages = append(f.messages, m)
+	f.updatedAt = time.Now()
+}
+
+func (f *fakeSessionTranscript) Clear() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.messages = nil
+	f.meta = make(map[string]any)
+}
+
+func (f *fakeSessionTranscript) Save() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.saves++
+	return nil
+}
+
+func (f *fakeSessionTranscript) Metadata() map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.meta
+}
+
+func (f *fakeSessionTranscript) UpdatedAt() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.updatedAt
+}
+
+func (f *fakeSessionTranscript) LastArchived() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastArchived
+}
+
+func (f *fakeSessionTranscript) CommitSummaryCheckpoint(summary string, insertAt *int, lastActive *time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	boundary := len(f.messages)
+	if insertAt != nil {
+		boundary = *insertAt
+	}
+
+	marker := core.Message{
+		Role:    core.RoleUser,
+		Content: core.TextContent("Continue the active task from the working-memory checkpoint above."),
+	}
+	marker.SetExtra("_hidden_history", []byte("true"))
+
+	// Insert marker at boundary
+	if boundary >= len(f.messages) {
+		f.messages = append(f.messages, marker)
+	} else {
+		f.messages = append(f.messages[:boundary+1], f.messages[boundary:]...)
+		f.messages[boundary] = marker
+	}
+
+	activeStr := f.updatedAt.Format(time.RFC3339)
+	if lastActive != nil {
+		activeStr = lastActive.Format(time.RFC3339)
+	}
+	f.meta["_last_summary"] = map[string]any{
+		"text":        summary,
+		"last_active": activeStr,
+	}
+	f.lastArchived = boundary
+	f.checkpoints = append(f.checkpoints, summary)
+}
+
+func (f *fakeSessionTranscript) GetHistory(maxMessages, maxTokens int, extendToUser, includeRuntimeContext bool) []core.Message {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	start := f.lastArchived
+	if start < 0 {
+		start = 0
+	}
+	if start > len(f.messages) {
+		start = len(f.messages)
+	}
+
+	out := make([]core.Message, 0, len(f.messages)-start)
+	for i := start; i < len(f.messages); i++ {
+		m := f.messages[i]
+		if raw, ok := m.Extra("_command"); ok && pyTruthy(raw) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+type fakeSessionStore struct {
+	mu          sync.Mutex
+	transcripts map[string]*fakeSessionTranscript
+}
+
+func newFakeSessionStore() *fakeSessionStore {
+	return &fakeSessionStore{
+		transcripts: make(map[string]*fakeSessionTranscript),
+	}
+}
+
+func (s *fakeSessionStore) Open(key string) (Transcript, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.transcripts[key]
+	if !ok {
+		t = newFakeSessionTranscript(key)
+		s.transcripts[key] = t
+	}
+	return t, nil
+}
+
+type summarizingProvider struct {
+	mu           sync.Mutex
+	requests     []provider.ChatRequest
+	summaryReply string
+	chatReply    string
+}
+
+func (p *summarizingProvider) Chat(ctx context.Context, req provider.ChatRequest) (*core.Response, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.requests = append(p.requests, req)
+
+	// Check if this is a summarization request
+	for _, m := range req.Messages {
+		if strings.Contains(m.Content.Text, "conversational summarizer") {
+			reply := p.summaryReply
+			if reply == "" {
+				reply = "Summary: User worked on optimizing the web interaction."
+			}
+			return &core.Response{
+				Content:      reply,
+				FinishReason: core.FinishStop,
+			}, nil
+		}
+	}
+
+	reply := p.chatReply
+	if reply == "" {
+		reply = "Hello from AI!"
+	}
+	return &core.Response{
+		Content:      reply,
+		FinishReason: core.FinishStop,
+	}, nil
+}
+
+func (p *summarizingProvider) Model() string { return "test-model" }
+func (p *summarizingProvider) Name() string  { return "test-provider" }
+
+func TestWebUIAutoSummarizeTrigger(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeSessionStore()
+	prov := &summarizingProvider{
+		summaryReply: "Summary of past turns: discussed project goals.",
+		chatReply:    "Understood, moving to next step.",
+	}
+
+	b := bus.New(bus.Options{})
+	defer b.Close()
+
+	ws := t.TempDir()
+	promptBuilder := prompt.New(ws)
+
+	// Configure with low threshold (e.g., 500 tokens) for easy triggering in test
+	loop, err := NewLoop(LoopConfig{
+		Bus:                 b,
+		Store:               store,
+		Provider:            prov,
+		Tools:               tools.NewRegistry(),
+		Prompt:              promptBuilder,
+		Model:               "test-model",
+		MaxTokens:           1024,
+		ContextWindowTokens: 128_000,
+		AutoSummarizeTokens: 500, // Trigger at 500 tokens for test
+	})
+	if err != nil {
+		t.Fatalf("NewLoop: %v", err)
+	}
+
+	sessionKey := "webui:test-session"
+	tr, err := store.Open(sessionKey)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	sess := tr.(*fakeSessionTranscript)
+
+	// Seed the session with enough history to exceed 500 tokens
+	largeText := strings.Repeat("This is a detailed conversation turn about software architecture and performance. ", 15)
+	sess.AddMessage(*core.NewMessage(core.RoleUser, "Turn 1: "+largeText))
+	sess.AddMessage(*core.NewMessage(core.RoleAssistant, "Turn 1 Reply: "+largeText))
+	sess.AddMessage(*core.NewMessage(core.RoleUser, "Turn 2: "+largeText))
+	sess.AddMessage(*core.NewMessage(core.RoleAssistant, "Turn 2 Reply: "+largeText))
+
+	// Send message through WebUI
+	msg := core.InboundMessage{
+		Channel:  "webui",
+		SenderID: "test-session",
+		ChatID:   "test-session",
+		Content:  "Turn 3: Let's continue.",
+		Metadata: map[string]any{
+			"source": "webui",
+		},
+	}
+
+	out, err := loop.ProcessMessage(ctx, msg)
+	if err != nil {
+		t.Fatalf("ProcessMessage failed: %v", err)
+	}
+	if out.Content != "Understood, moving to next step." {
+		t.Errorf("got content %q, want %q", out.Content, "Understood, moving to next step.")
+	}
+
+	// Verify that CommitSummaryCheckpoint was called
+	if len(sess.checkpoints) != 1 {
+		t.Fatalf("expected 1 summary checkpoint, got %d", len(sess.checkpoints))
+	}
+	if sess.checkpoints[0] != "Summary of past turns: discussed project goals." {
+		t.Errorf("checkpoint summary = %q", sess.checkpoints[0])
+	}
+
+	// Verify metadata holds _last_summary
+	lastSummary, ok := sess.meta["_last_summary"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing _last_summary in metadata")
+	}
+	if lastSummary["text"] != "Summary of past turns: discussed project goals." {
+		t.Errorf("metadata summary = %v", lastSummary["text"])
+	}
+
+	// Verify that the system prompt in the final model request contained [Archived Context Summary]
+	prov.mu.Lock()
+	reqs := prov.requests
+	prov.mu.Unlock()
+
+	if len(reqs) < 2 {
+		t.Fatalf("expected at least 2 provider requests (1 summary, 1 chat turn), got %d", len(reqs))
+	}
+
+	lastReq := reqs[len(reqs)-1]
+	foundSummaryInSystemPrompt := false
+	for _, m := range lastReq.Messages {
+		if m.Role == core.RoleSystem && strings.Contains(m.Content.Text, "[Archived Context Summary]") {
+			foundSummaryInSystemPrompt = true
+			if !strings.Contains(m.Content.Text, "Summary of past turns: discussed project goals.") {
+				t.Errorf("system prompt did not include the summary text: %s", m.Content.Text)
+			}
+		}
+	}
+	if !foundSummaryInSystemPrompt {
+		t.Errorf("system prompt did not contain [Archived Context Summary]")
+	}
+}
+
+func TestManualCompactCommand(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeSessionStore()
+	prov := &summarizingProvider{
+		summaryReply: "Manual compaction summary.",
+	}
+
+	b := bus.New(bus.Options{})
+	defer b.Close()
+
+	loop, err := NewLoop(LoopConfig{
+		Bus:                 b,
+		Store:               store,
+		Provider:            prov,
+		Tools:               tools.NewRegistry(),
+		Prompt:              prompt.New(t.TempDir()),
+		Model:               "test-model",
+		ContextWindowTokens: 128_000,
+	})
+	if err != nil {
+		t.Fatalf("NewLoop: %v", err)
+	}
+
+	sessionKey := "webui:compact-test"
+	tr, _ := store.Open(sessionKey)
+	sess := tr.(*fakeSessionTranscript)
+	sess.AddMessage(*core.NewMessage(core.RoleUser, "Previous question"))
+	sess.AddMessage(*core.NewMessage(core.RoleAssistant, "Previous answer"))
+
+	out, err := loop.ProcessMessage(ctx, core.InboundMessage{
+		Channel:  "webui",
+		SenderID: "compact-test",
+		ChatID:   "compact-test",
+		Content:  "/compact",
+	})
+	if err != nil {
+		t.Fatalf("ProcessMessage /compact: %v", err)
+	}
+	if !strings.Contains(out.Content, "Context compacted successfully.") {
+		t.Errorf("unexpected reply for /compact: %q", out.Content)
+	}
+	if len(sess.checkpoints) != 1 {
+		t.Fatalf("expected 1 checkpoint, got %d", len(sess.checkpoints))
+	}
+	if sess.checkpoints[0] != "Manual compaction summary." {
+		t.Errorf("got summary %q", sess.checkpoints[0])
+	}
+}
+
+func TestWebUIBelowThresholdNoSummarize(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeSessionStore()
+	prov := &summarizingProvider{
+		chatReply: "Standard reply.",
+	}
+
+	b := bus.New(bus.Options{})
+	defer b.Close()
+
+	loop, err := NewLoop(LoopConfig{
+		Bus:                 b,
+		Store:               store,
+		Provider:            prov,
+		Tools:               tools.NewRegistry(),
+		Prompt:              prompt.New(t.TempDir()),
+		Model:               "test-model",
+		ContextWindowTokens: 128_000,
+		AutoSummarizeTokens: 120_000, // standard 120k threshold
+	})
+	if err != nil {
+		t.Fatalf("NewLoop: %v", err)
+	}
+
+	sessionKey := "webui:small-session"
+	tr, _ := store.Open(sessionKey)
+	sess := tr.(*fakeSessionTranscript)
+	sess.AddMessage(*core.NewMessage(core.RoleUser, "Short message"))
+	sess.AddMessage(*core.NewMessage(core.RoleAssistant, "Short answer"))
+
+	out, err := loop.ProcessMessage(ctx, core.InboundMessage{
+		Channel:  "webui",
+		SenderID: "small-session",
+		ChatID:   "small-session",
+		Content:  "Another short question",
+	})
+	if err != nil {
+		t.Fatalf("ProcessMessage: %v", err)
+	}
+	if out.Content != "Standard reply." {
+		t.Errorf("got %q, want %q", out.Content, "Standard reply.")
+	}
+
+	// Should not have triggered auto-summarize
+	if len(sess.checkpoints) != 0 {
+		t.Errorf("expected 0 checkpoints, got %d", len(sess.checkpoints))
+	}
+}
+
+func TestNonWebChannelNoAutoSummarizeByDefault(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeSessionStore()
+	prov := &summarizingProvider{
+		chatReply: "CLI reply.",
+	}
+
+	b := bus.New(bus.Options{})
+	defer b.Close()
+
+	loop, err := NewLoop(LoopConfig{
+		Bus:                 b,
+		Store:               store,
+		Provider:            prov,
+		Tools:               tools.NewRegistry(),
+		Prompt:              prompt.New(t.TempDir()),
+		Model:               "test-model",
+		ContextWindowTokens: 128_000,
+		// AutoSummarizeTokens unset (0), so it only applies to webui
+	})
+	if err != nil {
+		t.Fatalf("NewLoop: %v", err)
+	}
+
+	sessionKey := "cli:terminal-session"
+	tr, _ := store.Open(sessionKey)
+	sess := tr.(*fakeSessionTranscript)
+
+	largeText := strings.Repeat("Lots of terminal text to make it large. ", 50)
+	sess.AddMessage(*core.NewMessage(core.RoleUser, largeText))
+	sess.AddMessage(*core.NewMessage(core.RoleAssistant, largeText))
+
+	out, err := loop.ProcessMessage(ctx, core.InboundMessage{
+		Channel:  "cli",
+		SenderID: "user",
+		ChatID:   "terminal-session",
+		Content:  "Continue in CLI",
+	})
+	if err != nil {
+		t.Fatalf("ProcessMessage: %v", err)
+	}
+	if out.Content != "CLI reply." {
+		t.Errorf("got %q, want %q", out.Content, "CLI reply.")
+	}
+	if len(sess.checkpoints) != 0 {
+		t.Errorf("expected 0 checkpoints for cli channel by default, got %d", len(sess.checkpoints))
+	}
+}

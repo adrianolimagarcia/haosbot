@@ -250,7 +250,7 @@ func TestAgentDefaultsEveryDefault(t *testing.T) {
 		got   any
 		want  any
 	}{
-		{"workspace", d.Workspace, "~/.nanobot/workspace"},
+		{"workspace", d.Workspace, "~/.haosbot/workspace"},
 		{"model", d.Model, "anthropic/claude-opus-4-5"},
 		{"provider", d.Provider, "auto"},
 		{"max_tokens", d.MaxTokens, 8192},
@@ -262,7 +262,7 @@ func TestAgentDefaultsEveryDefault(t *testing.T) {
 		{"provider_retry_mode", d.ProviderRetryMode, "standard"},
 		{"tool_hint_max_length", d.ToolHintMaxLength, 40},
 		{"timezone_mode", d.TimezoneMode, "auto"},
-		{"bot_name", d.BotName, "nanobot"},
+		{"bot_name", d.BotName, "haosbot"},
 		{"bot_icon", d.BotIcon, "🐈"},
 		{"unified_session", d.UnifiedSession, false},
 		{"session_ttl_minutes", d.SessionTTLMinutes, 15},
@@ -1319,10 +1319,10 @@ func TestWorkspacePathExpandsTilde(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	cfg := DefaultConfig()
-	if cfg.Agents.Defaults.Workspace != "~/.nanobot/workspace" {
+	if cfg.Agents.Defaults.Workspace != "~/.haosbot/workspace" {
 		t.Errorf("field default = %q, want the literal tilde form", cfg.Agents.Defaults.Workspace)
 	}
-	if got, want := cfg.WorkspacePath(), filepath.Join(home, ".nanobot", "workspace"); got != want {
+	if got, want := cfg.WorkspacePath(), filepath.Join(home, ".haosbot", "workspace"); got != want {
 		t.Errorf("WorkspacePath = %q, want %q", got, want)
 	}
 

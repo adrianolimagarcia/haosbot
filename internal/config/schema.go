@@ -77,8 +77,8 @@ func (c *Config) RuntimeDataDir() string {
 // DefaultWorkspace() — the same branding-aware fallback
 // cmd/haosbot/runtime.go:369-371 and cmd/nanobot/runtime.go:399-401 already
 // apply to an empty workspace — while any explicitly configured value, including
-// the field's own literal "~/.nanobot/workspace" default (schema.py:119), is
-// returned unchanged.
+// the field's own literal default (schema.py:119 ships "~/.nanobot/workspace";
+// this port ships the rebranded "~/.haosbot/workspace"), is returned unchanged.
 func (c *Config) WorkspacePath() string {
 	if c.Agents.Defaults.Workspace == "" {
 		return DefaultWorkspace()
@@ -677,7 +677,7 @@ func defaultConfigSkeleton() *Config {
 // defaultAgentDefaultsResolved performs that step for the skeleton.
 func DefaultAgentDefaults() AgentDefaults {
 	return AgentDefaults{
-		Workspace:                    "~/.nanobot/workspace",
+		Workspace:                    "~/.haosbot/workspace",
 		ModelPreset:                  nil,
 		Model:                        "anthropic/claude-opus-4-5",
 		Provider:                     "auto",
@@ -693,7 +693,7 @@ func DefaultAgentDefaults() AgentDefaults {
 		ReasoningEffort:              nil,
 		Timezone:                     "UTC",
 		TimezoneMode:                 "auto",
-		BotName:                      "nanobot",
+		BotName:                      "haosbot",
 		BotIcon:                      "🐈",
 		UnifiedSession:               false,
 		DisabledSkills:               []string{},

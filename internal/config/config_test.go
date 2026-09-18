@@ -254,7 +254,7 @@ func TestAgentDefaultsEveryDefault(t *testing.T) {
 		{"model", d.Model, "anthropic/claude-opus-4-5"},
 		{"provider", d.Provider, "auto"},
 		{"max_tokens", d.MaxTokens, 8192},
-		{"context_window_tokens", d.ContextWindowTokens, 200000},
+		{"context_window_tokens", d.ContextWindowTokens, 128000},
 		{"temperature", float64(d.Temperature), 0.1},
 		{"max_tool_iterations", d.MaxToolIterations, 200},
 		{"max_concurrent_subagents", d.MaxConcurrentSubagent, 4},

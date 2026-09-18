@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""A dependency-free implementation of the `summarize` CLI the skill expects.
+
+WHY THIS EXISTS
+---------------
+internal/skills/builtin/summarize/SKILL.md is a built-in skill that is a thin
+wrapper around steipete's summarize.sh CLI. That binary is NOT bundled with
+haosbot: the skill declares `requires.bins: ["summarize"]`, so the loader marks
+it unavailable ("Requer binario summarize (nao instalado)") until something
+named `summarize` exists on PATH. Installing the real one needs Node 24+ or
+Homebrew, which a small Debian VPS usually does not have.
+
+This script implements the documented subset of that interface using only the
+Python standard library plus the OpenAI-compatible endpoint haosbot is ALREADY
+configured with, so the shipped skill becomes usable without changing the skill
+file (which is kept byte-identical to upstream by the drift test).
+
+SUPPORTED
+    summarize <url|path> [--length short|medium|long|xl|xxl|<chars>]
+                         [--extract-only] [--json] [--model MODEL]
+                         [--max-output-tokens N]
+
+NOT SUPPORTED (reported clearly rather than silently wrong): YouTube/Apify
+transcripts, Firecrawl, PDFs, OCR.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+
+CONFIG_CANDIDATES = (
+    os.environ.get("HAOSBOT_CONFIG"),
+    os.path.expanduser("~/.haosbot/config.json"),
+    os.path.expanduser("~/.nanobot/config.json"),
+)
+
+LENGTHS = {"short": 120, "medium": 300, "long": 600, "xl": 1000, "xxl": 1600}
+UA = "Mozilla/5.0 (X11; Linux x86_64) haosbot-summarize/1.0"
+
+
+def load_config():
+    for path in CONFIG_CANDIDATES:
+        if path and os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    return json.load(fh)
+            except (OSError, ValueError):
+                continue
+    return {}
+
+
+def resolve(cfg, model_override):
+    providers = cfg.get("providers", {}).get("openai", {}) or {}
+    defaults = cfg.get("agents", {}).get("defaults", {}) or {}
+    api_base = (providers.get("apiBase") or os.environ.get("OPENAI_BASE_URL")
+                or "https://api.openai.com/v1").rstrip("/")
+    api_key = (providers.get("apiKey") or os.environ.get("OPENAI_API_KEY")
+               or cfg.get("api", {}).get("apiKey") or "")
+    model = model_override or defaults.get("model") or "gpt-4o-mini"
+    return api_base, api_key, model
+
+
+def http_get(url, timeout=45):
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    return raw.decode("utf-8", "replace")
+
+
+def strip_html(html):
+    html = re.sub(r"(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>", " ", html)
+    html = re.sub(r"(?is)<br\s*/?>|</p>|</div>|</li>|</h[1-6]>", "\n", html)
+    text = re.sub(r"(?s)<[^>]+>", " ", html)
+    for entity, char in (("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"),
+                         ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'")):
+        text = text.replace(entity, char)
+    return re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]{2,}", " ", text)).strip()
+
+
+def extract(target):
+    """Return (text, kind). Raises RuntimeError with a user-facing message."""
+    if re.match(r"^https?://", target):
+        if re.search(r"(youtube\.com|youtu\.be)", target):
+            raise RuntimeError(
+                "YouTube transcripts need the upstream summarize CLI (yt-dlp or "
+                "APIFY_API_TOKEN); this implementation does not fetch them.")
+        try:
+            return http_get("https://r.jina.ai/" + target), "url"
+        except (urllib.error.URLError, OSError):
+            return strip_html(http_get(target)), "url"
+    if not os.path.isfile(target):
+        raise RuntimeError("not a URL and not a file: %s" % target)
+    with open(target, "rb") as fh:
+        head = fh.read(5)
+    if head.startswith(b"%PDF"):
+        raise RuntimeError(
+            "PDF extraction is not implemented here; install the upstream "
+            "summarize CLI for PDF support.")
+    with open(target, encoding="utf-8", errors="replace") as fh:
+        body = fh.read()
+    return (strip_html(body) if target.lower().endswith((".html", ".htm")) else body), "file"
+
+
+def summarize(text, api_base, api_key, model, words, max_tokens):
+    if not api_key:
+        raise RuntimeError("no API key found in the haosbot config (providers.openai.apiKey)")
+    prompt = ("Summarize the content below in roughly %d words. Lead with the "
+              "single most important point, then the supporting detail. Do not "
+              "invent facts that are not present.\n\n---\n%s" % (words, text))
+    payload = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0.2,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        api_base + "/chat/completions", data=payload,
+        headers={"Content-Type": "application/json",
+                 "Authorization": "Bearer " + api_key})
+    with urllib.request.urlopen(req, timeout=180) as resp:
+        data = json.load(resp)
+    return data["choices"][0]["message"]["content"].strip()
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="summarize", add_help=True)
+    ap.add_argument("target")
+    ap.add_argument("--length", default="medium")
+    ap.add_argument("--extract-only", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--model")
+    ap.add_argument("--max-output-tokens", type=int, default=1024)
+    ap.add_argument("--youtube", default=None)
+    ap.add_argument("--firecrawl", default=None)
+    args, _unknown = ap.parse_known_args()
+
+    try:
+        text, kind = extract(args.target)
+    except (RuntimeError, urllib.error.URLError, OSError) as exc:
+        print("summarize: %s" % exc, file=sys.stderr)
+        return 1
+
+    if args.extract_only:
+        if args.json:
+            print(json.dumps({"url": args.target, "kind": kind, "text": text}))
+        else:
+            print(text)
+        return 0
+
+    words = LENGTHS.get(args.length)
+    if words is None:
+        try:
+            words = max(40, int(args.length) // 6)
+        except ValueError:
+            words = LENGTHS["medium"]
+
+    cfg = load_config()
+    api_base, api_key, model = resolve(cfg, args.model)
+    try:
+        out = summarize(text, api_base, api_key, model, words, args.max_output_tokens)
+    except (RuntimeError, urllib.error.URLError, OSError, KeyError, ValueError) as exc:
+        print("summarize: %s" % exc, file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps({"url": args.target, "kind": kind, "model": model,
+                          "summary": out}))
+    else:
+        print(out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

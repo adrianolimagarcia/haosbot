@@ -682,7 +682,7 @@ func DefaultAgentDefaults() AgentDefaults {
 		Model:                        "anthropic/claude-opus-4-5",
 		Provider:                     "auto",
 		MaxTokens:                    8192,
-		ContextWindowTokens:          200_000,
+		ContextWindowTokens:          128_000,
 		Temperature:                  0.1,
 		FallbackModels:               []FallbackCandidate{},
 		MaxToolIterations:            200,

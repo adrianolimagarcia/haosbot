@@ -156,6 +156,29 @@
   };
 
   let sendInFlight = false;
+  let turnAbort = null;
+
+  // The Stop button aborts the in-flight request. The server derives the turn
+  // context from the request context (internal/api/agent_turn_stream.go), so
+  // aborting the request cancels the turn itself and not merely this browser's
+  // view of it.
+  function setTurnRunning(running) {
+    const stopButton = document.getElementById('stop-button');
+    const sendButton = document.getElementById('send-button');
+    if (stopButton) {
+      stopButton.classList.toggle('hidden', !running);
+      stopButton.classList.toggle('flex', running);
+    }
+    if (sendButton) {
+      sendButton.classList.toggle('hidden', running);
+      sendButton.classList.toggle('flex', !running);
+      sendButton.disabled = running;
+    }
+  }
+
+  window.stopTurn = function stopTurn() {
+    if (turnAbort) turnAbort.abort();
+  };
 
   window.handleSend = async function handleSend() {
     if (sendInFlight) return;
@@ -164,9 +187,9 @@
     if (!text) return;
 
     sendInFlight = true;
+    turnAbort = new AbortController();
+    setTurnRunning(true);
     input.disabled = true;
-    const sendButton = document.getElementById('send-button');
-    if (sendButton) sendButton.disabled = true;
     input.value = '';
     const stream = document.getElementById('chat-stream');
     await appendTextMessage(stream, text, 'user');
@@ -186,6 +209,7 @@
         method: 'POST',
         headers,
         body: JSON.stringify({ sessionId: sessionID, message: text }),
+        signal: turnAbort ? turnAbort.signal : undefined,
       });
       if (!res.ok) {
         loader.remove();
@@ -223,11 +247,17 @@
       }
     } catch (err) {
       if (loader.isConnected) loader.remove();
-      await appendTextMessage(stream, `Erro de conexão: ${err.message}`, 'error');
+      if (err && err.name === 'AbortError') {
+        await appendTextMessage(stream, 'Turno interrompido pelo usuário.', 'error');
+      } else {
+        await appendTextMessage(stream, `Erro de conexão: ${err.message}`, 'error');
+      }
     } finally {
       sendInFlight = false;
+      turnAbort = null;
+      setTurnRunning(false);
       input.disabled = false;
-      if (sendButton) sendButton.disabled = false;
+      input.focus();
     }
 
     const container = document.getElementById('messages-container');

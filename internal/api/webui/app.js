@@ -52,7 +52,7 @@
   }
 
   async function restartAgent() {
-    if (!window.confirm('Deseja realmente reiniciar o serviço nanobot agora?')) return;
+    if (!window.confirm('Deseja realmente reiniciar o serviço haosbot agora?')) return;
     const status = byId('dlg-status');
     status.textContent = 'Reiniciando...';
     status.className = 'text-xs text-amber-600 font-medium';
@@ -79,6 +79,7 @@
     'restart-agent': () => restartAgent(),
     'save-settings': () => call('saveDialogSettings'),
     send: () => call('handleSend'),
+    stop: () => call('stopTurn'),
   };
 
   function closestAction(event, selector) {

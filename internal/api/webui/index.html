@@ -176,7 +176,7 @@
       <div class="prose max-w-none">
         <h3 class="text-xl font-bold text-gray-900">1. Haosbot Gateway Conectado</h3>
         <p class="text-gray-700">
-          Ambiente em execução nativa com suporte completo a comandos slash (<code class="text-xs">/status</code>, <code class="text-xs">/skills</code>, <code class="text-xs">/model</code>, <code class="text-xs">/new</code>), CPython Minimal com SQLite integrado e persistência em <code class="text-xs">~/.haosbot/</code> (ou <code class="text-xs">~/.nanobot/</code> em instalações legadas).
+          Ambiente em execução nativa com suporte completo a comandos slash (<code class="text-xs">/status</code>, <code class="text-xs">/skills</code>, <code class="text-xs">/model</code>, <code class="text-xs">/new</code>), CPython Minimal com SQLite integrado e persistência em <code class="text-xs">~/.haosbot/</code>.
         </p>
       </div>
 
@@ -227,6 +227,9 @@
               <button class="p-1.5 text-gray-400 hover:text-gray-600 rounded"><svg class="icon" aria-hidden="true"><use href="#i-microphone"></use></svg></button>
               <button data-action="send" id="send-button" class="w-7 h-7 rounded-full bg-gray-400 hover:bg-gray-800 text-white flex items-center justify-center transition shadow-sm">
                 <svg class="icon text-xs" aria-hidden="true"><use href="#i-arrow-up"></use></svg>
+              </button>
+              <button data-action="stop" id="stop-button" title="Interromper geração" class="w-7 h-7 rounded-full bg-red-600 hover:bg-red-700 text-white hidden items-center justify-center transition shadow-sm">
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect width="10" height="10" rx="1.5" fill="currentColor"/></svg>
               </button>
             </div>
           </div>
@@ -283,7 +286,7 @@
 
       <div class="flex justify-between items-center pt-3 border-t border-gray-100">
         <div class="flex items-center space-x-2">
-          <button data-action="restart-agent" id="btn-restart" class="px-3 py-1.5 rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 text-xs font-medium flex items-center space-x-1 transition" title="Reinicia o processo nanobot">
+          <button data-action="restart-agent" id="btn-restart" class="px-3 py-1.5 rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 text-xs font-medium flex items-center space-x-1 transition" title="Reinicia o processo haosbot">
             <svg class="icon text-[10px]" aria-hidden="true"><use href="#i-power-off"></use></svg>
             <span>Reiniciar Agente</span>
           </button>

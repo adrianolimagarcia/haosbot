@@ -41,6 +41,19 @@ func TestActiveTurnOldGenerationCannotDeleteReplacement(t *testing.T) {
 	default:
 		t.Fatal("cancelActive did not cancel replacement")
 	}
+
+	// Cancellation is only a signal. The generation must remain registered
+	// until the canceled turn's deferred unregister runs, otherwise a new turn
+	// can overlap the old turn while it is still unwinding.
+	if _, ok := l.tryRegisterActive("session", func() {}); ok {
+		t.Fatal("new turn was accepted before canceled generation unwound")
+	}
+	l.unregisterActive("session", genB)
+	genC, ok := l.tryRegisterActive("session", func() {})
+	if !ok {
+		t.Fatal("new turn was rejected after canceled generation unregistered")
+	}
+	l.unregisterActive("session", genC)
 }
 
 func TestTryRegisterActiveRejectsDuplicateWithoutCancellation(t *testing.T) {

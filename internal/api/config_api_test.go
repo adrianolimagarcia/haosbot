@@ -99,3 +99,44 @@ func TestSaveConfigPatchPreservesUnrelatedFieldsAndBlankSecrets(t *testing.T) {
 		t.Fatalf("unrelated tools.exec.timeout=%d want 321", got.Tools.Exec.Timeout)
 	}
 }
+
+func TestRedactedConfigRemovesDynamicHeaderSecrets(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Providers.OpenAI.ExtraHeaders = map[string]string{
+		"X-API-Key":           "header-secret",
+		"X-Auth-Token":        "token-secret",
+		"Proxy-Authorization": "proxy-secret",
+		"X-Request-ID":        "safe-value",
+	}
+
+	view, err := redactedConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers := view["providers"].(map[string]any)
+	openai := providers["openai"].(map[string]any)
+	headers := openai["extraHeaders"].(map[string]any)
+
+	for _, key := range []string{"X-API-Key", "X-Auth-Token", "Proxy-Authorization"} {
+		if got := headers[key]; got != "" {
+			t.Errorf("%s leaked: %#v", key, got)
+		}
+		if got := headers[key+"Configured"]; got != true {
+			t.Errorf("%sConfigured=%#v want true", key, got)
+		}
+	}
+	if got := headers["X-Request-ID"]; got != "safe-value" {
+		t.Errorf("non-secret header was redacted: %#v", got)
+	}
+
+	// Numeric token-budget fields are plural and must remain visible; they are
+	// configuration, not credentials.
+	agents := view["agents"].(map[string]any)
+	defaults := agents["defaults"].(map[string]any)
+	if _, ok := defaults["maxTokensConfigured"]; ok {
+		t.Fatal("maxTokens was incorrectly classified as a secret")
+	}
+	if _, ok := defaults["contextWindowTokensConfigured"]; ok {
+		t.Fatal("contextWindowTokens was incorrectly classified as a secret")
+	}
+}

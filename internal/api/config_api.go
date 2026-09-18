@@ -73,11 +73,22 @@ func redactSlice(items []any) {
 func isSecretKey(key string) bool {
 	k := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", ""), "_", ""))
 	switch k {
-	case "apikey", "token", "secret", "password", "authorization", "auth":
+	case "apikey", "token", "secret", "password", "authorization", "auth",
+		"privatekey", "passphrase", "credential", "credentials":
 		return true
-	default:
-		return false
 	}
+
+	// Channel/provider/MCP configuration permits arbitrary header names. Common
+	// credential headers therefore arrive as keys such as X-API-Key,
+	// X-Auth-Token or Proxy-Authorization rather than the canonical schema names.
+	// Match credential suffixes after normalization, while deliberately not
+	// matching plural counters such as maxTokens/contextWindowTokens.
+	return strings.HasSuffix(k, "apikey") ||
+		strings.HasSuffix(k, "token") ||
+		strings.HasSuffix(k, "secret") ||
+		strings.HasSuffix(k, "password") ||
+		strings.HasSuffix(k, "passphrase") ||
+		strings.HasSuffix(k, "authorization")
 }
 
 func secretConfigured(v any) bool {

@@ -326,7 +326,7 @@ func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook
 	turnStarted := time.Now()
 	if l.cfg.Metrics != nil {
 		l.cfg.Metrics.IncTurns()
-		defer l.cfg.Metrics.ObserveTurn(time.Since(turnStarted))
+		defer func() { l.cfg.Metrics.ObserveTurn(time.Since(turnStarted)) }()
 	}
 	key := msg.SessionKey()
 	isCommand := msg.IsUserInput() && msg.Channel != "system" && strings.HasPrefix(strings.TrimSpace(msg.Content), "/")

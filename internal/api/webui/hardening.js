@@ -2,6 +2,7 @@
   'use strict';
 
   const TOKEN_KEY = 'haosbot_token';
+  const PENDING_TOKEN_KEY = 'haosbot_pending_token';
   const SESSION_KEY = 'haosbot_session_id';
 
   function randomSessionID() {
@@ -31,6 +32,21 @@
     const value = (token || '').trim();
     if (value) sessionStorage.setItem(TOKEN_KEY, value);
     else sessionStorage.removeItem(TOKEN_KEY);
+  };
+  window.getPendingToken = function getPendingToken() {
+    return sessionStorage.getItem(PENDING_TOKEN_KEY) || '';
+  };
+  window.setPendingToken = function setPendingToken(token) {
+    const value = (token || '').trim();
+    if (value) sessionStorage.setItem(PENDING_TOKEN_KEY, value);
+    else sessionStorage.removeItem(PENDING_TOKEN_KEY);
+  };
+  window.promotePendingToken = function promotePendingToken() {
+    const pending = window.getPendingToken();
+    if (!pending) return false;
+    window.setToken(pending);
+    sessionStorage.removeItem(PENDING_TOKEN_KEY);
+    return true;
   };
 
   function authHeaders(extra = {}) {
@@ -325,7 +341,7 @@
         ? 'Chave configurada — deixe vazio para manter'
         : 'API key';
       document.getElementById('dlg-llm-model').value = cfg.agents?.defaults?.model || 'deepseek-chat';
-      document.getElementById('dlg-gateway-key').value = window.getToken();
+      document.getElementById('dlg-gateway-key').value = window.getPendingToken() || window.getToken();
       document.getElementById('dlg-gateway-key').placeholder = cfg.api?.apiKeyConfigured
         ? 'Token configurado — informe o token atual para autenticar'
         : 'Bearer token';
@@ -335,6 +351,7 @@
   };
 
   window.saveDialogSettings = async function saveDialogSettings() {
+    const currentGatewayToken = window.getToken();
     const llmBase = document.getElementById('dlg-llm-base').value.trim();
     const llmKey = document.getElementById('dlg-llm-key').value.trim();
     const llmModel = document.getElementById('dlg-llm-model').value.trim() || 'deepseek-chat';
@@ -359,9 +376,17 @@
         status.textContent = `Erro ao salvar: ${await res.text()}`;
         return;
       }
-      window.setToken(gatewayKey || window.getToken());
       document.getElementById('model-selector-badge').textContent = llmModel;
       const data = await res.json();
+      if (data.restartRequired) {
+        // The running process still authenticates with currentGatewayToken.
+        // Keep using it until /api/restart acknowledges the request; otherwise
+        // rotating the key here would make the restart endpoint return 401.
+        window.setPendingToken(gatewayKey && gatewayKey !== currentGatewayToken ? gatewayKey : '');
+      } else {
+        window.setToken(gatewayKey || currentGatewayToken);
+        window.setPendingToken('');
+      }
       status.textContent = data.restartRequired ? 'Salvo. Reinicie para aplicar.' : 'Salvo.';
     } catch (err) {
       status.textContent = `Erro de rede: ${err.message}`;

@@ -19,36 +19,13 @@ import (
 )
 
 const (
-	maxWebUIMemoryBytes = 512 << 10
+	maxWebUIMemoryBytes    = 512 << 10
 	maxWebUISearchSessions = 100
-	maxWebUISearchResults = 50
-	maxWebUISkillBytes = 256 << 10
+	maxWebUISearchResults  = 50
+	maxWebUISkillBytes     = 256 << 10
 )
 
-var webUISkillNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}package api
-
-import (
-	"encoding/json"
-	"errors"
-	"io"
-	"net/http"
-	"os"
-	"path/filepath"
-	"regexp"
-	"sort"
-	"strings"
-	"time"
-	"unicode/utf8"
-
-	"github.com/adrianolimagarcia/nanobot-go/internal/config"
-	"github.com/adrianolimagarcia/nanobot-go/internal/core"
-	"github.com/adrianolimagarcia/nanobot-go/internal/skills"
-)
-
-const (
-	maxWebUIMemoryBytes = 512 << 10
-	maxWebUISearchSessions = 100
-	)
+var webUISkillNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
 type webUISessionPrefs struct {
 	Title    string `json:"title,omitempty"`

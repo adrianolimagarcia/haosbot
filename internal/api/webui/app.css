@@ -595,3 +595,5 @@ html[data-theme="dark"] .control-input { background: #202023; color: #e4e4e7; bo
 
 .haos-temp-button{margin-left:auto;border:1px solid var(--border-color);border-radius:999px;background:var(--bg-elevated);color:var(--text-muted);font-size:10px;padding:4px 8px;cursor:pointer}
 .haos-temp-button:hover{background:var(--bg-hover);color:var(--text-main)}
+
+.market-modal{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.35);display:grid;place-items:center;padding:18px}.market-modal.hidden{display:none}.market-card{width:min(880px,96vw);max-height:86vh;overflow:auto;background:var(--bg-main);border:1px solid var(--border-color);border-radius:18px;padding:16px}.market-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.market-results{display:flex;flex-direction:column;gap:8px}.market-skill-row{display:flex;justify-content:space-between;gap:16px;align-items:center;border:1px solid var(--border-color);border-radius:12px;padding:11px}.control-input{min-height:34px;border:1px solid var(--border-color);border-radius:9px;background:var(--bg-elevated);color:var(--text-main);padding:6px 9px}

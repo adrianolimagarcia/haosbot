@@ -178,6 +178,10 @@ func NormalizeBranding(content string) string {
 			content = strings.ReplaceAll(content, rewrite.reference, brandingPlaceholder)
 		}
 	}
+	// Dynamic runtime prompt lines use the all-caps HAOSBOT spelling even
+	// though bundled templates use Haosbot/haosbot. It is the same deliberate
+	// product rebrand and must be discounted by differential tests.
+	content = strings.ReplaceAll(content, "HAOSBOT", brandingPlaceholder)
 	return content
 }
 

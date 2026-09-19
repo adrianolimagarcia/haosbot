@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -21,7 +22,33 @@ const (
 	maxWebUIMemoryBytes = 512 << 10
 	maxWebUISearchSessions = 100
 	maxWebUISearchResults = 50
+	maxWebUISkillBytes = 256 << 10
 )
+
+var webUISkillNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}package api
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/adrianolimagarcia/nanobot-go/internal/config"
+	"github.com/adrianolimagarcia/nanobot-go/internal/core"
+	"github.com/adrianolimagarcia/nanobot-go/internal/skills"
+)
+
+const (
+	maxWebUIMemoryBytes = 512 << 10
+	maxWebUISearchSessions = 100
+	)
 
 type webUISessionPrefs struct {
 	Title    string `json:"title,omitempty"`
@@ -275,18 +302,56 @@ func (s *Server) handleWebUIMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWebUISkill(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet { http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
 	name := strings.TrimSpace(r.URL.Query().Get("name"))
-	if name == "" { http.Error(w, "name is required", http.StatusBadRequest); return }
-	loader := skills.New(webUIWorkspace(s.cfg))
-	content, found, err := loader.LoadSkillStrict(name)
-	if err != nil { http.Error(w, err.Error(), http.StatusInternalServerError); return }
-	if !found { http.NotFound(w, r); return }
-	writeWebUIJSON(w, map[string]any{
-		"name": name, "content": content,
-		"description": loader.GetSkillDescription(name),
-		"requirements": loader.GetSkillRequirements(name),
-	})
+	if name == "" || !webUISkillNamePattern.MatchString(name) {
+		http.Error(w, "valid skill name is required", http.StatusBadRequest)
+		return
+	}
+	workspace := webUIWorkspace(s.cfg)
+	loader := skills.New(workspace)
+	workspaceDir := filepath.Join(workspace, "skills", name)
+	workspaceFile := filepath.Join(workspaceDir, "SKILL.md")
+
+	switch r.Method {
+	case http.MethodGet:
+		content, found, err := loader.LoadSkillStrict(name)
+		if err != nil { http.Error(w, err.Error(), http.StatusInternalServerError); return }
+		if !found { http.NotFound(w, r); return }
+		source := ""
+		path := ""
+		for _, item := range loader.ListSkills(false) {
+			if item.Name == name { source, path = item.Source, item.Path; break }
+		}
+		writeWebUIJSON(w, map[string]any{
+			"name": name, "content": content, "source": source, "path": path,
+			"description": loader.GetSkillDescription(name),
+			"requirements": loader.GetSkillRequirements(name),
+		})
+	case http.MethodPut:
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxWebUISkillBytes+1))
+		if err != nil { http.Error(w, err.Error(), http.StatusBadRequest); return }
+		if len(body) > maxWebUISkillBytes { http.Error(w, "skill document too large", http.StatusRequestEntityTooLarge); return }
+		var req struct { Content string `json:"content"` }
+		if err := json.Unmarshal(body, &req); err != nil { http.Error(w, "invalid JSON", http.StatusBadRequest); return }
+		if strings.TrimSpace(req.Content) == "" { http.Error(w, "skill content is required", http.StatusBadRequest); return }
+		if err := os.MkdirAll(workspaceDir, 0o700); err != nil { http.Error(w, err.Error(), http.StatusInternalServerError); return }
+		if err := writeWebUIAtomic(workspaceFile, []byte(req.Content), 0o600); err != nil { http.Error(w, err.Error(), http.StatusInternalServerError); return }
+		writeWebUIJSON(w, map[string]any{"ok": true, "name": name, "source": skills.SourceWorkspace})
+	case http.MethodDelete:
+		source := ""
+		for _, item := range loader.ListSkills(false) {
+			if item.Name == name { source = item.Source; break }
+		}
+		if source != skills.SourceWorkspace {
+			http.Error(w, "only workspace skills can be deleted", http.StatusConflict)
+			return
+		}
+		if err := os.RemoveAll(workspaceDir); err != nil { http.Error(w, err.Error(), http.StatusInternalServerError); return }
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		w.Header().Set("Allow", "GET, PUT, DELETE")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleWebUIFilePreview(w http.ResponseWriter, r *http.Request) {

@@ -48,6 +48,36 @@
     localStorage.setItem('haosbot-theme', resolved);
   }
 
+  function configEditor(title, key, value) {
+    const wrap = el('div', 'control-editor-block');
+    wrap.appendChild(el('div', 'control-section-title', title));
+    const area = el('textarea', 'memory-editor');
+    area.spellcheck = false;
+    area.value = JSON.stringify(value || {}, null, 2);
+    const toolbar = el('div', 'control-toolbar');
+    const save = el('button', 'control-button primary', 'Salvar');
+    save.type = 'button';
+    const status = el('span', 'control-muted', '');
+    save.addEventListener('click', async () => {
+      try {
+        const parsed = JSON.parse(area.value || '{}');
+        status.textContent = 'Salvando…';
+        const payload = await api('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [key]: parsed })
+        });
+        status.textContent = payload?.restartRequired ? 'Salvo · reinício necessário' : 'Salvo';
+        await refreshState();
+      } catch (err) {
+        status.textContent = err.message;
+      }
+    });
+    toolbar.append(save, status);
+    wrap.append(area, toolbar);
+    return wrap;
+  }
+
   function relativeTime(value) {
     const ts = Date.parse(value || '');
     if (!Number.isFinite(ts)) return '';
@@ -232,10 +262,17 @@
         status.textContent = err.message;
       }
     });
+    root.appendChild(configEditor('Tools / MCP / CLI Apps', 'tools', toolsCfg));
   }
 
   function renderSkills(root) {
     setPanelTitle('Skills', 'Capabilities');
+    const toolbar = el('div', 'control-toolbar');
+    const create = el('button', 'control-button primary', 'Nova skill');
+    create.type = 'button';
+    create.addEventListener('click', () => editSkill('', '---\nname: new-skill\ndescription: Describe this skill.\n---\n\n# New Skill\n'));
+    toolbar.appendChild(create);
+    root.appendChild(toolbar);
     const list = el('div', 'control-list');
     for (const skill of state.skills || []) {
       const row = el('div', 'control-list-row');
@@ -270,10 +307,61 @@
       back.type = 'button';
       back.addEventListener('click', () => renderView('skills'));
       toolbar.append(back, el('span', 'control-badge', data.description || name));
+      if (data.source === 'workspace') {
+        const edit = el('button', 'control-button', 'Editar');
+        edit.type = 'button';
+        edit.addEventListener('click', () => editSkill(data.name, data.content || ''));
+        const remove = el('button', 'control-button danger', 'Excluir');
+        remove.type = 'button';
+        remove.addEventListener('click', async () => {
+          if (!window.confirm('Excluir a skill ' + data.name + '?')) return;
+          await api('/api/webui/skill?name=' + encodeURIComponent(data.name), { method: 'DELETE' });
+          await refreshState();
+          renderView('skills');
+        });
+        toolbar.append(edit, remove);
+      }
       root.append(toolbar, el('pre', 'control-pre', data.content || ''));
     } catch (err) {
       root.replaceChildren(el('div', 'session-loading', err.message));
     }
+  }
+
+  function editSkill(existingName, content) {
+    const root = byId('workspace-panel-content');
+    if (!root) return;
+    setPanelTitle(existingName || 'Nova skill', 'Skill editor');
+    root.replaceChildren();
+    const nameInput = el('input', 'control-input');
+    nameInput.type = 'text';
+    nameInput.placeholder = 'skill-name';
+    nameInput.value = existingName || '';
+    nameInput.disabled = Boolean(existingName);
+    const area = el('textarea', 'memory-editor');
+    area.spellcheck = false;
+    area.value = content || '';
+    const toolbar = el('div', 'control-toolbar');
+    const save = el('button', 'control-button primary', 'Salvar skill');
+    save.type = 'button';
+    const cancel = el('button', 'control-button', 'Cancelar');
+    cancel.type = 'button';
+    const status = el('span', 'control-muted', '');
+    cancel.addEventListener('click', () => renderView('skills'));
+    save.addEventListener('click', async () => {
+      const name = nameInput.value.trim();
+      if (!name) { status.textContent = 'Nome obrigatório'; return; }
+      try {
+        status.textContent = 'Salvando…';
+        await api('/api/webui/skill?name=' + encodeURIComponent(name), {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: area.value })
+        });
+        await refreshState();
+        showSkill(name);
+      } catch (err) { status.textContent = err.message; }
+    });
+    toolbar.append(save, cancel, status);
+    root.append(nameInput, area, toolbar);
   }
 
   function renderAutomations(root) {
@@ -291,12 +379,9 @@
   function renderChannels(root) {
     setPanelTitle('Canais', 'Integrations');
     const channels = state.config?.channels || {};
-    const pre = el('pre', 'control-pre');
-    pre.textContent = JSON.stringify(channels, null, 2);
     root.append(
-      card('Configuração de canais', 'Visão redigida da configuração ativa. Segredos nunca são retornados à UI.'),
-      el('div', 'control-section-title', 'Configuração'),
-      pre
+      card('Configuração de canais', 'Edite a configuração redigida. Campos secretos em branco preservam os valores existentes.', 'Reinício para aplicar'),
+      configEditor('channels', 'channels', channels)
     );
   }
 
@@ -362,7 +447,10 @@
       providerList.appendChild(row);
     }
     if (!providerList.childNodes.length) providerList.appendChild(el('div', 'session-loading', 'Nenhum provider configurado.'));
-    root.append(providerList, el('div', 'control-section-title', 'Long-term Memory · MEMORY.md'));
+    root.appendChild(providerList);
+    root.appendChild(configEditor('Providers avançados', 'providers', providers));
+    root.appendChild(configEditor('Agent defaults', 'agents', state.config?.agents || {}));
+    root.appendChild(el('div', 'control-section-title', 'Long-term Memory · MEMORY.md'));
     const actions = el('div', 'control-toolbar');
     const load = el('button', 'control-button', 'Recarregar');
     const save = el('button', 'control-button primary', 'Salvar memória');

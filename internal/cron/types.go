@@ -1,6 +1,6 @@
 package cron
 
-import "time"
+import "context"
 
 const (
 	KindAt    = "at"
@@ -79,15 +79,7 @@ type Update struct {
 	DeleteAfterRun *bool
 }
 
-type Executor func(ctx Context, job Job, runID string) (RunResult, error)
-
-// Context is the minimal context contract required by the scheduler.
-type Context interface {
-	Done() <-chan struct{}
-	Err() error
-	Deadline() (time.Time, bool)
-	Value(key any) any
-}
+type Executor func(ctx context.Context, job Job, runID string) (RunResult, error)
 
 func cloneJob(in Job) Job {
 	out := in

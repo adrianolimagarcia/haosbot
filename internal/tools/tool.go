@@ -122,6 +122,20 @@ func IsExclusive(t Tool) bool {
 	return false
 }
 
+type sessionKeyContextKey struct{}
+
+// WithSessionKey attaches the current agent session to tool execution without
+// exposing it as a model-controlled argument.
+func WithSessionKey(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, sessionKeyContextKey{}, key)
+}
+
+// SessionKeyFromContext returns the active session supplied by the runner.
+func SessionKeyFromContext(ctx context.Context) string {
+	key, _ := ctx.Value(sessionKeyContextKey{}).(string)
+	return key
+}
+
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------

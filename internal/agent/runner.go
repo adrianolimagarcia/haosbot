@@ -957,7 +957,7 @@ func (r *Runner) runOne(
 	hook Hook,
 ) core.ToolResult {
 	hook.OnToolStart(ctx, call)
-	res := spec.Tools.Execute(ctx, call)
+	res := spec.Tools.Execute(tools.WithSessionKey(ctx, spec.SessionKey), call)
 	// NOTE: no truncation here. The reference bounds tool results only inside
 	// normalize_tool_result (context_governance.py:709), which offloads to the
 	// workspace when one exists. Truncating here as well would destroy the

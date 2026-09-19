@@ -64,6 +64,18 @@ func NewService(storePath string, executor Executor) *Service {
 	}
 }
 
+// SetExecutor installs the callback used for agent-turn jobs. Call it before
+// Start; replacing an executor while jobs are running is intentionally rejected.
+func (s *Service) SetExecutor(executor Executor) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.active) != 0 {
+		return errors.New("cron: cannot replace executor while jobs are active")
+	}
+	s.executor = executor
+	return nil
+}
+
 func (s *Service) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -35,7 +35,7 @@
 
   function toggleSidebar() {
     const aside = document.querySelector('aside');
-    if (aside) aside.classList.toggle('hidden');
+    if (aside) aside.classList.toggle('is-collapsed');
   }
 
   function focusSearch() {

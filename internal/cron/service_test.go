@@ -181,3 +181,82 @@ func TestRunErrorIsRecorded(t *testing.T) {
 	}
 	t.Fatal("timed out waiting for failed run")
 }
+
+
+func TestMutationRollbackWhenStoreWriteFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cron", "jobs.json")
+	s := NewService(path, nil)
+	if err := s.Load(); err != nil { t.Fatal(err) }
+	ms := int64(60_000)
+	job, err := s.AddJob(Job{
+		Name: "original", Schedule: Schedule{Kind: KindEvery, EveryMS: &ms},
+		Payload: Payload{Kind: PayloadAgentTurn, Message: "x", SessionKey: "webui:a", OriginChannel: "webui", OriginChatID: "a"},
+	})
+	if err != nil { t.Fatal(err) }
+
+	// Force every subsequent atomic rename to fail deterministically: a temp
+	// file cannot replace an existing directory.
+	badTarget := t.TempDir()
+	s.storePath = badTarget
+
+	renamed := "mutated"
+	if _, err := s.UpdateJob(job.ID, Update{Name: &renamed}); err == nil {
+		t.Fatal("UpdateJob unexpectedly succeeded with directory store target")
+	}
+	got, ok := s.GetJob(job.ID)
+	if !ok || got.Name != "original" {
+		t.Fatalf("failed update mutated in-memory state: %#v", got)
+	}
+
+	if err := s.RemoveJob(job.ID); err == nil {
+		t.Fatal("RemoveJob unexpectedly succeeded with directory store target")
+	}
+	got, ok = s.GetJob(job.ID)
+	if !ok || got.Name != "original" {
+		t.Fatalf("failed remove lost in-memory job: %#v", got)
+	}
+}
+
+func TestDirtyExecutionBlocksAnotherRunUntilPersisted(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "cron", "jobs.json")
+	var calls atomic.Int32
+	s := NewService(path, func(ctx context.Context, job Job, runID string) (RunResult, error) {
+		calls.Add(1)
+		return RunResult{RunID: runID, Response: "side effect"}, nil
+	})
+	if err := s.Load(); err != nil { t.Fatal(err) }
+	ms := int64(60_000)
+	job, err := s.AddJob(Job{
+		Name: "once-at-a-time", Schedule: Schedule{Kind: KindEvery, EveryMS: &ms},
+		Payload: Payload{Kind: PayloadAgentTurn, Message: "x", SessionKey: "webui:a", OriginChannel: "webui", OriginChatID: "a"},
+	})
+	if err != nil { t.Fatal(err) }
+
+	// Execution succeeds externally, then persistence of its advanced schedule
+	// fails. The service must keep that dirty state authoritative and reject a
+	// second side effect until the state reaches disk.
+	s.storePath = t.TempDir()
+	if err := s.RunNow(job.ID, true); err != nil { t.Fatal(err) }
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		dirty := s.dirty
+		active := s.active[job.ID]
+		s.mu.Unlock()
+		if dirty && !active { break }
+		time.Sleep(10 * time.Millisecond)
+	}
+	s.mu.Lock()
+	dirty := s.dirty
+	s.mu.Unlock()
+	if !dirty { t.Fatal("expected dirty scheduler state after failed post-run save") }
+
+	if err := s.RunNow(job.ID, true); err == nil {
+		t.Fatal("second RunNow unexpectedly proceeded while dirty state was unpersisted")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("executor calls=%d want 1", got)
+	}
+}

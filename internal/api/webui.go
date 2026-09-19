@@ -23,6 +23,9 @@ var appJS []byte
 //go:embed webui/control.js
 var controlJS []byte
 
+//go:embed webui/enhancements.js
+var enhancementsJS []byte
+
 //go:embed webui/app.css
 var appCSS []byte
 
@@ -87,6 +90,7 @@ func (s *Server) registerWebUI(mux *http.ServeMux) {
 	serveAsset("/webui-hardening.js", "application/javascript; charset=utf-8", hardeningJS)
 	serveAsset("/webui/app.js", "application/javascript; charset=utf-8", appJS)
 	serveAsset("/webui/control.js", "application/javascript; charset=utf-8", controlJS)
+	serveAsset("/webui/enhancements.js", "application/javascript; charset=utf-8", enhancementsJS)
 	serveAsset("/webui/app.css", "text/css; charset=utf-8", appCSS)
 	serveAsset("/webui/tailwind.css", "text/css; charset=utf-8", tailwindCSS)
 	serveAsset("/brand/haosbot_mark.png", "image/png", haosbotMarkPNG)
@@ -107,7 +111,7 @@ func (s *Server) registerWebUI(mux *http.ServeMux) {
 
 		// Keep the legacy UI source intact for now, but load the security layer
 		// after it so vulnerable global functions are replaced before user input.
-		page := bytes.Replace(indexHTML, []byte("</body>"), []byte("<script src=\"/webui-hardening.js\"></script>\n</body>"), 1)
+		page := bytes.Replace(indexHTML, []byte("</body>"), []byte("<script src=\"/webui-hardening.js\"></script>\n<script src=\"/webui/enhancements.js\"></script>\n</body>"), 1)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(page)
 	})

@@ -21,6 +21,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
 	cronruntime "github.com/adrianolimagarcia/nanobot-go/internal/cron"
+	"github.com/adrianolimagarcia/nanobot-go/internal/memory"
 	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
 	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
 	"github.com/adrianolimagarcia/nanobot-go/internal/prompt"
@@ -113,9 +114,6 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	if err := scheduler.Load(); err != nil {
 		return nil, fmt.Errorf("load automation scheduler: %w", err)
 	}
-	if err := configureSystemAutomations(cfg, workspace, scheduler); err != nil {
-		return nil, fmt.Errorf("configure system automations: %w", err)
-	}
 	triggerSvc := triggersruntime.NewService(filepath.Join(workspace, "triggers"), nil)
 	registry.Register(cronruntime.NewTool(scheduler, d.Timezone))
 
@@ -182,6 +180,13 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		Store:                 transcriptStore{store},
 		Provider:              prov,
 		Tools:                 registry,
+		ToolsForMessage: func(msg core.InboundMessage) (*tools.Registry, error) {
+			event, _ := msg.Metadata["_system_event"].(string)
+			if event != "dream" { return nil, nil }
+			memoryStore, err := memory.NewMemoryStore(workspace, memory.DefaultMaxHistory)
+			if err != nil { return nil, err }
+			return memoryStore.BuildDreamTools()
+		},
 		Prompt:                prompt.New(workspace),
 		Model:                 model,
 		MaxTokens:             d.MaxTokens,
@@ -517,6 +522,9 @@ func cmdGateway(args []string) error {
 	// ChannelManager only in the gateway runtime (cli/gateway_runtime.py:715)
 	// and starts it as one of the gateway's tasks (:941). `haosbot run` and
 	// `haosbot chat` drive the agent loop directly and never touch a channel.
+	if err := configureSystemAutomations(cfg, webUIWorkspaceForRuntime(cfg), rt.scheduler); err != nil {
+		return fmt.Errorf("configure system automations: %w", err)
+	}
 	if err := rt.scheduler.Start(); err != nil {
 		return fmt.Errorf("start automation scheduler: %w", err)
 	}

@@ -578,3 +578,17 @@ html[data-theme="dark"] .control-input { background: #202023; color: #e4e4e7; bo
   font-size: 12px;
   white-space: nowrap;
 }
+
+/* Multimodal composer, activity and diff surfaces */
+.haos-attachment-row{display:flex;align-items:center;gap:8px;padding:0 0 6px}
+.haos-attach-button{width:28px;height:28px;border:1px solid var(--border-color);border-radius:9px;background:var(--bg-elevated);color:var(--text-muted);cursor:pointer;font-size:20px;line-height:1}
+.haos-attachment-chips,.haos-sent-attachments{display:flex;gap:6px;flex-wrap:wrap}
+.haos-attachment-chip,.haos-sent-attachments span{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border:1px solid var(--border-color);border-radius:999px;font-size:10px;background:var(--bg-elevated);color:var(--text-muted)}
+.haos-attachment-chip button{border:0;background:transparent;color:inherit;cursor:pointer;padding:0}
+.haos-sent-attachments{margin-top:7px}
+.haos-activity{margin-top:8px;border-left:2px solid var(--border-color);padding-left:10px;color:var(--text-muted);font-size:11px}
+.haos-activity summary{cursor:pointer;user-select:none}
+.haos-activity-list{display:flex;flex-direction:column;gap:5px;margin-top:7px}
+.haos-activity-item{padding:5px 7px;border-radius:7px;background:var(--bg-sidebar)}
+.haos-activity-item.ok{color:#15803d}.haos-activity-item.error{color:#b91c1c}.haos-activity-item.running{font-style:italic}
+.haos-diff{max-height:260px;overflow:auto;white-space:pre-wrap;border:1px solid var(--border-color);border-radius:8px;padding:8px;background:var(--bg-sidebar);font:10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}

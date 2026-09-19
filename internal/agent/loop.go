@@ -296,6 +296,10 @@ type LoopConfig struct {
 	Store    TranscriptStore
 	Provider provider.Provider
 	Tools    *tools.Registry
+	// ToolsForMessage can narrow or replace the registry for special turns
+	// such as Dream. Returning nil keeps the default registry; errors fail
+	// closed before the provider is called.
+	ToolsForMessage func(core.InboundMessage) (*tools.Registry, error)
 	Prompt   *prompt.Builder
 	Runner   *Runner
 
@@ -618,7 +622,11 @@ func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook
 	modelMessages := make([]core.Message, 0, len(history)+2)
 	modelMessages = append(modelMessages, *core.NewMessage(core.RoleSystem, systemPrompt))
 	modelMessages = append(modelMessages, history...)
-	modelMessages = append(modelMessages, *core.NewMessage(core.RoleUser, msg.Content))
+	modelUser, mediaErr := userMessageForModel(msg)
+	if mediaErr != nil {
+		return nil, fmt.Errorf("agent: prepare attachments: %w", mediaErr)
+	}
+	modelMessages = append(modelMessages, modelUser)
 
 	isWeb := isWebInteraction(msg, key)
 	// Automatic summarization is scheduled after the response. No summary
@@ -639,9 +647,19 @@ func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook
 	if l.cfg.Metrics != nil {
 		l.cfg.Metrics.ObservePreProvider(time.Since(turnStarted))
 	}
+	turnTools := l.cfg.Tools
+	if l.cfg.ToolsForMessage != nil {
+		selected, selectErr := l.cfg.ToolsForMessage(msg)
+		if selectErr != nil {
+			return nil, fmt.Errorf("agent: select turn tools: %w", selectErr)
+		}
+		if selected != nil {
+			turnTools = selected
+		}
+	}
 	res, err := l.cfg.Runner.Run(runCtx, RunSpec{
 		Messages:            modelMessages,
-		Tools:               l.cfg.Tools,
+		Tools:               turnTools,
 		Provider:            l.cfg.Provider,
 		Model:               l.cfg.Model,
 		MaxIterations:       l.cfg.MaxIterations,

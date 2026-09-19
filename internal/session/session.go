@@ -172,9 +172,9 @@ func (s *Session) AppendMessagesDurable(messages []core.Message) error {
 		s.updatedStr = formatNaive(now)
 		s.mu.Unlock()
 
-		// The canonical file stat no longer fully describes this session while
-		// a journal exists, so do not serve it from the Store cache.
-		s.store.forgetSession(s.key)
+		// Refresh the composite base+journal cache fingerprint. Subsequent turns
+		// stay entirely in memory unless another process changes either file.
+		s.store.rememberCurrent(s)
 		return nil
 	})
 }

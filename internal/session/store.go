@@ -58,11 +58,14 @@ type Store struct {
 }
 
 type cachedSession struct {
-	sess    *Session
-	exists  bool
-	size    int64
-	modTime time.Time
-	used    uint64
+	sess          *Session
+	exists        bool
+	size          int64
+	modTime       time.Time
+	journalExists bool
+	journalSize   int64
+	journalModTime time.Time
+	used          uint64
 }
 
 // NewStore returns a store for workspace, persisting under sessionsRoot.
@@ -219,16 +222,16 @@ func (s *Store) Open(key string) (*Session, error) {
 			return fmt.Errorf("session: stat %s: %w", path, statErr)
 		}
 		_, checkpointErr := os.Stat(s.checkpointPath(key))
-		_, journalErr := os.Stat(s.journalPath(key))
+		journalInfo, journalErr := os.Stat(s.journalPath(key))
 		journalExists := journalErr == nil
 		if journalErr != nil && !os.IsNotExist(journalErr) {
 			return fmt.Errorf("session: stat journal: %w", journalErr)
 		}
-		// A cached session is safe only when there is no un-compacted journal.
-		// A journal may have been written by a previous process instance, so
-		// always replay it from disk before serving the session.
-		if checkpointErr != nil && os.IsNotExist(checkpointErr) && !journalExists {
-			if cached, ok := s.cachedSession(key, exists, info); ok {
+		// Cache validation includes BOTH the canonical file and journal. That
+		// keeps a warm session O(1) while still detecting another process that
+		// appended to the journal.
+		if checkpointErr != nil && os.IsNotExist(checkpointErr) {
+			if cached, ok := s.cachedSession(key, exists, info, journalExists, journalInfo); ok {
 				sess = cached
 				return nil
 			}
@@ -238,11 +241,7 @@ func (s *Store) Open(key string) (*Session, error) {
 			return err
 		}
 		sess = loaded
-		if journalExists {
-			s.forgetSession(key)
-		} else {
-			s.rememberSession(key, loaded, exists, info)
-		}
+		s.rememberSession(key, loaded, exists, info, journalExists, journalInfo)
 		return nil
 	})
 	if err != nil {
@@ -372,14 +371,18 @@ func (s *Store) Delete(key string) error {
 	})
 }
 
-func (s *Store) cachedSession(key string, exists bool, info os.FileInfo) (*Session, bool) {
+func (s *Store) cachedSession(key string, exists bool, info os.FileInfo, journalExists bool, journalInfo os.FileInfo) (*Session, bool) {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
 	cached, ok := s.cache[key]
-	if !ok || cached.exists != exists {
+	if !ok || cached.exists != exists || cached.journalExists != journalExists {
 		return nil, false
 	}
 	if exists && (info == nil || cached.size != info.Size() || !cached.modTime.Equal(info.ModTime())) {
+		delete(s.cache, key)
+		return nil, false
+	}
+	if journalExists && (journalInfo == nil || cached.journalSize != journalInfo.Size() || !cached.journalModTime.Equal(journalInfo.ModTime())) {
 		delete(s.cache, key)
 		return nil, false
 	}
@@ -389,17 +392,20 @@ func (s *Store) cachedSession(key string, exists bool, info os.FileInfo) (*Sessi
 	return cached.sess, true
 }
 
-func (s *Store) rememberSession(key string, sess *Session, exists bool, info os.FileInfo) {
+func (s *Store) rememberSession(key string, sess *Session, exists bool, info os.FileInfo, journalExists bool, journalInfo os.FileInfo) {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
-	if exists && (info == nil || info.Size() > sessionCacheMaxBytes) {
-		delete(s.cache, key)
-		return
-	}
+	// The in-memory session is the hot copy. Bound cache entries by count; do
+	// not evict a live long conversation merely because its canonical JSONL is
+	// larger than the old 256 KiB threshold, otherwise every turn has to parse
+	// the entire transcript again.
 	s.cacheSeq++
-	entry := cachedSession{sess: sess, exists: exists, used: s.cacheSeq}
+	entry := cachedSession{sess: sess, exists: exists, journalExists: journalExists, used: s.cacheSeq}
 	if info != nil {
 		entry.size, entry.modTime = info.Size(), info.ModTime()
+	}
+	if journalInfo != nil {
+		entry.journalSize, entry.journalModTime = journalInfo.Size(), journalInfo.ModTime()
 	}
 	if len(s.cache) >= sessionCacheMaxEntries {
 		oldestKey := ""
@@ -409,19 +415,32 @@ func (s *Store) rememberSession(key string, sess *Session, exists bool, info os.
 				oldestKey, oldest = candidate, cached.used
 			}
 		}
-		if oldestKey != "" && oldestKey != key { delete(s.cache, oldestKey) }
+		if oldestKey != "" && oldestKey != key {
+			delete(s.cache, oldestKey)
+		}
 	}
 	s.cache[key] = entry
 }
 
-func (s *Store) rememberSaved(sess *Session) {
+func (s *Store) rememberCurrent(sess *Session) {
 	path := s.Path(sess.Key())
 	info, err := os.Stat(path)
-	if err != nil {
+	exists := err == nil
+	if err != nil && !os.IsNotExist(err) {
 		s.forgetSession(sess.Key())
 		return
 	}
-	s.rememberSession(sess.Key(), sess, true, info)
+	journalInfo, journalErr := os.Stat(s.journalPath(sess.Key()))
+	journalExists := journalErr == nil
+	if journalErr != nil && !os.IsNotExist(journalErr) {
+		s.forgetSession(sess.Key())
+		return
+	}
+	s.rememberSession(sess.Key(), sess, exists, info, journalExists, journalInfo)
+}
+
+func (s *Store) rememberSaved(sess *Session) {
+	s.rememberCurrent(sess)
 }
 
 func (s *Store) forgetSession(key string) {

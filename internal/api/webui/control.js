@@ -185,6 +185,45 @@
       grid.appendChild(card(meta[0], meta[1], value ? 'Ativo' : 'Desativado'));
     }
     root.appendChild(grid);
+
+    const toolsCfg = state.config?.tools || {};
+    root.appendChild(el('div', 'control-section-title', 'CLI Apps / MCP'));
+    const integrations = el('div', 'control-grid');
+    const cli = toolsCfg.cliApps || {};
+    const mcp = toolsCfg.mcpServers || {};
+    integrations.append(
+      card('CLI Apps', 'Execução de apps/CLIs configurados no runtime.', cli.enable === false ? 'Desativado' : 'Ativo'),
+      card('MCP Servers', Object.keys(mcp).length ? Object.keys(mcp).join(', ') : 'Nenhum servidor MCP configurado.', String(Object.keys(mcp).length))
+    );
+    root.appendChild(integrations);
+
+    root.appendChild(el('div', 'control-section-title', 'Preview seguro do workspace'));
+    const toolbar = el('div', 'control-toolbar');
+    const input = el('input', 'control-input');
+    input.type = 'text';
+    input.placeholder = 'caminho/relativo/arquivo.md';
+    const open = el('button', 'control-button primary', 'Abrir');
+    const status = el('span', 'control-muted', '');
+    const preview = el('pre', 'control-pre');
+    toolbar.append(input, open, status);
+    root.append(toolbar, preview);
+    open.addEventListener('click', async () => {
+      status.textContent = 'Carregando…';
+      preview.textContent = '';
+      try {
+        const item = await api('/api/webui/file-preview?path=' + encodeURIComponent(input.value.trim()));
+        if (item.directory) {
+          preview.textContent = (item.entries || []).map(e => (e.dir ? '[dir] ' : '      ') + e.name).join('\n');
+        } else if (item.binary) {
+          preview.textContent = '[arquivo binário — preview textual indisponível]';
+        } else {
+          preview.textContent = item.content || '';
+        }
+        status.textContent = item.truncated ? 'Preview truncado' : humanBytes(item.bytes || 0);
+      } catch (err) {
+        status.textContent = err.message;
+      }
+    });
   }
 
   function renderSkills(root) {
@@ -289,7 +328,21 @@
       card('Memória canônica', state.memory?.path || 'memory/MEMORY.md', humanBytes(state.memory?.bytes || 0)),
       card('GraphRAG', 'Índice derivado, reconstruível e assíncrono.', 'Background')
     );
-    root.append(grid, el('div', 'control-section-title', 'Long-term Memory · MEMORY.md'));
+    root.append(grid);
+    root.appendChild(el('div', 'control-section-title', 'Providers configurados'));
+    const providers = state.config?.providers || {};
+    const providerList = el('div', 'control-list');
+    for (const [name, cfg] of Object.entries(providers)) {
+      if (!cfg || typeof cfg !== 'object') continue;
+      const row = el('div', 'control-list-row');
+      row.append(
+        el('div', '', name),
+        el('div', 'control-muted', cfg.baseUrl || cfg.base_url || cfg.apiType || cfg.api_type || '')
+      );
+      providerList.appendChild(row);
+    }
+    if (!providerList.childNodes.length) providerList.appendChild(el('div', 'session-loading', 'Nenhum provider configurado.'));
+    root.append(providerList, el('div', 'control-section-title', 'Long-term Memory · MEMORY.md'));
     const actions = el('div', 'control-toolbar');
     const load = el('button', 'control-button', 'Recarregar');
     const save = el('button', 'control-button primary', 'Salvar memória');

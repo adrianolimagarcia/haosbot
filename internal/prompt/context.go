@@ -181,7 +181,7 @@ func (b *Builder) identity(channel, root string) string {
 	sb.WriteString("\n\n## Workspace\n")
 
 	if agentWorkspacePath != workspacePath {
-		fmt.Fprintf(&sb, "Nanobot's agent workspace is at: %s\n", agentWorkspacePath)
+		fmt.Fprintf(&sb, "HAOSBOT's agent workspace is at: %s\n", agentWorkspacePath)
 		fmt.Fprintf(&sb, "- Agent profile: %s/SOUL.md and %s/USER.md\n", agentWorkspacePath, agentWorkspacePath)
 		fmt.Fprintf(&sb, "- Long-term memory: %s/memory/MEMORY.md\n", agentWorkspacePath)
 		fmt.Fprintf(&sb, "- History log: %s/memory/history.jsonl (append-only JSONL; prefer built-in `grep` for search).\n", agentWorkspacePath)

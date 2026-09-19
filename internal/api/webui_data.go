@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
@@ -50,6 +51,7 @@ func (s *Server) registerWebUIData(mux *http.ServeMux) {
 	mux.HandleFunc("/api/webui/search", s.handleWebUISearch)
 	mux.HandleFunc("/api/webui/memory", s.handleWebUIMemory)
 	mux.HandleFunc("/api/webui/skill", s.handleWebUISkill)
+	mux.HandleFunc("/api/webui/file-preview", s.handleWebUIFilePreview)
 }
 
 func (s *Server) handleWebUIState(w http.ResponseWriter, r *http.Request) {
@@ -284,6 +286,70 @@ func (s *Server) handleWebUISkill(w http.ResponseWriter, r *http.Request) {
 		"name": name, "content": content,
 		"description": loader.GetSkillDescription(name),
 		"requirements": loader.GetSkillRequirements(name),
+	})
+}
+
+func (s *Server) handleWebUIFilePreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rel := strings.TrimSpace(r.URL.Query().Get("path"))
+	if rel == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	workspace, err := filepath.Abs(webUIWorkspace(s.cfg))
+	if err != nil {
+		http.Error(w, "workspace unavailable", http.StatusInternalServerError)
+		return
+	}
+	target, err := filepath.Abs(filepath.Join(workspace, filepath.Clean(rel)))
+	if err != nil {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	prefix := workspace + string(os.PathSeparator)
+	if target != workspace && !strings.HasPrefix(target, prefix) {
+		http.Error(w, "path escapes workspace", http.StatusForbidden)
+		return
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		if os.IsNotExist(err) { http.NotFound(w, r); return }
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if info.IsDir() {
+		entries, err := os.ReadDir(target)
+		if err != nil { http.Error(w, err.Error(), http.StatusInternalServerError); return }
+		rows := make([]map[string]any, 0, len(entries))
+		for _, entry := range entries {
+			rows = append(rows, map[string]any{"name": entry.Name(), "dir": entry.IsDir()})
+			if len(rows) >= 500 { break }
+		}
+		writeWebUIJSON(w, map[string]any{"path": rel, "directory": true, "entries": rows})
+		return
+	}
+	const maxPreview = 256 << 10
+	f, err := os.Open(target)
+	if err != nil { http.Error(w, err.Error(), http.StatusInternalServerError); return }
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, maxPreview+1))
+	if err != nil { http.Error(w, err.Error(), http.StatusInternalServerError); return }
+	truncated := len(raw) > maxPreview
+	if truncated { raw = raw[:maxPreview] }
+	if !utf8.Valid(raw) {
+		writeWebUIJSON(w, map[string]any{
+			"path": rel, "directory": false, "binary": true,
+			"bytes": info.Size(), "truncated": truncated,
+		})
+		return
+	}
+	writeWebUIJSON(w, map[string]any{
+		"path": rel, "directory": false, "binary": false,
+		"bytes": info.Size(), "truncated": truncated, "content": string(raw),
 	})
 }
 

@@ -44,6 +44,8 @@ func (s *Server) registerAgentTurn(mux *http.ServeMux) {
 
 		ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
 		defer cancel()
+		metadata := map[string]any{"source": "webui", "session_id": sessionID}
+		if strings.HasPrefix(sessionID, "tmp_") { metadata["_temporary_chat"] = true }
 		out, err := loop.ProcessMessage(ctx, core.InboundMessage{
 			Channel:   "webui",
 			SenderID:  sessionID,
@@ -51,10 +53,7 @@ func (s *Server) registerAgentTurn(mux *http.ServeMux) {
 			Content:   message,
 			Media:     media,
 			Timestamp: time.Now(),
-			Metadata: map[string]any{
-				"source":     "webui",
-				"session_id": sessionID,
-			},
+			Metadata: metadata,
 		})
 		if err != nil {
 			status := http.StatusInternalServerError

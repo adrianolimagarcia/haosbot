@@ -514,6 +514,7 @@ func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook
 		defer func() { l.cfg.Metrics.ObserveTurn(time.Since(turnStarted)) }()
 	}
 	key := msg.SessionKey()
+	temporarySession := strings.HasPrefix(key, "webui:tmp_")
 	isCommand := msg.IsUserInput() && msg.Channel != "system" && strings.HasPrefix(strings.TrimSpace(msg.Content), "/")
 	cmd := ""
 	if isCommand {
@@ -707,7 +708,7 @@ func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook
 		// may return immediately; Memory Fabric/GraphRAG acknowledgement is
 		// background work and can never hold the active-turn gate.
 		pendingAttached := false
-		if l.cfg.GraphMemoryEnqueueWithIDError != nil && len(newMessages) > 0 {
+		if !temporarySession && l.cfg.GraphMemoryEnqueueWithIDError != nil && len(newMessages) > 0 {
 			last := len(newMessages) - 1
 			newMessages[last].SetExtra(graphMemoryPendingExtra, mustRawAny(graphMemoryPending{
 				TurnID: turnID, SessionKey: key, Content: graphContent,
@@ -718,7 +719,9 @@ func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook
 			return nil, fmt.Errorf("agent: persist turn: %w", err)
 		}
 
-		if pendingAttached && l.cfg.GraphMemoryEnqueueWithIDError != nil {
+		if temporarySession {
+			// Temporary Chat is intentionally excluded from durable derived memory.
+		} else if pendingAttached && l.cfg.GraphMemoryEnqueueWithIDError != nil {
 			l.enqueuePendingGraphMemoryAsync(transcript, turnID, key, graphContent)
 		} else if l.cfg.GraphMemoryEnqueueWithIDError != nil {
 			go func() {
@@ -751,7 +754,7 @@ func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook
 		}
 	}
 
-	if sessTranscript != nil {
+	if sessTranscript != nil && !temporarySession {
 		l.scheduleBackgroundSummary(key, sessTranscript, isWeb)
 	}
 

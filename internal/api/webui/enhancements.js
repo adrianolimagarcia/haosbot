@@ -12,6 +12,24 @@
   function composerBox() {
     return document.getElementById('user-input')?.closest('.border.border-gray-200.rounded-xl') || document.getElementById('user-input')?.parentElement;
   }
+  function randomTempID() {
+    if (crypto?.randomUUID) return 'tmp_' + crypto.randomUUID().replaceAll('-', '');
+    const b=new Uint8Array(16);crypto.getRandomValues(b);return 'tmp_'+Array.from(b,x=>x.toString(16).padStart(2,'0')).join('');
+  }
+  async function discardCurrentTemporary() {
+    const id=sessionID(); if(!id.startsWith('tmp_')) return;
+    try { await fetch('/api/webui/temporary?session_id='+encodeURIComponent(id),{method:'DELETE',headers:headers()}); } catch (_) {}
+  }
+  async function newTemporaryChat() {
+    await discardCurrentTemporary();
+    const res=await fetch('/api/webui/temporary',{method:'POST',headers:headers()});
+    if(!res.ok) throw new Error(await res.text());
+    const data=await res.json();sessionStorage.setItem(SESSION_KEY,data.session_id);
+    pending=[];renderChips();
+    document.getElementById('chat-stream')?.replaceChildren();
+    const title=document.getElementById('header-chat-title');if(title)title.textContent='Temporary Chat';
+    const welcome=document.querySelector('.haosbot-welcome');if(welcome)welcome.classList.remove('hidden');
+  }
   function ensureAttachmentUI() {
     const box = composerBox();
     if (!box || document.getElementById('haos-attachment-input')) return;
@@ -21,7 +39,8 @@
     const chips = document.createElement('div'); chips.id='haos-attachment-chips'; chips.className='haos-attachment-chips';
     button.addEventListener('click',()=>input.click());
     input.addEventListener('change',()=>uploadFiles([...input.files]));
-    row.append(button,input,chips);
+    const temp=document.createElement('button');temp.type='button';temp.className='haos-temp-button';temp.textContent='Temp';temp.title='Temporary Chat: não persiste sessão nem memória derivada';temp.addEventListener('click',()=>newTemporaryChat().catch(err=>window.alert(err.message)));
+    row.append(button,input,chips,temp);
     box.prepend(row);
   }
   function renderChips() {
@@ -73,6 +92,9 @@
     if(buffer.trim())onEvent(JSON.parse(buffer));
   }
 
+  const originalNewSession=window.newSession;
+  window.newSession=async function(){await discardCurrentTemporary();return originalNewSession?.();};
+  window.newTemporaryChat=newTemporaryChat;
   window.stopTurn=()=>{if(aborter)aborter.abort();};
   window.handleSend=async function(){
     if(aborter)return;

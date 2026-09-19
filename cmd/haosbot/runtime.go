@@ -50,6 +50,9 @@ type agentRuntime struct {
 type transcriptStore struct{ s *session.Store }
 
 func (t transcriptStore) Open(key string) (agent.Transcript, error) {
+	if session.IsTransientKey(key) {
+		return session.DefaultTransientStore().Open(key)
+	}
 	sess, err := t.s.Open(key)
 	if err != nil {
 		return nil, err

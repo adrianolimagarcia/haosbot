@@ -110,7 +110,7 @@ func (s *Server) handleWebUIAutomation(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		writeWebUIJSON(w, job)
+		writeWebUIJSON(w, automationJobPayload(job))
 	case http.MethodPatch:
 		var req struct {
 			Name           *string               `json:"name"`
@@ -139,7 +139,7 @@ func (s *Server) handleWebUIAutomation(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeWebUIJSON(w, job)
+		writeWebUIJSON(w, automationJobPayload(job))
 	case http.MethodDelete:
 		err := scheduler.RemoveJob(id)
 		if errors.Is(err, cronruntime.ErrNotFound) {

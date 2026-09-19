@@ -33,6 +33,8 @@ type Registry struct {
 	projectionLatencySamples atomic.Uint64
 	graphSearchNanos atomic.Uint64
 	graphSearchSamples atomic.Uint64
+	preProviderNanos atomic.Uint64
+	preProviderSamples atomic.Uint64
 	providerTTFTNanos atomic.Uint64
 	providerTTFTSamples atomic.Uint64
 	providerTotalNanos atomic.Uint64
@@ -43,6 +45,10 @@ type Registry struct {
 	persistenceSamples atomic.Uint64
 	turnNanos atomic.Uint64
 	turnSamples atomic.Uint64
+	backgroundSummaryNanos atomic.Uint64
+	backgroundSummarySamples atomic.Uint64
+	backgroundSummarySuccess atomic.Uint64
+	backgroundSummaryFailures atomic.Uint64
 	memoryPending atomic.Int64
 	memoryPendingBytes atomic.Int64
 	memoryRunning atomic.Int64
@@ -75,11 +81,15 @@ type Snapshot struct {
 	ProjectionFailures uint64 `json:"projection_failures"`
 	ProjectionLatencyAvgMs float64 `json:"projection_latency_avg_ms"`
 	GraphSearchAvgMs float64 `json:"graph_search_avg_ms"`
+	PreProviderAvgMs float64 `json:"pre_provider_avg_ms"`
 	ProviderTTFTAvgMs float64 `json:"provider_ttft_avg_ms"`
 	ProviderTotalAvgMs float64 `json:"provider_total_avg_ms"`
 	ToolsAvgMs float64 `json:"tools_avg_ms"`
 	PersistenceAvgMs float64 `json:"persistence_avg_ms"`
 	TurnTotalAvgMs float64 `json:"turn_total_avg_ms"`
+	BackgroundSummaryAvgMs float64 `json:"background_summary_avg_ms"`
+	BackgroundSummarySuccess uint64 `json:"background_summary_success"`
+	BackgroundSummaryFailures uint64 `json:"background_summary_failures"`
 	MemoryPending int64 `json:"memory_pending"`
 	MemoryPendingBytes int64 `json:"memory_pending_bytes"`
 	MemoryRunning int64 `json:"memory_running"`
@@ -106,11 +116,16 @@ func (r *Registry) IncProjectionSuccess(d time.Duration) { r.projectionSuccess.A
 func (r *Registry) IncProjectionRetry() { r.projectionRetries.Add(1); r.projectionFailures.Add(1) }
 func (r *Registry) IncProjectionDead() { r.projectionDead.Add(1); r.projectionFailures.Add(1) }
 func (r *Registry) ObserveGraphSearch(d time.Duration) { observeDuration(&r.graphSearchNanos, &r.graphSearchSamples, d) }
+func (r *Registry) ObservePreProvider(d time.Duration) { observeDuration(&r.preProviderNanos, &r.preProviderSamples, d) }
 func (r *Registry) ObserveProviderTTFT(d time.Duration) { observeDuration(&r.providerTTFTNanos, &r.providerTTFTSamples, d) }
 func (r *Registry) ObserveProviderTotal(d time.Duration) { observeDuration(&r.providerTotalNanos, &r.providerTotalSamples, d) }
 func (r *Registry) ObserveTools(d time.Duration) { observeDuration(&r.toolsNanos, &r.toolsSamples, d) }
 func (r *Registry) ObservePersistence(d time.Duration) { observeDuration(&r.persistenceNanos, &r.persistenceSamples, d) }
 func (r *Registry) ObserveTurn(d time.Duration) { observeDuration(&r.turnNanos, &r.turnSamples, d) }
+func (r *Registry) ObserveBackgroundSummary(d time.Duration, success bool) {
+	observeDuration(&r.backgroundSummaryNanos, &r.backgroundSummarySamples, d)
+	if success { r.backgroundSummarySuccess.Add(1) } else { r.backgroundSummaryFailures.Add(1) }
+}
 
 func observeDuration(total, samples *atomic.Uint64, d time.Duration) {
 	if d < 0 { return }
@@ -147,11 +162,14 @@ func (r *Registry) Snapshot() Snapshot {
 		Claims: r.claims.Load(), ProjectionSuccess: r.projectionSuccess.Load(), ProjectionRetries: r.projectionRetries.Load(),
 		ProjectionDead: r.projectionDead.Load(), ProjectionFailures: r.projectionFailures.Load(), ProjectionLatencyAvgMs: avg,
 		GraphSearchAvgMs: averageMilliseconds(&r.graphSearchNanos, &r.graphSearchSamples),
+		PreProviderAvgMs: averageMilliseconds(&r.preProviderNanos, &r.preProviderSamples),
 		ProviderTTFTAvgMs: averageMilliseconds(&r.providerTTFTNanos, &r.providerTTFTSamples),
 		ProviderTotalAvgMs: averageMilliseconds(&r.providerTotalNanos, &r.providerTotalSamples),
 		ToolsAvgMs: averageMilliseconds(&r.toolsNanos, &r.toolsSamples),
 		PersistenceAvgMs: averageMilliseconds(&r.persistenceNanos, &r.persistenceSamples),
 		TurnTotalAvgMs: averageMilliseconds(&r.turnNanos, &r.turnSamples),
+		BackgroundSummaryAvgMs: averageMilliseconds(&r.backgroundSummaryNanos, &r.backgroundSummarySamples),
+		BackgroundSummarySuccess: r.backgroundSummarySuccess.Load(), BackgroundSummaryFailures: r.backgroundSummaryFailures.Load(),
 		MemoryPending: r.memoryPending.Load(), MemoryPendingBytes: r.memoryPendingBytes.Load(), MemoryRunning: r.memoryRunning.Load(), MemorySucceeded: r.memorySucceeded.Load(),
 		MemoryDead: r.memoryDead.Load(), MemoryOldestAgeSecs: r.memoryOldestAgeSecs.Load(),
 	}

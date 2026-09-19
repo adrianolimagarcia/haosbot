@@ -201,7 +201,7 @@ func nextProjectionBackoff(current time.Duration) time.Duration {
 }
 
 func (m *projectionManager) processGraph(ctx context.Context, job memoryfabric.Job) error {
-	store, release, err := m.graphPool.Acquire(ctx, job.SessionKey)
+	store, release, err := m.graphPool.Acquire(ctx, workspaceGraphStoreKey)
 	if err != nil { return err }
 	defer release()
 	jobCtx, cancel := context.WithTimeout(ctx, 15*time.Second)

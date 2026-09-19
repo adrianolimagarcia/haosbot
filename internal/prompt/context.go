@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/skills"
 	"github.com/adrianolimagarcia/nanobot-go/internal/textutil"
@@ -67,6 +69,16 @@ type Builder struct {
 	// skills.NewWithBuiltinDir, which is what the differential harness uses to
 	// point both implementations at one directory.
 	BuiltinSkillsDir string
+
+	// memoryCache keeps MEMORY.md out of the per-turn filesystem hot path.
+	// A short stat interval preserves external-editor visibility without doing
+	// an os.ReadFile for every prompt build.
+	memoryMu       sync.Mutex
+	memoryCached   string
+	memoryChecked  time.Time
+	memoryModTime  time.Time
+	memorySize     int64
+	memoryExists   bool
 }
 
 // New creates a Builder for an agent workspace.
@@ -329,14 +341,55 @@ func (b *Builder) LoadBootstrapFiles(projectWorkspace string) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// ReadMemory reads the long-term memory file.
-// Mirrors memory.read_memory() reading workspace/memory/MEMORY.md.
+// ReadMemory reads the long-term memory file through a hot snapshot cache.
+//
+// MEMORY.md remains the canonical, human-readable memory. GraphRAG is a derived
+// asynchronous index; the normal prompt path only needs this compact snapshot.
+// The cache checks metadata at most four times per second and reads file bytes
+// only when size/modtime changed.
 func (b *Builder) ReadMemory() string {
-	data, err := os.ReadFile(filepath.Join(expandPath(b.Workspace), "memory", "MEMORY.md"))
-	if err != nil {
-		return ""
+	const statInterval = 250 * time.Millisecond
+	path := filepath.Join(expandPath(b.Workspace), "memory", "MEMORY.md")
+
+	b.memoryMu.Lock()
+	defer b.memoryMu.Unlock()
+
+	now := time.Now()
+	if !b.memoryChecked.IsZero() && now.Sub(b.memoryChecked) < statInterval {
+		return b.memoryCached
 	}
-	return string(data)
+	b.memoryChecked = now
+
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			b.memoryCached = ""
+			b.memoryExists = false
+			b.memorySize = 0
+			b.memoryModTime = time.Time{}
+		}
+		return b.memoryCached
+	}
+	if b.memoryExists && info.Size() == b.memorySize && info.ModTime().Equal(b.memoryModTime) {
+		return b.memoryCached
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return b.memoryCached
+	}
+	b.memoryCached = string(data)
+	b.memoryExists = true
+	b.memorySize = info.Size()
+	b.memoryModTime = info.ModTime()
+	return b.memoryCached
+}
+
+// InvalidateMemoryCache makes the next prompt observe MEMORY.md immediately.
+// Writers in this process should call it after an atomic memory update.
+func (b *Builder) InvalidateMemoryCache() {
+	b.memoryMu.Lock()
+	b.memoryChecked = time.Time{}
+	b.memoryMu.Unlock()
 }
 
 // SkillsLoader builds the loader the reference constructs once in

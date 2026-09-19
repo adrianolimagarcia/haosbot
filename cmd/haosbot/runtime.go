@@ -116,7 +116,11 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("load GraphRAG embedder: %w", err)
 	}
-	graphPool := newGraphStorePoolWithEmbedder(filepath.Join(config.DefaultDataDir(), "graph-sessions"), resolveGraphPoolMaxOpenStores(), graphEmbedder)
+	graphPool := newGraphStorePoolWithEmbedder(filepath.Join(config.DefaultDataDir(), "graph-memory"), 2, graphEmbedder)
+	// Deep GraphRAG recall is explicit. Keeping it as a tool preserves hybrid
+	// FTS/vector/graph capabilities without making every turn pay retrieval
+	// latency before the provider starts.
+	registry.Register(newMemorySearchTool(graphPool))
 	metrics := observability.New()
 	metrics.SetVectorEnabled(graphEmbedder != nil)
 	metrics.SetEmbedderLoaded(graphEmbedder != nil)
@@ -144,6 +148,12 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("migrate legacy GraphRAG outbox: %w", err)
 	}
+	if err := ensureWorkspaceGraphProjection(context.Background(), config.DefaultDataDir(), memoryFabric); err != nil {
+		_ = memoryFabric.Close()
+		_ = graphPool.Close()
+		messageBus.Close()
+		return nil, fmt.Errorf("prepare workspace GraphRAG projection: %w", err)
+	}
 	projections, err := newProjectionManager(memoryFabric, graphPool, filepath.Join(config.DefaultDataDir(), "obsidian-memory"), profile.ProjectionWorkers, time.Duration(profile.ProjectionPollMs)*time.Millisecond, profile.ObsidianEnabled, metrics)
 	if err != nil {
 		_ = memoryFabric.Close()
@@ -168,7 +178,6 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		MaxToolResultChars:    d.MaxToolResultChars,
 		SequentialTools:       false,
 		IncludeMemory:         profile.MemoryRetrievalEnabled,
-		GraphMemoryForSession:     graphPool.Store,
 		GraphMemoryEnqueue:           projections.Enqueue,
 		GraphMemoryEnqueueWithID:     projections.EnqueueWithID,
 		GraphMemoryEnqueueWithIDError: projections.EnqueueWithIDError,

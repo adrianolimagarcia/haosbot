@@ -47,6 +47,7 @@ type Service struct {
 	wg     sync.WaitGroup
 	running bool
 	loaded  bool
+	dirty   bool
 	maxSleep time.Duration
 }
 
@@ -179,6 +180,11 @@ func (s *Service) loop() {
 func (s *Service) nextDelay() time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.dirty {
+		// An execution already produced external effects but its advanced
+		// schedule has not reached disk. Retry persistence before any new job.
+		return time.Second
+	}
 	now := time.Now().UnixMilli()
 	var earliest int64
 	for i := range s.store.Jobs {
@@ -208,6 +214,12 @@ func (s *Service) dispatchDue() {
 	var due []Job
 
 	s.mu.Lock()
+	if s.dirty {
+		if err := s.saveLocked(); err != nil {
+			s.mu.Unlock()
+			return
+		}
+	}
 	for i := range s.store.Jobs {
 		job := &s.store.Jobs[i]
 		if !job.Enabled || job.State.NextRunAtMS == nil || *job.State.NextRunAtMS > now || s.active[job.ID] {
@@ -310,11 +322,11 @@ func (s *Service) AddJob(job Job) (Job, error) {
 	if strings.TrimSpace(job.Name) == "" {
 		return Job{}, errors.New("cron: name is required")
 	}
-	if strings.TrimSpace(job.Payload.Message) == "" && job.Payload.Kind == PayloadAgentTurn {
-		return Job{}, errors.New("cron: message is required")
-	}
 	if job.Payload.Kind == "" {
 		job.Payload.Kind = PayloadAgentTurn
+	}
+	if strings.TrimSpace(job.Payload.Message) == "" && job.Payload.Kind == PayloadAgentTurn {
+		return Job{}, errors.New("cron: message is required")
 	}
 	if err := validateBoundJob(job); err != nil {
 		return Job{}, err
@@ -343,6 +355,7 @@ func (s *Service) AddJob(job Job) (Job, error) {
 	s.store.Jobs = append(s.store.Jobs, cloneJob(job))
 	if err := s.saveLocked(); err != nil {
 		s.store.Jobs = s.store.Jobs[:len(s.store.Jobs)-1]
+		s.dirty = false // rollback restored the last persisted snapshot
 		return Job{}, err
 	}
 	s.signal()
@@ -396,57 +409,61 @@ func (s *Service) UpdateJob(id string, update Update) (Job, error) {
 	if idx < 0 {
 		return Job{}, ErrNotFound
 	}
-	job := &s.store.Jobs[idx]
-	if job.Payload.Kind == PayloadSystemEvent {
+	if s.store.Jobs[idx].Payload.Kind == PayloadSystemEvent {
 		return Job{}, ErrProtected
 	}
+	original := cloneJob(s.store.Jobs[idx])
+	candidate := cloneJob(original)
 	scheduleChanged := false
 	if update.Name != nil {
 		name := strings.TrimSpace(*update.Name)
 		if name == "" {
 			return Job{}, errors.New("cron: name cannot be empty")
 		}
-		job.Name = name
+		candidate.Name = name
 	}
 	if update.Message != nil {
 		message := strings.TrimSpace(*update.Message)
 		if message == "" {
 			return Job{}, errors.New("cron: message cannot be empty")
 		}
-		job.Payload.Message = message
+		candidate.Payload.Message = message
 	}
 	if update.Schedule != nil {
 		if err := ValidateSchedule(*update.Schedule); err != nil {
 			return Job{}, err
 		}
-		job.Schedule = *update.Schedule
+		candidate.Schedule = *update.Schedule
 		scheduleChanged = true
 	}
 	if update.DeleteAfterRun != nil {
-		job.DeleteAfterRun = *update.DeleteAfterRun
+		candidate.DeleteAfterRun = *update.DeleteAfterRun
 	}
 	if update.Enabled != nil {
-		job.Enabled = *update.Enabled
+		candidate.Enabled = *update.Enabled
 	}
-	job.UpdatedAtMS = time.Now().UnixMilli()
-	if !job.Enabled {
-		job.State.NextRunAtMS = nil
+	candidate.UpdatedAtMS = time.Now().UnixMilli()
+	if !candidate.Enabled {
+		candidate.State.NextRunAtMS = nil
 	} else if scheduleChanged || update.Enabled != nil {
-		next, err := NextRun(job.Schedule, time.Now())
+		next, err := NextRun(candidate.Schedule, time.Now())
 		if err != nil {
 			return Job{}, err
 		}
-		job.State.NextRunAtMS = next
+		candidate.State.NextRunAtMS = next
 	}
+
+	s.store.Jobs[idx] = candidate
 	if err := s.saveLocked(); err != nil {
+		s.store.Jobs[idx] = original
+		s.dirty = false // no side effect occurred; rollback is authoritative
 		return Job{}, err
 	}
 	s.signal()
-	out := cloneJob(*job)
+	out := cloneJob(candidate)
 	out.State.Pending = s.active[id]
 	return out, nil
 }
-
 func (s *Service) RemoveJob(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -457,8 +474,13 @@ func (s *Service) RemoveJob(id string) error {
 	if s.store.Jobs[idx].Payload.Kind == PayloadSystemEvent {
 		return ErrProtected
 	}
+	original := cloneJob(s.store.Jobs[idx])
 	s.store.Jobs = append(s.store.Jobs[:idx], s.store.Jobs[idx+1:]...)
 	if err := s.saveLocked(); err != nil {
+		s.store.Jobs = append(s.store.Jobs, Job{})
+		copy(s.store.Jobs[idx+1:], s.store.Jobs[idx:])
+		s.store.Jobs[idx] = original
+		s.dirty = false // rollback restored persisted state
 		return err
 	}
 	s.signal()
@@ -467,6 +489,12 @@ func (s *Service) RemoveJob(id string) error {
 
 func (s *Service) RunNow(id string, force bool) error {
 	s.mu.Lock()
+	if s.dirty {
+		if err := s.saveLocked(); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("cron: persist previous execution state: %w", err)
+		}
+	}
 	idx := s.indexLocked(id)
 	if idx < 0 {
 		s.mu.Unlock()
@@ -547,6 +575,7 @@ func (s *Service) loadLocked() error {
 }
 
 func (s *Service) saveLocked() error {
+	s.dirty = true
 	if err := os.MkdirAll(filepath.Dir(s.storePath), 0o700); err != nil {
 		return err
 	}
@@ -582,6 +611,7 @@ func (s *Service) saveLocked() error {
 		_ = dir.Sync()
 		_ = dir.Close()
 	}
+	s.dirty = false
 	return nil
 }
 
@@ -621,6 +651,9 @@ func (s *Service) ReadRunRecord(runID string) (map[string]any, error) {
 	path := filepath.Join(s.runsDir, safeRunName(runID)+".json")
 	info, err := os.Lstat(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrNotFound
+		}
 		return nil, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || info.Size() > 2<<20 {

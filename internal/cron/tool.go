@@ -85,6 +85,9 @@ func (t *Tool) Execute(ctx context.Context, raw json.RawMessage) (tools.Result, 
 		}
 		return tools.OK(b.String()), nil
 	case "remove":
+		if !t.service.Running() {
+			return tools.Errf("Error: automation scheduler is not running; use the persistent HAOSBOT gateway"), nil
+		}
 		if strings.TrimSpace(args.JobID) == "" {
 			return tools.Errf("Error: job_id is required for remove"), nil
 		}
@@ -93,6 +96,9 @@ func (t *Tool) Execute(ctx context.Context, raw json.RawMessage) (tools.Result, 
 		}
 		return tools.OK("Removed job " + strings.TrimSpace(args.JobID)), nil
 	case "add":
+		if !t.service.Running() {
+			return tools.Errf("Error: automation scheduler is not running; use the persistent HAOSBOT gateway"), nil
+		}
 		if InExecution(ctx) {
 			return tools.Errf("Error: cannot schedule new jobs from within a cron job execution"), nil
 		}

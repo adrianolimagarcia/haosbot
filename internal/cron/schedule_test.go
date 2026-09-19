@@ -79,3 +79,23 @@ func mustLocation(t *testing.T, name string) *time.Location {
 }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+
+func TestCronSingleValueStepExpandsToFieldMaximum(t *testing.T) {
+	spec, err := parseCron("5/15 * * * *", "UTC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, minute := range []int{5, 20, 35, 50} {
+		at := time.Date(2026, 9, 19, 12, minute, 0, 0, time.UTC)
+		if !spec.matches(at) {
+			t.Fatalf("5/15 should match minute %d", minute)
+		}
+	}
+	for _, minute := range []int{0, 6, 19, 21, 55} {
+		at := time.Date(2026, 9, 19, 12, minute, 0, 0, time.UTC)
+		if spec.matches(at) {
+			t.Fatalf("5/15 should not match minute %d", minute)
+		}
+	}
+}

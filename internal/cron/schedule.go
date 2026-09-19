@@ -168,7 +168,14 @@ func parseField(raw string, min, max int, names map[string]int, normalizeSunday 
 				if err != nil {
 					return out, err
 				}
-				end = start
+				// Cron's N/step form means "start at N, then repeat through
+				// the field maximum" (e.g. 5/15 minutes => 5,20,35,50).
+				// Without an explicit step, a bare N still selects only N.
+				if strings.Contains(item, "/") {
+					end = max
+				} else {
+					end = start
+				}
 			}
 		}
 		for v := start; v <= end; v += step {

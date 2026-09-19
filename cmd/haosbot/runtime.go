@@ -107,7 +107,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		EnableNetwork:       cfg.Tools.Web.Enable,
 	})
 
-	scheduler := cronruntime.NewService(filepath.Join(config.DefaultDataDir(), "cron", "jobs.json"), nil)
+	scheduler := cronruntime.NewService(filepath.Join(config.DefaultDataDir(), "cron", workspaceGraphNamespace(workspace), "jobs.json"), nil)
 	if err := scheduler.Load(); err != nil {
 		return nil, fmt.Errorf("load automation scheduler: %w", err)
 	}

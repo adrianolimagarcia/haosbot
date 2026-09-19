@@ -59,6 +59,9 @@ func (s *Server) registerWebUIData(mux *http.ServeMux) {
 	mux.HandleFunc("/api/webui/automations", s.handleWebUIAutomations)
 	mux.HandleFunc("/api/webui/automation", s.handleWebUIAutomation)
 	mux.HandleFunc("/api/webui/automation/run", s.handleWebUIAutomationRun)
+	mux.HandleFunc("/api/webui/triggers", s.handleWebUITriggers)
+	mux.HandleFunc("/api/webui/trigger", s.handleWebUITrigger)
+	mux.HandleFunc("/api/webui/trigger/fire", s.handleWebUITriggerFire)
 }
 
 func (s *Server) handleWebUIState(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +140,7 @@ func (s *Server) handleWebUIState(w http.ResponseWriter, r *http.Request) {
 			"graph_async": true,
 			"streaming": true,
 			"scheduler": s.scheduler.Load() != nil,
+			"local_triggers": s.triggers.Load() != nil,
 		},
 	})
 }

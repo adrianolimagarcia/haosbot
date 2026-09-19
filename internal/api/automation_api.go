@@ -41,6 +41,8 @@ func (s *Server) handleWebUIAutomations(w http.ResponseWriter, r *http.Request) 
 	case http.MethodGet:
 		writeWebUIJSON(w, map[string]any{
 			"running": scheduler.Running(),
+			"active": scheduler.ActiveCount(),
+			"max_concurrent": scheduler.MaxConcurrent(),
 			"jobs": automationJobsPayload(scheduler.ListJobs(true)),
 		})
 	case http.MethodPost:
@@ -52,6 +54,9 @@ func (s *Server) handleWebUIAutomations(w http.ResponseWriter, r *http.Request) 
 			OriginChatID   string               `json:"origin_chat_id"`
 			Schedule       cronruntime.Schedule `json:"schedule"`
 			DeleteAfterRun bool                 `json:"delete_after_run"`
+			TimeoutMS      int64                `json:"timeout_ms"`
+			MisfirePolicy string               `json:"misfire_policy"`
+			MisfireGraceMS int64               `json:"misfire_grace_ms"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&req); err != nil {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -71,12 +76,14 @@ func (s *Server) handleWebUIAutomations(w http.ResponseWriter, r *http.Request) 
 			Name: strings.TrimSpace(req.Name),
 			Schedule: req.Schedule,
 			DeleteAfterRun: req.DeleteAfterRun,
+			TimeoutMS: req.TimeoutMS, MisfirePolicy: req.MisfirePolicy, MisfireGraceMS: req.MisfireGraceMS,
 			Payload: cronruntime.Payload{
 				Kind: cronruntime.PayloadAgentTurn,
 				Message: strings.TrimSpace(req.Message),
 				SessionKey: req.SessionKey,
 				OriginChannel: req.OriginChannel,
 				OriginChatID: req.OriginChatID,
+				OriginMetadata: map[string]any{"source":"webui","session_id":strings.TrimPrefix(req.SessionKey, "webui:")},
 			},
 		})
 		if err != nil {
@@ -86,7 +93,7 @@ func (s *Server) handleWebUIAutomations(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusCreated)
 		writeWebUIJSON(w, automationJobPayload(job))
 	default:
-		w.Header().Set("Allow", "GET, POST")
+		w.Header().Set("Allow", "GET, POST, DELETE")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
@@ -118,6 +125,9 @@ func (s *Server) handleWebUIAutomation(w http.ResponseWriter, r *http.Request) {
 			Schedule       *cronruntime.Schedule `json:"schedule"`
 			Message        *string               `json:"message"`
 			DeleteAfterRun *bool                 `json:"delete_after_run"`
+			TimeoutMS      *int64                `json:"timeout_ms"`
+			MisfirePolicy *string               `json:"misfire_policy"`
+			MisfireGraceMS *int64               `json:"misfire_grace_ms"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&req); err != nil {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -126,6 +136,7 @@ func (s *Server) handleWebUIAutomation(w http.ResponseWriter, r *http.Request) {
 		job, err := scheduler.UpdateJob(id, cronruntime.Update{
 			Name: req.Name, Enabled: req.Enabled, Schedule: req.Schedule,
 			Message: req.Message, DeleteAfterRun: req.DeleteAfterRun,
+			TimeoutMS: req.TimeoutMS, MisfirePolicy: req.MisfirePolicy, MisfireGraceMS: req.MisfireGraceMS,
 		})
 		if errors.Is(err, cronruntime.ErrNotFound) {
 			http.NotFound(w, r)
@@ -187,6 +198,11 @@ func (s *Server) handleWebUIAutomationRun(w http.ResponseWriter, r *http.Request
 		}
 		w.WriteHeader(http.StatusAccepted)
 		writeWebUIJSON(w, map[string]any{"status": "queued", "id": id})
+	case http.MethodDelete:
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		if id == "" { http.Error(w, "id is required", http.StatusBadRequest); return }
+		if err := scheduler.Cancel(id); err != nil { http.Error(w, err.Error(), http.StatusConflict); return }
+		w.WriteHeader(http.StatusNoContent)
 	case http.MethodGet:
 		runID := strings.TrimSpace(r.URL.Query().Get("run_id"))
 		record, err := scheduler.ReadRunRecord(runID)
@@ -206,6 +222,7 @@ func (s *Server) handleWebUIAutomationRun(w http.ResponseWriter, r *http.Request
 		writeWebUIJSON(w, map[string]any{
 			"run_id": record["run_id"], "job_id": record["job_id"],
 			"status": record["status"], "created_at_ms": record["created_at_ms"],
+			"scheduled_for_ms": record["scheduled_for_ms"], "idempotency_key": record["idempotency_key"],
 			"duration_ms": record["duration_ms"], "error": record["error"],
 			"response": record["response"],
 		})

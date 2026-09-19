@@ -26,7 +26,7 @@ func NewTool(service *Service, defaultTimezone string) *Tool {
 func (t *Tool) Name() string { return "cron" }
 
 func (t *Tool) Description() string {
-	return "Schedule reminders and recurring agent tasks. Actions: add, list, remove. " +
+	return "Schedule reminders and recurring agent tasks. Actions: add, list, remove, pause, resume, run, cancel. " +
 		"Jobs are bound to the current chat session and execute in the background."
 }
 
@@ -34,14 +34,17 @@ func (t *Tool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type":"object",
 		"properties":{
-			"action":{"type":"string","enum":["add","list","remove"]},
+			"action":{"type":"string","enum":["add","list","remove","pause","resume","run","cancel"]},
 			"name":{"type":"string"},
 			"message":{"type":"string"},
 			"every_seconds":{"type":"integer","minimum":1},
 			"cron_expr":{"type":"string"},
 			"tz":{"type":"string"},
 			"at":{"type":"string"},
-			"job_id":{"type":"string"}
+			"job_id":{"type":"string"},
+			"timeout_seconds":{"type":"integer","minimum":0},
+			"misfire_policy":{"type":"string","enum":["fire_once","skip"]},
+			"misfire_grace_seconds":{"type":"integer","minimum":0}
 		},
 		"required":["action"],
 		"additionalProperties":false
@@ -58,6 +61,9 @@ func (t *Tool) Execute(ctx context.Context, raw json.RawMessage) (tools.Result, 
 		TZ           string `json:"tz"`
 		At           string `json:"at"`
 		JobID        string `json:"job_id"`
+		TimeoutSeconds *int64 `json:"timeout_seconds"`
+		MisfirePolicy string `json:"misfire_policy"`
+		MisfireGraceSeconds *int64 `json:"misfire_grace_seconds"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return tools.Errf("Error: invalid cron arguments: %v", err), nil
@@ -84,6 +90,22 @@ func (t *Tool) Execute(ctx context.Context, raw json.RawMessage) (tools.Result, 
 			}
 		}
 		return tools.OK(b.String()), nil
+	case "pause", "resume":
+		id := strings.TrimSpace(args.JobID)
+		if id == "" { return tools.Errf("Error: job_id is required"), nil }
+		enabled := args.Action == "resume"
+		if _, err := t.service.UpdateJob(id, Update{Enabled:&enabled}); err != nil { return tools.Errf("Error: %v", err), nil }
+		return tools.OK(fmt.Sprintf("%s job %s", args.Action, id)), nil
+	case "run":
+		id := strings.TrimSpace(args.JobID)
+		if id == "" { return tools.Errf("Error: job_id is required"), nil }
+		if err := t.service.RunNow(id, true); err != nil { return tools.Errf("Error: %v", err), nil }
+		return tools.OK("Queued job " + id), nil
+	case "cancel":
+		id := strings.TrimSpace(args.JobID)
+		if id == "" { return tools.Errf("Error: job_id is required"), nil }
+		if err := t.service.Cancel(id); err != nil { return tools.Errf("Error: %v", err), nil }
+		return tools.OK("Cancelled job " + id), nil
 	case "remove":
 		if !t.service.Running() {
 			return tools.Errf("Error: automation scheduler is not running; use the persistent HAOSBOT gateway"), nil
@@ -131,6 +153,7 @@ func (t *Tool) Execute(ctx context.Context, raw json.RawMessage) (tools.Result, 
 			Name: name,
 			Schedule: schedule,
 			DeleteAfterRun: deleteAfter,
+			TimeoutMS: secondsToMS(args.TimeoutSeconds), MisfirePolicy: strings.TrimSpace(args.MisfirePolicy), MisfireGraceMS: secondsToMS(args.MisfireGraceSeconds),
 			Payload: Payload{
 				Kind: PayloadAgentTurn, Message: message,
 				SessionKey: sessionKey, OriginChannel: channel, OriginChatID: chatID,
@@ -228,3 +251,5 @@ func formatSchedule(s Schedule) string {
 	}
 	return s.Kind
 }
+
+func secondsToMS(v *int64) int64 { if v == nil { return 0 }; return *v * 1000 }

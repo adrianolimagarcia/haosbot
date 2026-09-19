@@ -29,6 +29,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/session"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools/builtin"
+	triggersruntime "github.com/adrianolimagarcia/nanobot-go/internal/triggers"
 	wsbootstrap "github.com/adrianolimagarcia/nanobot-go/internal/workspace"
 
 	"strconv"
@@ -41,6 +42,7 @@ type agentRuntime struct {
 	store     *session.Store
 	metrics   *observability.Registry
 	scheduler *cronruntime.Service
+	triggers  *triggersruntime.Service
 	closeF    func()
 }
 
@@ -111,6 +113,10 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	if err := scheduler.Load(); err != nil {
 		return nil, fmt.Errorf("load automation scheduler: %w", err)
 	}
+	if err := configureSystemAutomations(cfg, workspace, scheduler); err != nil {
+		return nil, fmt.Errorf("configure system automations: %w", err)
+	}
+	triggerSvc := triggersruntime.NewService(filepath.Join(workspace, "triggers"), nil)
 	registry.Register(cronruntime.NewTool(scheduler, d.Timezone))
 
 	// Bounded by default: the queue limits come from gateway.maxInboundQueue /
@@ -198,6 +204,9 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	}
 	if err == nil {
 		err = scheduler.SetExecutor(func(ctx context.Context, job cronruntime.Job, runID string) (cronruntime.RunResult, error) {
+			if job.Payload.Kind == cronruntime.PayloadSystemEvent {
+				return executeSystemAutomation(ctx, loop, workspace, job, runID)
+			}
 			key := job.Payload.SessionKey
 			metadata := make(map[string]any, len(job.Payload.OriginMetadata)+2)
 			for k, v := range job.Payload.OriginMetadata {
@@ -205,6 +214,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 			}
 			metadata["_cron_trigger"] = map[string]any{
 				"job_id": job.ID, "job_name": job.Name, "run_id": runID,
+				"scheduled_for_ms": job.ScheduledForMS, "idempotency_key": job.IdempotencyKey,
 			}
 			metadata["_cron_defer_until_session_idle"] = true
 			msg := core.InboundMessage{
@@ -244,6 +254,42 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 			}
 		})
 	}
+	if err == nil {
+		err = triggerSvc.SetExecutor(func(ctx context.Context, trigger triggersruntime.Trigger, delivery triggersruntime.Delivery) (string, error) {
+			metadata := make(map[string]any, len(trigger.OriginMetadata)+2)
+			for k, v := range trigger.OriginMetadata { metadata[k] = v }
+			metadata["_local_trigger"] = map[string]any{
+				"trigger_id": trigger.ID, "trigger_name": trigger.Name,
+				"delivery_id": delivery.ID, "created_at_ms": delivery.CreatedAtMS,
+			}
+			key := trigger.SessionKey
+			msg := core.InboundMessage{
+				Channel: trigger.Channel, SenderID: trigger.SenderID, ChatID: trigger.ChatID,
+				Content: "Local trigger received: " + trigger.Name + "\n\n" + delivery.Content,
+				Metadata: metadata, SessionKeyOverride: &key,
+			}
+			for {
+				out, runErr := loop.ProcessMessage(ctx, msg)
+				if errors.Is(runErr, agent.ErrTurnActive) {
+					timer := time.NewTimer(750 * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						if !timer.Stop() { <-timer.C }
+						return "", ctx.Err()
+					case <-timer.C:
+						continue
+					}
+				}
+				if runErr != nil { return "", runErr }
+				if out == nil { return "", nil }
+				if trigger.Channel != "webui" {
+					if err := messageBus.PublishOutbound(ctx, *out); err != nil { return out.Content, err }
+				}
+				return out.Content, nil
+			}
+		})
+	}
+
 	if err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = scheduler.Close(shutdownCtx)
@@ -266,8 +312,10 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		store: store,
 		metrics: metrics,
 		scheduler: scheduler,
+		triggers: triggerSvc,
 		closeF: func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = triggerSvc.Close(shutdownCtx)
 			_ = scheduler.Close(shutdownCtx)
 			projections.Close(shutdownCtx)
 			memoryMDProjection.Close()
@@ -472,6 +520,9 @@ func cmdGateway(args []string) error {
 	if err := rt.scheduler.Start(); err != nil {
 		return fmt.Errorf("start automation scheduler: %w", err)
 	}
+	if err := rt.triggers.Start(); err != nil {
+		return fmt.Errorf("start local trigger service: %w", err)
+	}
 
 	channelManager := buildChannelManager(cfg, rt.bus)
 	if names := channelManager.EnabledChannels(); len(names) > 0 {
@@ -501,6 +552,7 @@ func cmdGateway(args []string) error {
 	apiServer.SetMetrics(rt.metrics)
 	apiServer.SetSessionStore(rt.store)
 	apiServer.SetScheduler(rt.scheduler)
+	apiServer.SetTriggerService(rt.triggers)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

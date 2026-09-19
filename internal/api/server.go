@@ -19,6 +19,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/command"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	cronruntime "github.com/adrianolimagarcia/nanobot-go/internal/cron"
+	triggersruntime "github.com/adrianolimagarcia/nanobot-go/internal/triggers"
 	"github.com/adrianolimagarcia/nanobot-go/internal/netpolicy"
 	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
 	"github.com/adrianolimagarcia/nanobot-go/internal/provider"
@@ -45,6 +46,7 @@ type Server struct {
 	metrics atomic.Pointer[observability.Registry]
 	sessionStore atomic.Pointer[session.Store]
 	scheduler atomic.Pointer[cronruntime.Service]
+	triggers atomic.Pointer[triggersruntime.Service]
 	webuiMu sync.Mutex
 
 	// notReady is the process-owned readiness override read by /readyz
@@ -90,6 +92,8 @@ func (s *Server) SetSessionStore(store *session.Store) { s.sessionStore.Store(st
 // SetScheduler attaches the gateway-owned automation scheduler used by the
 // WebUI management API. The scheduler remains inactive in one-shot/chat modes.
 func (s *Server) SetScheduler(scheduler *cronruntime.Service) { s.scheduler.Store(scheduler) }
+
+func (s *Server) SetTriggerService(service *triggersruntime.Service) { s.triggers.Store(service) }
 
 func (s *Server) checkAuth(r *http.Request) bool {
 	apiKey := s.cfg.API.APIKey

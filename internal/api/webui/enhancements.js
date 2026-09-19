@@ -128,3 +128,24 @@
   ensureAttachmentUI();
   window.addEventListener('DOMContentLoaded',ensureAttachmentUI);
 })();
+;(() => {
+'use strict';
+const auth=(extra={})=>typeof window.webuiAuthHeaders==='function'?window.webuiAuthHeaders(extra):extra;
+function currentSessionKey(){const id=sessionStorage.getItem('haosbot_session_id')||'';return id?'webui:'+id:''}
+function ensureQuickAutomation(){
+ if(document.getElementById('quick-automation-button'))return;
+ const host=document.querySelector('.thread-header-right')||document.querySelector('.thread-header');if(!host)return;
+ const b=document.createElement('button');b.id='quick-automation-button';b.className='thread-icon-button';b.type='button';b.textContent='Auto';b.title='Criar automação desta conversa';b.addEventListener('click',open);host.appendChild(b);
+}
+function field(label,type='text'){const wrap=document.createElement('label');wrap.className='qa-field';const span=document.createElement('span');span.textContent=label;const input=document.createElement(type==='textarea'?'textarea':'input');if(type!=='textarea')input.type=type;input.className='control-input';wrap.append(span,input);return{wrap,input}}
+function open(){
+ let modal=document.getElementById('quick-automation-modal');if(modal){modal.classList.remove('hidden');return}
+ modal=document.createElement('div');modal.id='quick-automation-modal';modal.className='qa-modal';const card=document.createElement('div');card.className='qa-card';const title=document.createElement('h3');title.textContent='Automatizar esta conversa';
+ const n=field('Nome'),m=field('Instrução','textarea'),kind=field('Agenda');const select=document.createElement('select');select.className='control-input';[['every','A cada N minutos'],['cron','Cron'],['at','Data/hora única']].forEach(([v,l])=>{const o=document.createElement('option');o.value=v;o.textContent=l;select.append(o)});kind.wrap.replaceChild(select,kind.input);kind.input=select;
+ const value=field('Valor');value.input.placeholder='60';const status=document.createElement('div');status.className='control-muted';const actions=document.createElement('div');actions.className='control-toolbar';const save=document.createElement('button');save.className='control-button primary';save.textContent='Criar';const cancel=document.createElement('button');cancel.className='control-button';cancel.textContent='Cancelar';cancel.onclick=()=>modal.classList.add('hidden');actions.append(save,cancel);
+ save.onclick=async()=>{let schedule={kind:kind.input.value};if(kind.input.value==='every'){const mins=Number(value.input.value);if(!Number.isFinite(mins)||mins<=0){status.textContent='Minutos inválidos';return}schedule.everyMs=Math.round(mins*60000)}else if(kind.input.value==='cron'){schedule.expr=value.input.value.trim();schedule.tz=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}else{const ms=Date.parse(value.input.value);if(!Number.isFinite(ms)){status.textContent='Data/hora inválida';return}schedule.atMs=ms}
+ const payload={name:n.input.value.trim(),message:m.input.value.trim(),session_key:currentSessionKey(),schedule,delete_after_run:kind.input.value==='at',misfire_policy:'fire_once'};const r=await fetch('/api/webui/automation/from-session',{method:'POST',headers:auth({'Content-Type':'application/json'}),body:JSON.stringify(payload)});if(!r.ok){status.textContent=await r.text();return}status.textContent='Automação criada';setTimeout(()=>modal.classList.add('hidden'),500)};
+ card.append(title,n.wrap,m.wrap,kind.wrap,value.wrap,actions,status);modal.append(card);document.body.append(modal);
+}
+window.addEventListener('DOMContentLoaded',ensureQuickAutomation);ensureQuickAutomation();
+})();

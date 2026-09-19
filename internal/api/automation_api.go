@@ -43,7 +43,7 @@ func (s *Server) handleWebUIAutomations(w http.ResponseWriter, r *http.Request) 
 			"running": scheduler.Running(),
 			"active": scheduler.ActiveCount(),
 			"max_concurrent": scheduler.MaxConcurrent(),
-			"jobs": automationJobsPayload(scheduler.ListJobs(true)),
+			"jobs": automationJobsPayload(filterAutomationJobs(scheduler.ListJobs(true), r.URL.Query().Get("session_key"), r.URL.Query().Get("status"))),
 		})
 	case http.MethodPost:
 		var req struct {

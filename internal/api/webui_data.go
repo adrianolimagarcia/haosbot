@@ -56,6 +56,9 @@ func (s *Server) registerWebUIData(mux *http.ServeMux) {
 	mux.HandleFunc("/api/webui/memory", s.handleWebUIMemory)
 	mux.HandleFunc("/api/webui/skill", s.handleWebUISkill)
 	mux.HandleFunc("/api/webui/file-preview", s.handleWebUIFilePreview)
+	mux.HandleFunc("/api/webui/automations", s.handleWebUIAutomations)
+	mux.HandleFunc("/api/webui/automation", s.handleWebUIAutomation)
+	mux.HandleFunc("/api/webui/automation/run", s.handleWebUIAutomationRun)
 }
 
 func (s *Server) handleWebUIState(w http.ResponseWriter, r *http.Request) {

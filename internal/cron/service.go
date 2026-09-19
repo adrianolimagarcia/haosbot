@@ -608,6 +608,38 @@ func (s *Service) writeRunRecord(job Job, run RunRecord, response string) error 
 	return os.WriteFile(filepath.Join(s.runsDir, name), data, 0o600)
 }
 
+func (s *Service) Running() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running
+}
+
+func (s *Service) ReadRunRecord(runID string) (map[string]any, error) {
+	if strings.TrimSpace(runID) == "" {
+		return nil, errors.New("cron: run id is required")
+	}
+	path := filepath.Join(s.runsDir, safeRunName(runID)+".json")
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || info.Size() > 2<<20 {
+		return nil, errors.New("cron: invalid run record")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var record map[string]any
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return nil, err
+	}
+	if got, _ := record["run_id"].(string); got != runID {
+		return nil, errors.New("cron: run record identity mismatch")
+	}
+	return record, nil
+}
+
 func (s *Service) signal() {
 	select {
 	case s.wake <- struct{}{}:

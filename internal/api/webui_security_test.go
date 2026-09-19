@@ -396,3 +396,28 @@ func TestWebUIRenderEndpointIsProtectedAndValidated(t *testing.T) {
 		t.Errorf("GET /api/webui/render = %d, want 405", rr.Code)
 	}
 }
+
+func TestWebUITokenRotationKeepsCurrentCredentialUntilRestart(t *testing.T) {
+	h := webUIHandler()
+	hardening := getWebUI(t, h, "/webui-hardening.js").Body.String()
+	app := getWebUI(t, h, "/webui/app.js").Body.String()
+
+	for _, want := range []string{
+		"haosbot_pending_token",
+		"window.setPendingToken(gatewayKey && gatewayKey !== currentGatewayToken ? gatewayKey : '')",
+		"window.getPendingToken() || window.getToken()",
+	} {
+		if !strings.Contains(hardening, want) {
+			t.Errorf("hardening.js is missing token-rotation guard %q", want)
+		}
+	}
+	if strings.Contains(hardening, "window.setToken(gatewayKey || window.getToken())") {
+		t.Error("hardening.js still activates the new gateway token before restart")
+	}
+	if !strings.Contains(app, "if (!res.ok)") {
+		t.Error("restartAgent does not reject non-2xx restart responses")
+	}
+	if !strings.Contains(app, "window.promotePendingToken()") {
+		t.Error("restartAgent does not promote the pending token after acknowledgement")
+	}
+}

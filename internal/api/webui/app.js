@@ -59,12 +59,18 @@
     const token = typeof window.getToken === 'function' ? window.getToken() : '';
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
     try {
-      await fetch('/api/restart', { method: 'POST', headers });
+      const res = await fetch('/api/restart', { method: 'POST', headers });
+      if (!res.ok) {
+        status.textContent = `Falha ao reiniciar (HTTP ${res.status}): ${await res.text()}`;
+        status.className = 'text-xs text-red-600 font-medium';
+        return;
+      }
+      if (typeof window.promotePendingToken === 'function') window.promotePendingToken();
       status.textContent = 'Agente reiniciado! Reconectando...';
       setTimeout(() => window.location.reload(), 2000);
     } catch (err) {
-      status.textContent = 'Agente reiniciando...';
-      setTimeout(() => window.location.reload(), 2500);
+      status.textContent = `Falha de conexão ao reiniciar: ${err.message}`;
+      status.className = 'text-xs text-red-600 font-medium';
     }
   }
 

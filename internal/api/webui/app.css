@@ -511,3 +511,39 @@ footer .border.border-gray-200.rounded-xl {
   .workspace-panel-header { padding-inline:14px; }
   .control-grid { grid-template-columns:1fr; }
 }
+
+
+html[data-theme="dark"] {
+  --bg-main: #18181b;
+  --bg-sidebar: #111113;
+  --bg-elevated: #202023;
+  --bg-hover: rgba(255,255,255,.07);
+  --bg-selected: rgba(255,255,255,.10);
+  --border-color: rgba(255,255,255,.10);
+  --border-strong: rgba(255,255,255,.16);
+  --text-main: #f4f4f5;
+  --text-muted: #a1a1aa;
+  --text-faint: #71717a;
+}
+html[data-theme="dark"] body,
+html[data-theme="dark"] main { background: var(--bg-main) !important; color: var(--text-main); }
+html[data-theme="dark"] .thread-header { background: rgba(24,24,27,.94); }
+html[data-theme="dark"] .thread-title,
+html[data-theme="dark"] .haosbot-welcome h1,
+html[data-theme="dark"] .prose h1,
+html[data-theme="dark"] .prose h2,
+html[data-theme="dark"] .prose h3,
+html[data-theme="dark"] .prose h4,
+html[data-theme="dark"] .prose h5,
+html[data-theme="dark"] .prose h6 { color: #f4f4f5; }
+html[data-theme="dark"] .prose p { color: #e4e4e7; }
+html[data-theme="dark"] footer { background: linear-gradient(to top, #18181b 78%, rgba(24,24,27,.92)) !important; }
+html[data-theme="dark"] footer .border.border-gray-200.rounded-xl,
+html[data-theme="dark"] #settings-dialog > div { background: #202023 !important; border-color: var(--border-strong) !important; color: #f4f4f5; }
+html[data-theme="dark"] #user-input { color: #f4f4f5 !important; }
+html[data-theme="dark"] .haosbot-user-bubble { background: #2a2a2e !important; color: #f4f4f5 !important; }
+html[data-theme="dark"] .control-card,
+html[data-theme="dark"] .control-list-row,
+html[data-theme="dark"] .control-pre,
+html[data-theme="dark"] .memory-editor,
+html[data-theme="dark"] .control-input { background: #202023; color: #e4e4e7; border-color: var(--border-color); }

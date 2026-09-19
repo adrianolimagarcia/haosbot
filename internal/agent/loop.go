@@ -670,6 +670,7 @@ func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook
 		l.closeUnansweredTurn(transcript, turnID, runCtx.Err().Error())
 		return nil, runCtx.Err()
 	}
+	observeTokenUsage(l.cfg.Metrics, res.Usage)
 	if l.cfg.Metrics != nil {
 		for _, message := range res.Messages {
 			l.cfg.Metrics.AddToolCalls(len(message.ToolCalls))
@@ -882,6 +883,7 @@ func (l *Loop) summarize(ctx context.Context, req provider.ChatRequest) (string,
 		if err != nil {
 			return "", err
 		}
+		observeTokenUsage(l.cfg.Metrics, resp.Usage)
 		return resp.Content, nil
 	}
 
@@ -911,6 +913,9 @@ func (l *Loop) summarize(ctx context.Context, req provider.ChatRequest) (string,
 	}
 	if streamErr != nil {
 		return "", streamErr
+	}
+	if done != nil {
+		observeTokenUsage(l.cfg.Metrics, done.Usage)
 	}
 	if text.Len() > 0 {
 		return text.String(), nil
@@ -1274,6 +1279,16 @@ func firstWord(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+func observeTokenUsage(metrics *observability.Registry, usage *core.Usage) {
+	if metrics == nil || usage == nil {
+		return
+	}
+	cached, reasoning := 0, 0
+	if usage.CachedTokens != nil { cached = *usage.CachedTokens }
+	if usage.ReasoningTokens != nil { reasoning = *usage.ReasoningTokens }
+	metrics.AddTokenUsage(usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens, cached, reasoning)
 }
 
 func isoLocal(t time.Time) string {

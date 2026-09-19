@@ -32,12 +32,20 @@
       if (activeView) renderView(activeView);
       const model = state?.config?.agents?.defaults?.model;
       if (model && byId('model-selector-badge')) byId('model-selector-badge').textContent = model;
+      const usage = Number(state?.metrics?.total_tokens || 0);
+      if (byId('token-indicator')) byId('token-indicator').textContent = usage ? usage.toLocaleString() + ' tokens' : 'tokens —';
     } catch (err) {
       const list = byId('session-list');
       if (list) {
         list.replaceChildren(el('div', 'session-loading', 'Falha ao carregar: ' + err.message));
       }
     }
+  }
+
+  function applyTheme(theme) {
+    const resolved = theme === 'dark' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = resolved;
+    localStorage.setItem('haosbot-theme', resolved);
   }
 
   function relativeTime(value) {
@@ -304,6 +312,11 @@
       ['Graph search', 'Busca GraphRAG explícita', fmtMs(m.graph_search_avg_ms)],
       ['Fila memória', 'Jobs de projeção pendentes', m.memory_pending ?? 0],
       ['Graph/vector', 'Embedder local', m.embedder_loaded ? 'Ativo' : 'FTS/graph'],
+      ['Tokens total', 'Uso acumulado observado pelo runtime', Number(m.total_tokens || 0).toLocaleString()],
+      ['Prompt', 'Tokens de entrada acumulados', Number(m.prompt_tokens || 0).toLocaleString()],
+      ['Completion', 'Tokens de saída acumulados', Number(m.completion_tokens || 0).toLocaleString()],
+      ['Cache', 'Tokens reportados como cached', Number(m.cached_tokens || 0).toLocaleString()],
+      ['Reasoning', 'Tokens de reasoning reportados', Number(m.reasoning_tokens || 0).toLocaleString()],
       ['Heap', 'Memória alocada', humanBytes(m.heap_alloc_bytes || 0)]
     ];
     for (const stat of stats) grid.appendChild(card(stat[0], stat[1], stat[2]));
@@ -319,7 +332,14 @@
     const runtime = el('button', 'control-button', 'Runtime');
     runtime.type = 'button';
     runtime.addEventListener('click', () => openView('runtime'));
-    toolbar.append(models, runtime);
+    const theme = el('button', 'control-button', document.documentElement.dataset.theme === 'dark' ? 'Tema claro' : 'Tema escuro');
+    theme.type = 'button';
+    theme.addEventListener('click', () => {
+      const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      theme.textContent = next === 'dark' ? 'Tema claro' : 'Tema escuro';
+    });
+    toolbar.append(models, runtime, theme);
     root.appendChild(toolbar);
 
     const grid = el('div', 'control-grid');
@@ -465,5 +485,10 @@
 
   window.addEventListener('haosbot:turn-complete', refreshState);
   window.addEventListener('haosbot:session-changed', refreshState);
-  window.addEventListener('DOMContentLoaded', refreshState);
+  window.addEventListener('DOMContentLoaded', () => {
+    const saved = localStorage.getItem('haosbot-theme');
+    const preferred = saved || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    applyTheme(preferred);
+    refreshState();
+  });
 })();

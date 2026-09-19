@@ -45,6 +45,11 @@ type Registry struct {
 	persistenceSamples atomic.Uint64
 	turnNanos atomic.Uint64
 	turnSamples atomic.Uint64
+	tokenPrompt atomic.Uint64
+	tokenCompletion atomic.Uint64
+	tokenTotal atomic.Uint64
+	tokenCached atomic.Uint64
+	tokenReasoning atomic.Uint64
 	backgroundSummaryNanos atomic.Uint64
 	backgroundSummarySamples atomic.Uint64
 	backgroundSummarySuccess atomic.Uint64
@@ -87,6 +92,11 @@ type Snapshot struct {
 	ToolsAvgMs float64 `json:"tools_avg_ms"`
 	PersistenceAvgMs float64 `json:"persistence_avg_ms"`
 	TurnTotalAvgMs float64 `json:"turn_total_avg_ms"`
+	PromptTokens uint64 `json:"prompt_tokens"`
+	CompletionTokens uint64 `json:"completion_tokens"`
+	TotalTokens uint64 `json:"total_tokens"`
+	CachedTokens uint64 `json:"cached_tokens"`
+	ReasoningTokens uint64 `json:"reasoning_tokens"`
 	BackgroundSummaryAvgMs float64 `json:"background_summary_avg_ms"`
 	BackgroundSummarySuccess uint64 `json:"background_summary_success"`
 	BackgroundSummaryFailures uint64 `json:"background_summary_failures"`
@@ -122,6 +132,14 @@ func (r *Registry) ObserveProviderTotal(d time.Duration) { observeDuration(&r.pr
 func (r *Registry) ObserveTools(d time.Duration) { observeDuration(&r.toolsNanos, &r.toolsSamples, d) }
 func (r *Registry) ObservePersistence(d time.Duration) { observeDuration(&r.persistenceNanos, &r.persistenceSamples, d) }
 func (r *Registry) ObserveTurn(d time.Duration) { observeDuration(&r.turnNanos, &r.turnSamples, d) }
+
+func (r *Registry) AddTokenUsage(prompt, completion, total, cached, reasoning int) {
+	if prompt > 0 { r.tokenPrompt.Add(uint64(prompt)) }
+	if completion > 0 { r.tokenCompletion.Add(uint64(completion)) }
+	if total > 0 { r.tokenTotal.Add(uint64(total)) }
+	if cached > 0 { r.tokenCached.Add(uint64(cached)) }
+	if reasoning > 0 { r.tokenReasoning.Add(uint64(reasoning)) }
+}
 func (r *Registry) ObserveBackgroundSummary(d time.Duration, success bool) {
 	observeDuration(&r.backgroundSummaryNanos, &r.backgroundSummarySamples, d)
 	if success { r.backgroundSummarySuccess.Add(1) } else { r.backgroundSummaryFailures.Add(1) }
@@ -168,6 +186,7 @@ func (r *Registry) Snapshot() Snapshot {
 		ToolsAvgMs: averageMilliseconds(&r.toolsNanos, &r.toolsSamples),
 		PersistenceAvgMs: averageMilliseconds(&r.persistenceNanos, &r.persistenceSamples),
 		TurnTotalAvgMs: averageMilliseconds(&r.turnNanos, &r.turnSamples),
+		PromptTokens: r.tokenPrompt.Load(), CompletionTokens: r.tokenCompletion.Load(), TotalTokens: r.tokenTotal.Load(), CachedTokens: r.tokenCached.Load(), ReasoningTokens: r.tokenReasoning.Load(),
 		BackgroundSummaryAvgMs: averageMilliseconds(&r.backgroundSummaryNanos, &r.backgroundSummarySamples),
 		BackgroundSummarySuccess: r.backgroundSummarySuccess.Load(), BackgroundSummaryFailures: r.backgroundSummaryFailures.Load(),
 		MemoryPending: r.memoryPending.Load(), MemoryPendingBytes: r.memoryPendingBytes.Load(), MemoryRunning: r.memoryRunning.Load(), MemorySucceeded: r.memorySucceeded.Load(),

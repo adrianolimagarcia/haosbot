@@ -77,6 +77,8 @@ func TestWebUIResponseCarriesStrictSecurityHeaders(t *testing.T) {
 		"script-src":      "'self'",
 		"style-src":       "'self'",
 		"connect-src":     "'self'",
+		"manifest-src":    "'self'",
+		"worker-src":      "'self'",
 		"base-uri":        "'none'",
 		"form-action":     "'none'",
 		"frame-ancestors": "'none'",
@@ -206,7 +208,7 @@ func TestWebUIAssetsAreServedByTheApplication(t *testing.T) {
 func TestWebUIAssetsAvoidDangerousDOMAPIs(t *testing.T) {
 	h := webUIHandler()
 
-	for _, path := range []string{"/", "/webui/app.js", "/webui-hardening.js"} {
+	for _, path := range []string{"/", "/webui/app.js", "/webui/control.js", "/webui-hardening.js", "/sw.js"} {
 		body := getWebUI(t, h, path).Body.String()
 		for _, forbidden := range []string{
 			"marked.parse(",

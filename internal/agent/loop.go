@@ -303,6 +303,7 @@ type LoopConfig struct {
 	AutoSummarizeMaxTokens   int
 	AutoSummarizeTimeout     time.Duration
 	AutoSummarizeInputTokens int
+	BackgroundMaintenanceDelay time.Duration
 	Model               string
 	MaxTokens           int
 	Temperature         float64
@@ -800,6 +801,13 @@ func (l *Loop) autoSummarizeThreshold(isWeb bool) int {
 	return 0
 }
 
+func (l *Loop) backgroundMaintenanceDelay() time.Duration {
+	if l.cfg.BackgroundMaintenanceDelay > 0 {
+		return l.cfg.BackgroundMaintenanceDelay
+	}
+	return 2 * time.Second
+}
+
 func (l *Loop) summarizeMaxTokens() int {
 	if l.cfg.AutoSummarizeMaxTokens > 0 {
 		return l.cfg.AutoSummarizeMaxTokens
@@ -1102,7 +1110,7 @@ func (l *Loop) scheduleBackgroundSummary(key string, sess sessionTranscript, isW
 
 		// Debounce maintenance so a user sending another prompt immediately
 		// after the answer never collides with transcript compaction.
-		idleTimer := time.NewTimer(2 * time.Second)
+		idleTimer := time.NewTimer(l.backgroundMaintenanceDelay())
 		select {
 		case <-ctx.Done():
 			if !idleTimer.Stop() { <-idleTimer.C }

@@ -23,6 +23,8 @@ import (
 	cronruntime "github.com/adrianolimagarcia/nanobot-go/internal/cron"
 	"github.com/adrianolimagarcia/nanobot-go/internal/memory"
 	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
+	"github.com/adrianolimagarcia/nanobot-go/internal/mcpruntime"
+	"github.com/adrianolimagarcia/nanobot-go/internal/tools/cliapps"
 	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
 	"github.com/adrianolimagarcia/nanobot-go/internal/prompt"
 	"github.com/adrianolimagarcia/nanobot-go/internal/provider"
@@ -112,6 +114,21 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		EnableExec:          cfg.Tools.Exec.Enable,
 		EnableNetwork:       cfg.Tools.Web.Enable,
 	})
+	if cfg.Tools.CliApps.Enable {
+		if execTool, ok := registry.Get("exec"); ok {
+			registry.Register(cliapps.New(cliapps.Options{
+				Workspace: workspace,
+				RunTimeout: time.Duration(cfg.Tools.CliApps.RunTimeout) * time.Second,
+				ExecTool: execTool,
+			}))
+		} else {
+			slog.Warn("CLI Apps enabled but exec capability is disabled; run_cli_app not registered")
+		}
+	}
+	mcpManager := mcpruntime.NewManager(mcpruntime.Options{SSRFWhitelist: append([]string(nil), cfg.Tools.SSRFWhitelist...)})
+	if err := mcpManager.LoadAndRegister(context.Background(), registry, cfg.Tools.MCPServers); err != nil {
+		slog.Warn("some MCP servers were not loaded", "error", err)
+	}
 
 	scheduler := cronruntime.NewService(filepath.Join(config.DefaultDataDir(), "cron", workspaceGraphNamespace(workspace), "jobs.json"), nil)
 	if err := scheduler.Load(); err != nil {
@@ -325,6 +342,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			_ = triggerSvc.Close(shutdownCtx)
 			_ = scheduler.Close(shutdownCtx)
+			_ = mcpManager.Close()
 			projections.Close(shutdownCtx)
 			memoryMDProjection.Close()
 			cancel()

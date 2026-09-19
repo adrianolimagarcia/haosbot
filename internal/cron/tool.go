@@ -31,7 +31,7 @@ func (t *Tool) Description() string {
 }
 
 func (t *Tool) Parameters() json.RawMessage {
-	return json.RawMessage(\`{
+	return json.RawMessage(`{
 		"type":"object",
 		"properties":{
 			"action":{"type":"string","enum":["add","list","remove"]},
@@ -45,19 +45,19 @@ func (t *Tool) Parameters() json.RawMessage {
 		},
 		"required":["action"],
 		"additionalProperties":false
-	}\`)
+	}`)
 }
 
 func (t *Tool) Execute(ctx context.Context, raw json.RawMessage) (tools.Result, error) {
 	var args struct {
-		Action       string \`json:"action"\`
-		Name         string \`json:"name"\`
-		Message      string \`json:"message"\`
-		EverySeconds *int64 \`json:"every_seconds"\`
-		CronExpr     string \`json:"cron_expr"\`
-		TZ           string \`json:"tz"\`
-		At           string \`json:"at"\`
-		JobID        string \`json:"job_id"\`
+		Action       string `json:"action"`
+		Name         string `json:"name"`
+		Message      string `json:"message"`
+		EverySeconds *int64 `json:"every_seconds"`
+		CronExpr     string `json:"cron_expr"`
+		TZ           string `json:"tz"`
+		At           string `json:"at"`
+		JobID        string `json:"job_id"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return tools.Errf("Error: invalid cron arguments: %v", err), nil

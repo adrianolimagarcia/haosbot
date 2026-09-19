@@ -16,54 +16,54 @@ const (
 )
 
 type Schedule struct {
-	Kind    string \`json:"kind"\`
-	AtMS    *int64 \`json:"atMs,omitempty"\`
-	EveryMS *int64 \`json:"everyMs,omitempty"\`
-	Expr    string \`json:"expr,omitempty"\`
-	TZ      string \`json:"tz,omitempty"\`
+	Kind    string `json:"kind"`
+	AtMS    *int64 `json:"atMs,omitempty"`
+	EveryMS *int64 `json:"everyMs,omitempty"`
+	Expr    string `json:"expr,omitempty"`
+	TZ      string `json:"tz,omitempty"`
 }
 
 type Payload struct {
-	Kind           string         \`json:"kind"\`
-	Message        string         \`json:"message"\`
-	SessionKey     string         \`json:"sessionKey,omitempty"\`
-	OriginChannel  string         \`json:"originChannel,omitempty"\`
-	OriginChatID   string         \`json:"originChatId,omitempty"\`
-	OriginMetadata map[string]any \`json:"originMetadata,omitempty"\`
+	Kind           string         `json:"kind"`
+	Message        string         `json:"message"`
+	SessionKey     string         `json:"sessionKey,omitempty"`
+	OriginChannel  string         `json:"originChannel,omitempty"`
+	OriginChatID   string         `json:"originChatId,omitempty"`
+	OriginMetadata map[string]any `json:"originMetadata,omitempty"`
 }
 
 type RunRecord struct {
-	RunAtMS    int64  \`json:"runAtMs"\`
-	Status     string \`json:"status"\`
-	DurationMS int64  \`json:"durationMs"\`
-	Error      string \`json:"error,omitempty"\`
-	RunID      string \`json:"runId,omitempty"\`
+	RunAtMS    int64  `json:"runAtMs"`
+	Status     string `json:"status"`
+	DurationMS int64  `json:"durationMs"`
+	Error      string `json:"error,omitempty"`
+	RunID      string `json:"runId,omitempty"`
 }
 
 type State struct {
-	NextRunAtMS *int64      \`json:"nextRunAtMs,omitempty"\`
-	LastRunAtMS *int64      \`json:"lastRunAtMs,omitempty"\`
-	LastStatus  string      \`json:"lastStatus,omitempty"\`
-	LastError   string      \`json:"lastError,omitempty"\`
-	RunHistory  []RunRecord \`json:"runHistory,omitempty"\`
-	Pending     bool        \`json:"-"\`
+	NextRunAtMS *int64      `json:"nextRunAtMs,omitempty"`
+	LastRunAtMS *int64      `json:"lastRunAtMs,omitempty"`
+	LastStatus  string      `json:"lastStatus,omitempty"`
+	LastError   string      `json:"lastError,omitempty"`
+	RunHistory  []RunRecord `json:"runHistory,omitempty"`
+	Pending     bool        `json:"-"`
 }
 
 type Job struct {
-	ID             string   \`json:"id"\`
-	Name           string   \`json:"name"\`
-	Enabled        bool     \`json:"enabled"\`
-	Schedule       Schedule \`json:"schedule"\`
-	Payload        Payload  \`json:"payload"\`
-	State          State    \`json:"state"\`
-	CreatedAtMS    int64    \`json:"createdAtMs"\`
-	UpdatedAtMS    int64    \`json:"updatedAtMs"\`
-	DeleteAfterRun bool     \`json:"deleteAfterRun,omitempty"\`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Enabled        bool     `json:"enabled"`
+	Schedule       Schedule `json:"schedule"`
+	Payload        Payload  `json:"payload"`
+	State          State    `json:"state"`
+	CreatedAtMS    int64    `json:"createdAtMs"`
+	UpdatedAtMS    int64    `json:"updatedAtMs"`
+	DeleteAfterRun bool     `json:"deleteAfterRun,omitempty"`
 }
 
 type Store struct {
-	Version int   \`json:"version"\`
-	Jobs    []Job \`json:"jobs"\`
+	Version int   `json:"version"`
+	Jobs    []Job `json:"jobs"`
 }
 
 type RunResult struct {

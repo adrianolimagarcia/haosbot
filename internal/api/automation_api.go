@@ -23,13 +23,13 @@ func (s *Server) handleWebUIAutomations(w http.ResponseWriter, r *http.Request) 
 		})
 	case http.MethodPost:
 		var req struct {
-			Name           string               \`json:"name"\`
-			Message        string               \`json:"message"\`
-			SessionKey     string               \`json:"session_key"\`
-			OriginChannel  string               \`json:"origin_channel"\`
-			OriginChatID   string               \`json:"origin_chat_id"\`
-			Schedule       cronruntime.Schedule \`json:"schedule"\`
-			DeleteAfterRun bool                 \`json:"delete_after_run"\`
+			Name           string               `json:"name"`
+			Message        string               `json:"message"`
+			SessionKey     string               `json:"session_key"`
+			OriginChannel  string               `json:"origin_channel"`
+			OriginChatID   string               `json:"origin_chat_id"`
+			Schedule       cronruntime.Schedule `json:"schedule"`
+			DeleteAfterRun bool                 `json:"delete_after_run"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&req); err != nil {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -91,11 +91,11 @@ func (s *Server) handleWebUIAutomation(w http.ResponseWriter, r *http.Request) {
 		writeWebUIJSON(w, job)
 	case http.MethodPatch:
 		var req struct {
-			Name           *string               \`json:"name"\`
-			Enabled        *bool                 \`json:"enabled"\`
-			Schedule       *cronruntime.Schedule \`json:"schedule"\`
-			Message        *string               \`json:"message"\`
-			DeleteAfterRun *bool                 \`json:"delete_after_run"\`
+			Name           *string               `json:"name"`
+			Enabled        *bool                 `json:"enabled"`
+			Schedule       *cronruntime.Schedule `json:"schedule"`
+			Message        *string               `json:"message"`
+			DeleteAfterRun *bool                 `json:"delete_after_run"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&req); err != nil {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)

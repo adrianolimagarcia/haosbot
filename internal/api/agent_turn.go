@@ -87,12 +87,12 @@ func decodeAgentTurnRequest(w http.ResponseWriter, r *http.Request) (string, str
 	if sessionID == "" { sessionID = strings.TrimSpace(r.Header.Get("X-HAOS-Session-ID")) }
 	if !webSessionIDPattern.MatchString(sessionID) {
 		http.Error(w, "Invalid or missing sessionId", http.StatusBadRequest)
-		return "", "", false
+		return "", "", nil, false
 	}
 	message := strings.TrimSpace(req.Message)
 	if message == "" {
 		http.Error(w, "message is required", http.StatusBadRequest)
-		return "", "", false
+		return "", "", nil, false
 	}
 	if len(req.Media) > 8 { http.Error(w, "too many attachments", http.StatusBadRequest); return "", "", nil, false }
 	media := make([]string, 0, len(req.Media))

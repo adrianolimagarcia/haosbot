@@ -522,7 +522,7 @@ func cmdGateway(args []string) error {
 	// ChannelManager only in the gateway runtime (cli/gateway_runtime.py:715)
 	// and starts it as one of the gateway's tasks (:941). `haosbot run` and
 	// `haosbot chat` drive the agent loop directly and never touch a channel.
-	if err := configureSystemAutomations(cfg, webUIWorkspaceForRuntime(cfg), rt.scheduler); err != nil {
+	if err := configureSystemAutomations(cfg, cfg.WorkspacePath(), rt.scheduler); err != nil {
 		return fmt.Errorf("configure system automations: %w", err)
 	}
 	if err := rt.scheduler.Start(); err != nil {

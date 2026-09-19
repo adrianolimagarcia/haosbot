@@ -99,3 +99,49 @@ func TestWebUIAutomationRunNow(t *testing.T) {
 	}
 	t.Fatal("timed out waiting for automation run")
 }
+
+
+func TestWebUIAutomationPendingIsTransientButVisible(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	cfg := config.DefaultConfig()
+	service := cronruntime.NewService(filepath.Join(t.TempDir(), "cron", "jobs.json"),
+		func(ctx context.Context, job cronruntime.Job, runID string) (cronruntime.RunResult, error) {
+			started <- struct{}{}
+			select {
+			case <-block:
+				return cronruntime.RunResult{RunID: runID, Response: "done"}, nil
+			case <-ctx.Done():
+				return cronruntime.RunResult{RunID: runID}, ctx.Err()
+			}
+		})
+	if err := service.Load(); err != nil { t.Fatal(err) }
+	s := NewServer(cfg, nil, nil)
+	s.SetScheduler(service)
+
+	ms := int64(60_000)
+	job, err := service.AddJob(cronruntime.Job{
+		Name: "pending", Schedule: cronruntime.Schedule{Kind: cronruntime.KindEvery, EveryMS: &ms},
+		Payload: cronruntime.Payload{Kind: cronruntime.PayloadAgentTurn, Message: "x", SessionKey: "webui:x", OriginChannel: "webui", OriginChatID: "x"},
+	})
+	if err != nil { t.Fatal(err) }
+	if err := service.RunNow(job.ID, true); err != nil { t.Fatal(err) }
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("executor did not start")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/webui/automation?id="+job.ID, nil)
+	rr := httptest.NewRecorder()
+	s.handleWebUIAutomation(rr, req)
+	if rr.Code != http.StatusOK { t.Fatalf("GET status=%d body=%s", rr.Code, rr.Body.String()) }
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil { t.Fatal(err) }
+	state, _ := payload["state"].(map[string]any)
+	if pending, _ := state["pending"].(bool); !pending {
+		t.Fatalf("pending not visible in API payload: %#v", payload)
+	}
+
+	close(block)
+}

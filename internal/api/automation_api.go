@@ -9,6 +9,28 @@ import (
 	cronruntime "github.com/adrianolimagarcia/nanobot-go/internal/cron"
 )
 
+func automationJobPayload(job cronruntime.Job) map[string]any {
+	raw, _ := json.Marshal(job)
+	var payload map[string]any
+	_ = json.Unmarshal(raw, &payload)
+	state, _ := payload["state"].(map[string]any)
+	if state == nil {
+		state = map[string]any{}
+		payload["state"] = state
+	}
+	state["pending"] = job.State.Pending
+	payload["protected"] = job.Payload.Kind == cronruntime.PayloadSystemEvent
+	return payload
+}
+
+func automationJobsPayload(jobs []cronruntime.Job) []map[string]any {
+	out := make([]map[string]any, 0, len(jobs))
+	for _, job := range jobs {
+		out = append(out, automationJobPayload(job))
+	}
+	return out
+}
+
 func (s *Server) handleWebUIAutomations(w http.ResponseWriter, r *http.Request) {
 	scheduler := s.scheduler.Load()
 	if scheduler == nil {
@@ -19,7 +41,7 @@ func (s *Server) handleWebUIAutomations(w http.ResponseWriter, r *http.Request) 
 	case http.MethodGet:
 		writeWebUIJSON(w, map[string]any{
 			"running": scheduler.Running(),
-			"jobs": scheduler.ListJobs(true),
+			"jobs": automationJobsPayload(scheduler.ListJobs(true)),
 		})
 	case http.MethodPost:
 		var req struct {
@@ -62,7 +84,7 @@ func (s *Server) handleWebUIAutomations(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
-		writeWebUIJSON(w, job)
+		writeWebUIJSON(w, automationJobPayload(job))
 	default:
 		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

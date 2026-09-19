@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -479,8 +480,38 @@ func (s *Store) loadLocked(key string) (*Session, error) {
 	// crash-recovery path for the latency fast path: if the process dies before
 	// background compaction, every acknowledged message is still present.
 	if journal, err := os.ReadFile(s.journalPath(key)); err == nil {
-		if err := sess.consumeRecords(journal); err != nil {
+		journalSess := s.newSession(key)
+		if err := journalSess.consumeRecords(journal); err != nil {
 			return nil, err
+		}
+
+		// If a previous full save replaced the canonical file but failed while
+		// unlinking the journal, the journal begins with messages already at the
+		// end of the canonical transcript. Skip only that exact prefix overlap,
+		// then replay any records appended later by another process.
+		overlap := 0
+		maxOverlap := len(journalSess.messages)
+		if len(sess.messages) < maxOverlap {
+			maxOverlap = len(sess.messages)
+		}
+		for candidate := maxOverlap; candidate > 0; candidate-- {
+			baseStart := len(sess.messages) - candidate
+			matched := true
+			for i := 0; i < candidate; i++ {
+				if !reflect.DeepEqual(sess.messages[baseStart+i], journalSess.messages[i]) {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				overlap = candidate
+				break
+			}
+		}
+		if overlap < len(journalSess.messages) {
+			sess.messages = append(sess.messages, journalSess.messages[overlap:]...)
+			sess.snapshots = append(sess.snapshots, journalSess.snapshots[overlap:]...)
+			sess.rawLines = append(sess.rawLines, journalSess.rawLines[overlap:]...)
 		}
 		sess.journalSize = int64(len(journal))
 		if info, statErr := os.Stat(s.journalPath(key)); statErr == nil {

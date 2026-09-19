@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,5 +47,42 @@ func TestListIncludesJournalOnlySession(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if len(keys) != 1 || keys[0] != key {
 		t.Fatalf("List()=%v, want [%s]", keys, key)
+	}
+}
+
+
+func TestJournalReplaySkipsCanonicalOverlap(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore("", root)
+	key := "webui:journal-overlap-1234567890"
+	sess, err := store.Open(key)
+	if err != nil { t.Fatal(err) }
+
+	first := *core.NewMessage(core.RoleUser, "first")
+	first.Timestamp = "2026-09-19T10:00:00"
+	second := *core.NewMessage(core.RoleAssistant, "second")
+	second.Timestamp = "2026-09-19T10:00:01"
+	if err := sess.AppendMessagesDurable([]core.Message{first, second}); err != nil { t.Fatal(err) }
+	if err := sess.Save(); err != nil { t.Fatal(err) }
+
+	third := *core.NewMessage(core.RoleUser, "third")
+	third.Timestamp = "2026-09-19T10:00:02"
+	var journalBytes bytes.Buffer
+	for _, m := range []core.Message{second, third} {
+		msg := m
+		if err := encodeMessage(&journalBytes, &msg); err != nil { t.Fatal(err) }
+		journalBytes.WriteByte('\n')
+	}
+	if err := os.WriteFile(store.journalPath(key), journalBytes.Bytes(), 0o600); err != nil { t.Fatal(err) }
+
+	fresh := NewStore("", root)
+	reopened, err := fresh.Open(key)
+	if err != nil { t.Fatal(err) }
+	got := reopened.Messages()
+	if len(got) != 3 {
+		t.Fatalf("message count=%d want 3: %#v", len(got), got)
+	}
+	if got[0].Content.Text != "first" || got[1].Content.Text != "second" || got[2].Content.Text != "third" {
+		t.Fatalf("unexpected journal overlap replay: %#v", got)
 	}
 }

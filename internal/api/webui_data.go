@@ -343,23 +343,50 @@ func resolveWebUIWorkspacePath(workspace, rel string) (string, error) {
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
 		root = resolved
 	}
-	target, err := filepath.Abs(filepath.Join(root, filepath.Clean(rel)))
+	within := func(path string) bool {
+		relative, err := filepath.Rel(root, path)
+		return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+	}
+
+	logical, err := filepath.Abs(filepath.Join(root, filepath.Clean(rel)))
 	if err != nil {
 		return "", err
 	}
-	prefix := root + string(os.PathSeparator)
-	if target != root && !strings.HasPrefix(target, prefix) {
+	if !within(logical) {
 		return "", errors.New("path escapes workspace")
 	}
-	// For existing paths, resolve symlinks and re-check containment. This closes
-	// the lexical-containment bypass where workspace/link -> /outside.
-	if resolved, err := filepath.EvalSymlinks(target); err == nil {
-		if resolved != root && !strings.HasPrefix(resolved, prefix) {
-			return "", errors.New("symlink escapes workspace")
+
+	// EvalSymlinks requires the whole path to exist. Walk up until an existing
+	// ancestor is found, resolve that ancestor, then append the missing suffix.
+	probe := logical
+	var suffix []string
+	for {
+		if _, err := os.Lstat(probe); err == nil {
+			resolved, err := filepath.EvalSymlinks(probe)
+			if err != nil {
+				return "", err
+			}
+			if !within(resolved) {
+				return "", errors.New("symlink escapes workspace")
+			}
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			if !within(resolved) {
+				return "", errors.New("path escapes workspace")
+			}
+			return resolved, nil
+		} else if !os.IsNotExist(err) {
+			return "", err
 		}
-		target = resolved
+
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return "", errors.New("workspace path has no existing ancestor")
+		}
+		suffix = append(suffix, filepath.Base(probe))
+		probe = parent
 	}
-	return target, nil
 }
 
 func (s *Server) handleWebUIFilePreview(w http.ResponseWriter, r *http.Request) {

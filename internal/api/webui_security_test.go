@@ -511,3 +511,28 @@ func TestWebUISkillRejectsInvalidNames(t *testing.T) {
 		}
 	}
 }
+
+
+func TestWebUISkillRejectsSymlinkedParentEscape(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(workspace, "skills")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	s := NewServer(cfg, nil, nil)
+
+	body, _ := json.Marshal(map[string]string{
+		"content": "---\nname: escaped\ndescription: no\n---\n# Escape\n",
+	})
+	req := httptest.NewRequest(http.MethodPut, "/api/webui/skill?name=escaped", strings.NewReader(string(body)))
+	rr := httptest.NewRecorder()
+	s.handleWebUISkill(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("symlinked skills root status=%d body=%s want 403", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(outside, "escaped", "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatalf("skill escaped workspace through symlink, stat err=%v", err)
+	}
+}

@@ -26,6 +26,9 @@ var appCSS []byte
 //go:embed webui/tailwind.css
 var tailwindCSS []byte
 
+//go:embed webui/haosbot_mark.png
+var haosbotMarkPNG []byte
+
 // webUIContentSecurityPolicy is the policy sent with the browser shell.
 //
 // It is deliberately strict: no 'unsafe-inline', no 'unsafe-eval' and no remote
@@ -73,6 +76,7 @@ func (s *Server) registerWebUI(mux *http.ServeMux) {
 	serveAsset("/webui/app.js", "application/javascript; charset=utf-8", appJS)
 	serveAsset("/webui/app.css", "text/css; charset=utf-8", appCSS)
 	serveAsset("/webui/tailwind.css", "text/css; charset=utf-8", tailwindCSS)
+	serveAsset("/brand/haosbot_mark.png", "image/png", haosbotMarkPNG)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" && r.URL.Path != "/index.html" {

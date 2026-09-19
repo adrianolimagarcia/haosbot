@@ -1,26 +1,14 @@
 /*
- * Hand-written styles for the Haosbot control center.
+ * HAOSBOT WebUI — nanobot-derived visual shell.
  *
- * Loaded after tailwind.css, which is generated from index.html, app.js and
- * hardening.js (see tailwind.config.js). The utility classes used by the page
- * are the same ones the previous cdn.tailwindcss.com build provided; only the
- * delivery changed, so the layout is unchanged.
- *
- * This file also styles the markup produced by the server-side Markdown
- * renderer (internal/api/markdown.go): h1-h6, p, ul, ol, li, blockquote, pre,
- * code, a, hr, strong, em.
+ * The layout deliberately mirrors nanobot's compact sidebar, restrained
+ * surfaces and centered composer while keeping HAOSBOT's native Go endpoints.
+ * The HAOSBOT mark is rendered inside the same 32x32 brand slot used by
+ * nanobot. Its original aspect ratio is never cropped or stretched.
  */
 
-/* The inline SVG sprite is a definition container, never rendered itself. */
-.icon-sprite {
-  display: none;
-}
+.icon-sprite { display: none; }
 
-/*
- * Replaces Font Awesome's font glyphs. Tailwind's preflight makes bare <svg>
- * elements block-level, so the display/vertical-align of the old <i> glyphs is
- * restored here.
- */
 .icon {
   display: inline-block;
   width: 1em;
@@ -32,81 +20,417 @@
 
 :root {
   --bg-main: #ffffff;
-  --bg-sidebar: #fbfbfb;
-  --border-color: #eaeaea;
-  --text-main: #1f2328;
-  --text-muted: #656d76;
-  --card-bg: #f6f8fa;
+  --bg-sidebar: #f7f7f8;
+  --bg-elevated: #ffffff;
+  --bg-hover: rgba(0, 0, 0, 0.055);
+  --bg-selected: rgba(0, 0, 0, 0.075);
+  --border-color: rgba(0, 0, 0, 0.09);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --text-main: #18181b;
+  --text-muted: #71717a;
+  --text-faint: #a1a1aa;
+  --sidebar-width: 272px;
+  --sidebar-rail: 56px;
+  --content-max: 780px;
 }
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
 
 body {
-  background-color: var(--bg-main);
+  margin: 0;
+  background: var(--bg-main);
   color: var(--text-main);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
+button, input, textarea, select { font: inherit; }
+
+button { -webkit-tap-highlight-color: transparent; }
+
 .sidebar {
-  background-color: var(--bg-sidebar);
+  width: var(--sidebar-width) !important;
+  min-width: var(--sidebar-width);
+  background: var(--bg-sidebar);
   border-right: 1px solid var(--border-color);
+  transition: width 160ms ease, min-width 160ms ease;
 }
+
+.sidebar.is-collapsed {
+  width: var(--sidebar-rail) !important;
+  min-width: var(--sidebar-rail);
+}
+
+.sidebar.is-collapsed > div > :not(.haosbot-brand-row) { display: none !important; }
+.sidebar.is-collapsed .haosbot-brand-row { justify-content: center; padding-inline: 12px; }
+.sidebar.is-collapsed .haosbot-brand-actions { display: none; }
+
+.haosbot-brand-row {
+  display: flex;
+  min-height: 60px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 10px 8px 16px;
+}
+
+.haosbot-brand-mark {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 10px;
+}
+
+.haosbot-brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 32px;
+  max-height: 32px;
+  object-fit: contain;
+  object-position: center;
+  user-select: none;
+}
+
+.haosbot-brand-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.haosbot-icon-button,
+.thread-icon-button {
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #52525b;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.haosbot-icon-button:hover,
+.thread-icon-button:hover { background: var(--bg-hover); color: #18181b; }
+
+.haosbot-new-chat {
+  border: 1px solid var(--border-color);
+  background: rgba(255,255,255,.82);
+  box-shadow: 0 1px 1px rgba(0,0,0,.025);
+}
+
+.nanobot-utility-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 8px 8px;
+}
+
+.sidebar-action {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #52525b;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-action .icon { width: 16px; height: 16px; color: #71717a; }
+.sidebar-action:hover { background: var(--bg-hover); color: #18181b; }
+
+.sidebar-session-area {
+  padding: 10px 8px 14px !important;
+}
+
+.sidebar-session-area > div:first-child > div:first-child {
+  padding-inline: 9px !important;
+  margin-bottom: 6px !important;
+  color: #a1a1aa !important;
+  font-size: 10px !important;
+  letter-spacing: .08em !important;
+}
+
+#recent-session-item {
+  border: 0 !important;
+  border-radius: 10px !important;
+  background: var(--bg-selected) !important;
+  padding: 9px 10px !important;
+  box-shadow: none !important;
+}
+
+#recent-session-item:hover { background: rgba(0,0,0,.09) !important; }
+
+.sidebar-bottom {
+  background: transparent !important;
+  border-top: 0 !important;
+  padding: 8px 10px 12px !important;
+}
+
+.sidebar-bottom button {
+  min-height: 34px;
+  border-radius: 9px;
+  padding: 7px 9px !important;
+}
+
+.sidebar-bottom button:hover { background: var(--bg-hover); }
+
+main {
+  background: var(--bg-main) !important;
+}
+
+.thread-header {
+  height: 52px;
+  flex: 0 0 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px 0 16px;
+  background: rgba(255,255,255,.94);
+  border-bottom: 0;
+  z-index: 10;
+}
+
+.thread-header-left,
+.thread-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.thread-title-wrap {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.thread-title {
+  max-width: 46vw;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  font-weight: 600;
+  color: #27272a;
+}
+
+.thread-subtitle {
+  color: #a1a1aa;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .08em;
+}
+
+.gateway-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #71717a;
+  font-size: 11px;
+}
+
+.gateway-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #22c55e;
+  box-shadow: 0 0 0 2px rgba(34,197,94,.12);
+}
+
+#messages-container {
+  max-width: var(--content-max) !important;
+  padding: 28px 22px 32px !important;
+  margin-inline: auto !important;
+  width: 100% !important;
+}
+
+.haosbot-welcome {
+  min-height: 190px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--text-muted);
+  padding: 16px;
+}
+
+.haosbot-welcome-mark {
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  margin-bottom: 16px;
+  border-radius: 16px;
+}
+
+.haosbot-welcome-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 56px;
+  max-height: 56px;
+  object-fit: contain;
+  object-position: center;
+  user-select: none;
+}
+
+.haosbot-welcome h1 {
+  margin: 0;
+  color: #27272a;
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 600;
+  letter-spacing: -.025em;
+}
+
+.haosbot-welcome p {
+  max-width: 520px;
+  margin: 9px 0 0;
+  color: #8a8a93;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+#chat-stream {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 22px !important;
+}
+
+.haosbot-user-bubble {
+  max-width: min(80%, 620px) !important;
+  border: 0 !important;
+  background: #f1f1f3 !important;
+  color: #27272a !important;
+  border-radius: 18px !important;
+  padding: 10px 14px !important;
+  line-height: 1.55;
+  box-shadow: none !important;
+}
+
+.haosbot-assistant-message {
+  width: 100%;
+  padding: 2px 0 4px;
+}
+
+.haosbot-message-meta {
+  margin-bottom: 7px;
+  color: #a1a1aa !important;
+}
+
+.haosbot-message-meta .font-semibold {
+  color: #71717a !important;
+  font-weight: 600 !important;
+}
+
+footer {
+  border-top: 0 !important;
+  background: linear-gradient(to top, #fff 78%, rgba(255,255,255,.92)) !important;
+  padding: 8px 18px 18px !important;
+}
+
+footer > div {
+  max-width: var(--content-max) !important;
+  margin-inline: auto !important;
+}
+
+footer .border.border-gray-200.rounded-xl {
+  border: 1px solid var(--border-strong) !important;
+  border-radius: 22px !important;
+  padding: 11px 13px !important;
+  box-shadow: 0 1px 2px rgba(0,0,0,.035), 0 8px 30px rgba(0,0,0,.025) !important;
+}
+
+#user-input {
+  min-height: 48px;
+  max-height: 180px;
+  padding: 4px 2px 2px;
+  line-height: 1.55;
+  color: #27272a !important;
+  font-size: 14px !important;
+}
+
+#send-button {
+  background: #18181b !important;
+  width: 30px !important;
+  height: 30px !important;
+  box-shadow: none !important;
+}
+
+#send-button:hover { background: #3f3f46 !important; }
+
+#token-indicator { color: #a1a1aa; }
 
 .badge {
   display: inline-flex;
   align-items: center;
-  padding: 0.2rem 0.6rem;
-  border-radius: 6px;
-  font-size: 0.75rem;
-  border: 1px solid #e5e7eb;
-  background-color: #f9fafb;
+  padding: .2rem .55rem;
+  border-radius: 999px;
+  font-size: .72rem;
+  border: 1px solid var(--border-color);
+  background: #fafafa;
 }
 
-/* Prose styling */
-.prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 {
-  color: #111827;
-  font-weight: 700;
+#settings-dialog > div {
+  border-radius: 18px !important;
+  border: 1px solid var(--border-color) !important;
+  box-shadow: 0 24px 80px rgba(0,0,0,.18) !important;
+}
+
+/* Safe server-rendered Markdown */
+.prose h1,.prose h2,.prose h3,.prose h4,.prose h5,.prose h6 {
+  color: #18181b;
+  font-weight: 650;
   margin-top: 1.2rem;
-  margin-bottom: 0.6rem;
+  margin-bottom: .6rem;
+  letter-spacing: -.015em;
 }
-.prose h3 { font-size: 1.25rem; }
+.prose h3 { font-size: 1.2rem; }
 .prose h4 { font-size: 1.05rem; }
-.prose h5 { font-size: 0.95rem; }
-.prose h6 { font-size: 0.9rem; }
-.prose p { margin-bottom: 0.75rem; line-height: 1.625; color: #1f2937; }
-.prose ul { list-style-type: disc; padding-left: 1.25rem; margin-bottom: 0.75rem; }
-.prose ol { list-style-type: decimal; padding-left: 1.25rem; margin-bottom: 0.75rem; }
-.prose li { margin-bottom: 0.35rem; }
-.prose a { color: #0969da; text-decoration: underline; }
-.prose blockquote {
-  border-left: 3px solid #e5e7eb;
-  padding-left: 0.75rem;
-  margin: 0.75rem 0;
-  color: #4b5563;
-}
-.prose hr {
-  border: 0;
-  border-top: 1px solid #e5e7eb;
-  margin: 1rem 0;
-}
-.prose code {
-  background-color: #f3f4f6;
-  padding: 0.2rem 0.4rem;
-  border-radius: 4px;
-  font-size: 0.85em;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  color: #1f2937;
-}
-.prose pre {
-  background-color: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 1rem;
-  overflow-x: auto;
-  margin: 0.75rem 0;
-}
-.prose pre code {
-  background-color: transparent;
-  padding: 0;
-  font-size: 0.85rem;
-  color: #1f2937;
+.prose h5 { font-size: .95rem; }
+.prose h6 { font-size: .9rem; }
+.prose p { margin-bottom: .78rem; line-height: 1.65; color: #27272a; }
+.prose ul { list-style: disc; padding-left: 1.25rem; margin-bottom: .8rem; }
+.prose ol { list-style: decimal; padding-left: 1.25rem; margin-bottom: .8rem; }
+.prose li { margin-bottom: .32rem; }
+.prose a { color: #2563eb; text-decoration: underline; text-underline-offset: 2px; }
+.prose blockquote { border-left: 2px solid #d4d4d8; padding-left: .8rem; margin: .8rem 0; color: #52525b; }
+.prose hr { border: 0; border-top: 1px solid #e4e4e7; margin: 1rem 0; }
+.prose code { background: #f4f4f5; padding: .15rem .35rem; border-radius: 5px; font-size: .86em; font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; color: #27272a; }
+.prose pre { background: #f7f7f8; border: 1px solid #e4e4e7; border-radius: 12px; padding: .95rem 1rem; overflow-x: auto; margin: .8rem 0; }
+.prose pre code { background: transparent; padding: 0; font-size: .85rem; }
+
+@media (max-width: 760px) {
+  :root { --sidebar-width: min(272px, 82vw); }
+  .sidebar { position: relative; z-index: 25; }
+  .sidebar.is-collapsed { width: 0 !important; min-width: 0; border-right: 0; overflow: hidden; }
+  .sidebar.is-collapsed .haosbot-brand-row { display: none !important; }
+  .gateway-status { display: none; }
+  .thread-subtitle { display: none; }
+  #messages-container { padding-inline: 14px !important; }
+  footer { padding-inline: 10px !important; }
+  footer .flex.items-center.space-x-3.text-gray-500 > :nth-child(2),
+  footer .flex.items-center.space-x-3.text-gray-500 > :nth-child(3) { display: none; }
 }

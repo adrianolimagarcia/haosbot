@@ -3,7 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Haosbot - Control Center</title>
+  <title>HAOSBOT</title>
+  <meta name="theme-color" content="#ffffff">
+  <meta name="description" content="HAOSBOT WebUI — autonomous agent workspace.">
+  <link rel="icon" type="image/png" href="/brand/haosbot_mark.png">
+  <link rel="apple-touch-icon" href="/brand/haosbot_mark.png">
   <link rel="stylesheet" href="/webui/tailwind.css">
   <link rel="stylesheet" href="/webui/app.css">
 </head>
@@ -44,52 +48,44 @@
   <!-- Left Sidebar -->
   <aside class="sidebar w-64 flex flex-col justify-between flex-shrink-0 z-20">
     <div class="flex flex-col h-full">
-      <!-- Top Action Buttons -->
-      <div class="p-3 space-y-1">
-        <button data-action="new-session" class="w-full flex items-center justify-start space-x-2 px-3 py-2 rounded-lg text-gray-700 hover:bg-gray-100 transition text-sm font-medium border border-gray-200 bg-white shadow-sm">
-          <svg class="icon text-xs text-gray-500" aria-hidden="true"><use href="#i-plus"></use></svg>
-          <span>Novo chat</span>
-        </button>
-        <button data-action="focus-search" class="w-full flex items-center justify-start space-x-2 px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition text-xs">
-          <svg class="icon text-xs text-gray-400" aria-hidden="true"><use href="#i-magnifying-glass"></use></svg>
-          <span>Pesquisar</span>
-        </button>
-        <button data-action="switch-tab" data-tab="devices" class="w-full flex items-center justify-start space-x-2 px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition text-xs">
-          <svg class="icon text-xs text-gray-400" aria-hidden="true"><use href="#i-diagram-project"></use></svg>
-          <span>Conexões de dispositivos</span>
-        </button>
-        <button data-action="switch-tab" data-tab="skills" class="w-full flex items-center justify-start space-x-2 px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition text-xs">
-          <svg class="icon text-xs text-gray-400" aria-hidden="true"><use href="#i-robot"></use></svg>
-          <span>Gerenciamento de agentes</span>
-        </button>
-        <button data-action="open-settings" class="w-full flex items-center justify-start space-x-2 px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition text-xs">
-          <svg class="icon text-xs text-gray-400" aria-hidden="true"><use href="#i-sun"></use></svg>
-          <span>Modelos &amp; Endpoints</span>
-        </button>
-        <button data-action="open-settings" class="w-full flex items-center justify-start space-x-2 px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition text-xs">
-          <svg class="icon text-xs text-gray-400" aria-hidden="true"><use href="#i-arrow-up-right-from-square"></use></svg>
-          <span>API Relay (Gateway)</span>
-        </button>
+      <div class="haosbot-brand-row">
+        <div class="haosbot-brand-mark" title="HAOSBOT">
+          <img src="/brand/haosbot_mark.png" alt="HAOSBOT" draggable="false">
+        </div>
+        <div class="haosbot-brand-actions">
+          <button data-action="focus-search" class="haosbot-icon-button" title="Pesquisar" aria-label="Pesquisar">
+            <svg class="icon" aria-hidden="true"><use href="#i-magnifying-glass"></use></svg>
+          </button>
+          <button data-action="new-session" class="haosbot-icon-button haosbot-new-chat" title="Novo chat" aria-label="Novo chat">
+            <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
+          </button>
+          <button data-action="toggle-sidebar" class="haosbot-icon-button" title="Recolher barra lateral" aria-label="Recolher barra lateral">
+            <svg class="icon" aria-hidden="true"><use href="#i-window-maximize"></use></svg>
+          </button>
+        </div>
       </div>
-
-      <!-- Profile Selector & Channels Row -->
-      <div class="px-3 py-2 border-t border-b border-gray-200 bg-gray-50/50">
-        <div class="flex items-center justify-between text-xs text-gray-500 mb-2 px-1">
-          <div class="flex items-center space-x-3">
-            <svg class="icon text-gray-700 cursor-pointer" role="img"><title>Chat</title><use href="#i-comment"></use></svg>
-            <svg class="icon text-gray-400 hover:text-gray-700 cursor-pointer" role="img"><title>Perfis</title><use href="#i-users"></use></svg>
-            <svg class="icon text-gray-400 hover:text-gray-700 cursor-pointer" role="img"><title>Grafo</title><use href="#i-share-nodes"></use></svg>
-            <svg class="icon text-gray-400 hover:text-gray-700 cursor-pointer" role="img"><title>Histórico</title><use href="#i-clock"></use></svg>
-          </div>
-        </div>
-        <div class="flex items-center justify-between bg-white border border-gray-200 rounded-md px-2.5 py-1 text-xs cursor-pointer shadow-sm">
-          <span class="text-gray-700 font-medium">Todos os perfis</span>
-          <svg class="icon text-[10px] text-gray-400" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
-        </div>
+      <!-- Top Action Buttons -->
+      <div class="nanobot-utility-nav">
+        <button data-action="switch-tab" data-tab="devices" class="sidebar-action">
+          <svg class="icon" aria-hidden="true"><use href="#i-diagram-project"></use></svg>
+          <span>Conexões</span>
+        </button>
+        <button data-action="switch-tab" data-tab="skills" class="sidebar-action">
+          <svg class="icon" aria-hidden="true"><use href="#i-robot"></use></svg>
+          <span>Agentes &amp; Skills</span>
+        </button>
+        <button data-action="open-settings" class="sidebar-action">
+          <svg class="icon" aria-hidden="true"><use href="#i-sun"></use></svg>
+          <span>Modelos</span>
+        </button>
+        <button data-action="open-settings" class="sidebar-action">
+          <svg class="icon" aria-hidden="true"><use href="#i-arrow-up-right-from-square"></use></svg>
+          <span>Gateway</span>
+        </button>
       </div>
 
       <!-- Recentes List -->
-      <div class="flex-1 overflow-y-auto px-2 py-2 space-y-3">
+      <div class="sidebar-session-area flex-1 overflow-y-auto px-2 py-2 space-y-3">
         <div>
           <div class="flex items-center justify-between px-2 text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1">
             <span>Recentes</span>
@@ -130,7 +126,7 @@
       </div>
 
       <!-- Bottom Settings Button -->
-      <div class="p-3 border-t border-gray-200 bg-white">
+      <div class="sidebar-bottom p-3">
         <button data-action="open-settings" class="w-full flex items-center space-x-2 text-xs text-gray-600 hover:text-black py-1 px-1 transition">
           <svg class="icon text-gray-500" aria-hidden="true"><use href="#i-gear"></use></svg>
           <span class="font-medium">Configurações</span>
@@ -143,20 +139,19 @@
   <main class="flex-1 flex flex-col h-full bg-white relative overflow-hidden">
     
     <!-- Top Header Bar -->
-    <header class="h-12 border-b border-gray-200 flex items-center justify-between px-6 bg-white z-10">
-      <div class="flex items-center space-x-3 text-xs text-gray-700">
-        <svg class="icon text-gray-400" aria-hidden="true"><use href="#i-table-cells-large"></use></svg>
-        <span id="header-chat-title" class="font-semibold text-gray-900 truncate max-w-lg">Haosbot Autônomo - Gateway Online</span>
-        <span class="badge text-gray-500 flex items-center space-x-1">
-          <svg class="icon text-gray-400" aria-hidden="true"><use href="#i-folder"></use></svg>
-          <span>workspace</span>
-        </span>
-      </div>
-      <div class="flex items-center space-x-3 text-gray-400">
-        <button data-action="toggle-sidebar" class="hover:text-gray-700" title="Expandir/Recolher">
-          <svg class="icon" aria-hidden="true"><use href="#i-window-maximize"></use></svg>
+    <header class="thread-header">
+      <div class="thread-header-left">
+        <button data-action="toggle-sidebar" class="thread-icon-button" title="Alternar barra lateral" aria-label="Alternar barra lateral">
+          <svg class="icon" aria-hidden="true"><use href="#i-table-cells-large"></use></svg>
         </button>
-        <button data-action="open-settings" class="hover:text-gray-700">
+        <div class="thread-title-wrap">
+          <span id="header-chat-title" class="thread-title">Novo chat</span>
+          <span class="thread-subtitle">HAOSBOT</span>
+        </div>
+      </div>
+      <div class="thread-header-right">
+        <span class="gateway-status"><span class="gateway-status-dot"></span>Gateway online</span>
+        <button data-action="open-settings" class="thread-icon-button" title="Configurações" aria-label="Configurações">
           <svg class="icon" aria-hidden="true"><use href="#i-ellipsis"></use></svg>
         </button>
       </div>
@@ -165,20 +160,14 @@
     <!-- Chat Messages Scroll Area -->
     <div id="messages-container" class="flex-1 overflow-y-auto px-8 py-6 max-w-4xl mx-auto w-full space-y-6">
       
-      <!-- Badges / Metrics Header Row -->
-      <div class="flex items-center space-x-2 text-xs">
-        <span class="badge font-medium text-gray-700">entidades / relações</span>
-        <span class="badge text-gray-500">15167 / 31619</span>
-        <span class="badge font-semibold text-gray-900 bg-gray-100">RSS &lt; 10 MB (Go)</span>
-      </div>
-
-      <!-- Welcome Banner -->
-      <div class="prose max-w-none">
-        <h3 class="text-xl font-bold text-gray-900">1. Haosbot Gateway Conectado</h3>
-        <p class="text-gray-700">
-          Ambiente em execução nativa com suporte completo a comandos slash (<code class="text-xs">/status</code>, <code class="text-xs">/skills</code>, <code class="text-xs">/model</code>, <code class="text-xs">/new</code>), CPython Minimal com SQLite integrado e persistência em <code class="text-xs">~/.haosbot/</code>.
-        </p>
-      </div>
+      <!-- Welcome state -->
+      <section class="haosbot-welcome" aria-label="HAOSBOT">
+        <div class="haosbot-welcome-mark">
+          <img src="/brand/haosbot_mark.png" alt="" draggable="false">
+        </div>
+        <h1>Como posso ajudar?</h1>
+        <p>HAOSBOT está conectado ao seu workspace e pronto para usar agentes, tools, memória e automações.</p>
+      </section>
 
       <!-- Message History Render Container -->
       <div id="chat-stream" class="space-y-6"></div>
@@ -197,7 +186,7 @@
 
         <!-- Clean Textarea Box -->
         <div class="border border-gray-200 rounded-xl p-3 bg-white shadow-sm focus-within:border-gray-400 transition">
-          <textarea id="user-input" rows="2" placeholder="Digite uma mensagem... (Enter para enviar, Shift+Enter para nova linha)"
+          <textarea id="user-input" rows="2" placeholder="Mensagem para o HAOSBOT…"
             class="w-full resize-none outline-none text-sm text-gray-800 placeholder-gray-400 bg-transparent"
             data-role="composer"></textarea>
           
@@ -242,7 +231,7 @@
   <div id="settings-dialog" class="fixed inset-0 bg-black/40 backdrop-blur-xs hidden flex items-center justify-center p-4 z-50">
     <div class="bg-white border border-gray-200 rounded-xl max-w-lg w-full p-6 space-y-4 shadow-xl text-sm">
       <div class="flex justify-between items-center border-b border-gray-100 pb-3">
-        <h3 class="font-semibold text-gray-900 text-base">Modelos &amp; Endpoint LLM Externo</h3>
+        <h3 class="font-semibold text-gray-900 text-base">HAOSBOT · Modelos &amp; Endpoint</h3>
         <button data-action="close-settings" class="text-gray-400 hover:text-gray-700 text-lg">&times;</button>
       </div>
 

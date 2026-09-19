@@ -62,20 +62,20 @@
     if (kind === 'user') {
       wrapper.className = 'flex justify-end';
       const bubble = document.createElement('div');
-      bubble.className = 'bg-gray-100 text-gray-900 px-4 py-2.5 rounded-2xl max-w-xl text-sm border border-gray-200 whitespace-pre-wrap';
+      bubble.className = 'haosbot-user-bubble bg-gray-100 text-gray-900 px-4 py-2.5 rounded-2xl max-w-xl text-sm border border-gray-200 whitespace-pre-wrap';
       bubble.textContent = text;
       wrapper.appendChild(bubble);
     } else if (kind === 'error') {
       wrapper.className = 'p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-xs whitespace-pre-wrap';
       wrapper.textContent = text;
     } else {
-      wrapper.className = 'space-y-2';
+      wrapper.className = 'haosbot-assistant-message space-y-2';
 
       const top = document.createElement('div');
-      top.className = 'flex items-center justify-between text-[11px] text-gray-400';
+      top.className = 'haosbot-message-meta flex items-center justify-between text-[11px] text-gray-400';
       const label = document.createElement('span');
       label.className = 'font-semibold text-gray-600';
-      label.textContent = 'TEXT';
+      label.textContent = 'HAOSBOT';
       const copy = document.createElement('button');
       copy.className = 'hover:text-black';
       copy.textContent = 'Copiar';
@@ -126,12 +126,12 @@
 
   function appendStreamingMessage(stream) {
     const wrapper = document.createElement('div');
-    wrapper.className = 'space-y-2';
+    wrapper.className = 'haosbot-assistant-message space-y-2';
     const top = document.createElement('div');
-    top.className = 'flex items-center justify-between text-[11px] text-gray-400';
+    top.className = 'haosbot-message-meta flex items-center justify-between text-[11px] text-gray-400';
     const label = document.createElement('span');
     label.className = 'font-semibold text-gray-600';
-    label.textContent = 'TEXT';
+    label.textContent = 'HAOSBOT';
     top.appendChild(label);
     const body = document.createElement('div');
     body.className = 'prose max-w-none text-gray-800 text-sm whitespace-pre-wrap';

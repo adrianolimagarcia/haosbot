@@ -122,18 +122,37 @@ func IsExclusive(t Tool) bool {
 	return false
 }
 
-type sessionKeyContextKey struct{}
+type requestRouteContextKey struct{}
 
-// WithSessionKey attaches the current agent session to tool execution without
-// exposing it as a model-controlled argument.
-func WithSessionKey(ctx context.Context, key string) context.Context {
-	return context.WithValue(ctx, sessionKeyContextKey{}, key)
+type RequestRoute struct {
+	SessionKey string
+	Channel    string
+	ChatID     string
+	Metadata   map[string]any
 }
 
-// SessionKeyFromContext returns the active session supplied by the runner.
+func WithRequestRoute(ctx context.Context, route RequestRoute) context.Context {
+	if len(route.Metadata) > 0 {
+		copyMeta := make(map[string]any, len(route.Metadata))
+		for k, v := range route.Metadata {
+			copyMeta[k] = v
+		}
+		route.Metadata = copyMeta
+	}
+	return context.WithValue(ctx, requestRouteContextKey{}, route)
+}
+
+func RequestRouteFromContext(ctx context.Context) RequestRoute {
+	route, _ := ctx.Value(requestRouteContextKey{}).(RequestRoute)
+	return route
+}
+
+func WithSessionKey(ctx context.Context, key string) context.Context {
+	return WithRequestRoute(ctx, RequestRoute{SessionKey: key})
+}
+
 func SessionKeyFromContext(ctx context.Context) string {
-	key, _ := ctx.Value(sessionKeyContextKey{}).(string)
-	return key
+	return RequestRouteFromContext(ctx).SessionKey
 }
 
 // ---------------------------------------------------------------------------

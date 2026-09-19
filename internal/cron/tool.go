@@ -106,8 +106,13 @@ func (t *Tool) Execute(ctx context.Context, raw json.RawMessage) (tools.Result, 
 		if message == "" {
 			return tools.Errf("Error: message is required when action='add'"), nil
 		}
-		sessionKey := tools.SessionKeyFromContext(ctx)
-		channel, chatID := splitSessionKey(sessionKey)
+		route := tools.RequestRouteFromContext(ctx)
+		sessionKey := strings.TrimSpace(route.SessionKey)
+		channel := strings.TrimSpace(route.Channel)
+		chatID := strings.TrimSpace(route.ChatID)
+		if channel == "" || chatID == "" {
+			channel, chatID = splitSessionKey(sessionKey)
+		}
 		if sessionKey == "" || channel == "" || chatID == "" {
 			return tools.Errf("Error: scheduled jobs must be created from a chat session"), nil
 		}
@@ -129,6 +134,7 @@ func (t *Tool) Execute(ctx context.Context, raw json.RawMessage) (tools.Result, 
 			Payload: Payload{
 				Kind: PayloadAgentTurn, Message: message,
 				SessionKey: sessionKey, OriginChannel: channel, OriginChatID: chatID,
+				OriginMetadata: persistableMetadata(route.Metadata),
 			},
 		})
 		if err != nil {
@@ -175,6 +181,25 @@ func (t *Tool) scheduleFromArgs(every *int64, expr, tz, at string) (Schedule, bo
 	default:
 		return Schedule{}, false, fmt.Errorf("either every_seconds, cron_expr, or at is required")
 	}
+}
+
+func persistableMetadata(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			continue
+		}
+		var detached any
+		if err := json.Unmarshal(raw, &detached); err != nil {
+			continue
+		}
+		out[key] = detached
+	}
+	return out
 }
 
 func splitSessionKey(key string) (string, string) {

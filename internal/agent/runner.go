@@ -175,8 +175,11 @@ type RunSpec struct {
 	// MaxParallelTools bounds parallel tool goroutines. Zero means unlimited.
 	MaxParallelTools int
 
-	// SessionKey identifies the session, for diagnostics.
+	// SessionKey identifies the session, for diagnostics and tool routing.
 	SessionKey string
+	Channel    string
+	ChatID     string
+	Metadata   map[string]any
 	// Hook observes progress.
 	Hook Hook
 	// Metrics receives allocation-light latency observations when configured.
@@ -957,7 +960,7 @@ func (r *Runner) runOne(
 	hook Hook,
 ) core.ToolResult {
 	hook.OnToolStart(ctx, call)
-	res := spec.Tools.Execute(tools.WithSessionKey(ctx, spec.SessionKey), call)
+	res := spec.Tools.Execute(tools.WithRequestRoute(ctx, tools.RequestRoute{SessionKey: spec.SessionKey, Channel: spec.Channel, ChatID: spec.ChatID, Metadata: spec.Metadata}), call)
 	// NOTE: no truncation here. The reference bounds tool results only inside
 	// normalize_tool_result (context_governance.py:709), which offloads to the
 	// workspace when one exists. Truncating here as well would destroy the

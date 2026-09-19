@@ -653,6 +653,9 @@ func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook
 		ReasoningEffort:     l.cfg.ReasoningEffort,
 		ConcurrentTools:     l.cfg.ConcurrentTools,
 		SessionKey:          key,
+		Channel:             msg.Channel,
+		ChatID:              msg.ChatID,
+		Metadata:            msg.Metadata,
 		Hook:                hook,
 		Metrics:             l.cfg.Metrics,
 	})

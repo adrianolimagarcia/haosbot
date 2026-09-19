@@ -84,6 +84,10 @@ type transcriptJournalAppender interface {
 	AppendMessagesDurable([]core.Message) error
 }
 
+type transcriptJournalCompactor interface {
+	CompactJournal(minBytes int64) error
+}
+
 func persistTranscriptMessages(t Transcript, messages []core.Message) error {
 	if len(messages) == 0 {
 		return nil

@@ -27,6 +27,7 @@ const (
 	workspaceMigrationLock = ".workspace-migration.lock"
 	workspaceMarkerName    = ".workspace"
 	sessionSuffix          = ".jsonl"
+	journalSuffix          = ".journal.jsonl"
 	checkpointSuffix       = ".checkpoint.json"
 	migrationLockTimeout   = 30 * time.Second
 	sessionCacheMaxEntries = 4
@@ -176,6 +177,14 @@ func (s *Store) checkpointPath(key string) string {
 	return filepath.Join(s.dir, StorageKey(key)+checkpointSuffix)
 }
 
+// journalPath is the append-only fast-path sidecar. Normal interactive turns
+// append only the new records here; a background full Save compacts the journal
+// back into the canonical JSONL. The sidecar is intentionally private to the Go
+// runtime and is replayed before a session is returned.
+func (s *Store) journalPath(key string) string {
+	return filepath.Join(s.dir, StorageKey(key)+journalSuffix)
+}
+
 // legacyLossyPath returns the retired in-directory path for a key. It is only
 // ever unlinked (manager.py:1032-1033, :1410-1416); it is never read or
 // written.
@@ -210,7 +219,15 @@ func (s *Store) Open(key string) (*Session, error) {
 			return fmt.Errorf("session: stat %s: %w", path, statErr)
 		}
 		_, checkpointErr := os.Stat(s.checkpointPath(key))
-		if checkpointErr != nil && os.IsNotExist(checkpointErr) {
+		_, journalErr := os.Stat(s.journalPath(key))
+		journalExists := journalErr == nil
+		if journalErr != nil && !os.IsNotExist(journalErr) {
+			return fmt.Errorf("session: stat journal: %w", journalErr)
+		}
+		// A cached session is safe only when there is no un-compacted journal.
+		// A journal may have been written by a previous process instance, so
+		// always replay it from disk before serving the session.
+		if checkpointErr != nil && os.IsNotExist(checkpointErr) && !journalExists {
 			if cached, ok := s.cachedSession(key, exists, info); ok {
 				sess = cached
 				return nil
@@ -221,7 +238,11 @@ func (s *Store) Open(key string) (*Session, error) {
 			return err
 		}
 		sess = loaded
-		s.rememberSession(key, loaded, exists, info)
+		if journalExists {
+			s.forgetSession(key)
+		} else {
+			s.rememberSession(key, loaded, exists, info)
+		}
 		return nil
 	})
 	if err != nil {
@@ -252,31 +273,56 @@ func (s *Store) List() ([]string, error) {
 			key     string
 			updated string
 		}
-		rows := make([]row, 0, len(entries))
+		byKey := make(map[string]row, len(entries))
 		for _, entry := range entries {
 			name := entry.Name()
-			// Python's glob("*.jsonl") does not match dotfiles, which keeps
-			// temp files and the lock file out of the listing.
-			if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, sessionSuffix) {
+			if strings.HasPrefix(name, ".") || entry.IsDir() {
 				continue
 			}
-			if entry.IsDir() {
-				// glob would match a directory here and the reference would
-				// then fail with IsADirectoryError (spec §12 item 27); skipping
-				// is the deliberate, documented divergence.
+
+			// Canonical session file.
+			if strings.HasSuffix(name, sessionSuffix) && !strings.HasSuffix(name, journalSuffix) {
+				stem := strings.TrimSuffix(name, sessionSuffix)
+				key, ok := SessionKeyFromStem(stem)
+				if !ok {
+					continue
+				}
+				updated, ok := s.firstRecordUpdatedAt(filepath.Join(s.dir, name), key)
+				if !ok {
+					continue
+				}
+				byKey[key] = row{key: key, updated: updated}
 				continue
 			}
-			stem := strings.TrimSuffix(name, sessionSuffix)
-			key, ok := SessionKeyFromStem(stem)
-			if !ok {
-				continue
+
+			// Journal-only sessions must remain discoverable before the
+			// background compactor has produced the canonical JSONL.
+			if strings.HasSuffix(name, journalSuffix) {
+				stem := strings.TrimSuffix(name, journalSuffix)
+				key, ok := SessionKeyFromStem(stem)
+				if !ok {
+					continue
+				}
+				info, statErr := entry.Info()
+				if statErr != nil {
+					continue
+				}
+				updated := formatNaive(info.ModTime())
+				if prev, exists := byKey[key]; !exists || updated > prev.updated {
+					byKey[key] = row{key: key, updated: updated}
+				}
 			}
-			path := filepath.Join(s.dir, name)
-			updated, ok := s.firstRecordUpdatedAt(path, key)
-			if !ok {
-				continue
+		}
+		rows := make([]row, 0, len(byKey))
+		for _, r := range byKey {
+			// A journal newer than the base determines the effective update
+			// time even when both files exist.
+			if info, err := os.Stat(s.journalPath(r.key)); err == nil {
+				if journalUpdated := formatNaive(info.ModTime()); journalUpdated > r.updated {
+					r.updated = journalUpdated
+				}
 			}
-			rows = append(rows, row{key: key, updated: updated})
+			rows = append(rows, r)
 		}
 		sort.SliceStable(rows, func(i, j int) bool {
 			if rows[i].updated != rows[j].updated {
@@ -315,7 +361,7 @@ func (s *Store) Delete(key string) error {
 	return s.withLock(func() error {
 		defer s.forgetSession(key)
 		var firstErr error
-		for _, path := range []string{s.Path(key), s.checkpointPath(key), s.legacyLossyPath(key)} {
+		for _, path := range []string{s.Path(key), s.journalPath(key), s.checkpointPath(key), s.legacyLossyPath(key)} {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				if firstErr == nil {
 					firstErr = fmt.Errorf("session: delete %s: %w", path, err)
@@ -400,25 +446,40 @@ func (s *Store) withLock(fn func() error) error {
 // loadLocked reads a session file. The caller must hold the session-files lock.
 func (s *Store) loadLocked(key string) (*Session, error) {
 	path := s.Path(key)
+	sess := s.newSession(key)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return s.newSession(key), nil
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("session: read %s: %w", path, err)
 		}
-		return nil, fmt.Errorf("session: read %s: %w", path, err)
-	}
-
-	sess := s.newSession(key)
-	if err := sess.consumeRecords(data); err != nil {
+	} else if err := sess.consumeRecords(data); err != nil {
 		return nil, err
 	}
+
+	// Replay the append-only journal after the canonical file. This is the
+	// crash-recovery path for the latency fast path: if the process dies before
+	// background compaction, every acknowledged message is still present.
+	if journal, err := os.ReadFile(s.journalPath(key)); err == nil {
+		if err := sess.consumeRecords(journal); err != nil {
+			return nil, err
+		}
+		if info, statErr := os.Stat(s.journalPath(key)); statErr == nil {
+			sess.updatedAt = info.ModTime()
+			sess.updatedStr = formatNaive(info.ModTime())
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("session: read journal: %w", err)
+	}
+
 	// Session.__post_init__ resets an out-of-range archive offset to 0,
 	// because a corrupt offset would hide the whole transcript
 	// (manager.py:295-301).
 	if sess.lastArchived < 0 || sess.lastArchived > len(sess.messages) {
 		sess.lastArchived = 0
 	}
-	s.overlayCheckpointLocked(sess, path)
+	if _, err := os.Stat(path); err == nil {
+		s.overlayCheckpointLocked(sess, path)
+	}
 	return sess, nil
 }
 

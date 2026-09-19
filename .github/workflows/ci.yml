@@ -16,7 +16,9 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Two steps now carry a 20-minute per-package budget (the compat suite and
+    # the race run), so the job ceiling has to clear both plus setup and vet.
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,8 +51,16 @@ jobs:
       - name: Build with production tags
         run: go build -tags sqlite_fts5 ./cmd/haosbot
 
+      # The compat package drives the frozen Python reference through ~17
+      # subprocesses, so it is the one package whose runtime is not seconds.
+      # Measured on the dev host: 203 s warm, 244 s under -race, and 736 s in a
+      # cold run contended by sibling suites. go test's default budget is 10
+      # minutes per package, which that worst case exceeds — and when it is
+      # exceeded the report is "panic: test timed out", naming whichever test
+      # happened to be running rather than the one that was slow. Give the
+      # suite an explicit budget so the outcome is a pass or a real timeout.
       - name: Unit and differential tests
-        run: go test -count=1 ./...
+        run: go test -count=1 -timeout 20m ./...
 
       # The production binary is built with -tags sqlite_fts5 (MicroGraphRAG
       # needs SQLite FTS5), but the untagged run above skips every test that
@@ -63,7 +73,7 @@ jobs:
         run: go test -tags sqlite_fts5 -count=1 ./internal/agent/... ./internal/memory/... ./cmd/...
 
       - name: Race detector
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -timeout 20m ./...
 
       - name: Vet
         run: go vet ./...

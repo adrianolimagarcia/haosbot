@@ -24,7 +24,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -107,15 +106,9 @@ func loadRunnerCleanReference(t *testing.T) *runnerCleanReference {
 		t.Skipf("SKIP: dumper missing at %s", script)
 	}
 
-	cmd := exec.Command(python, script)
-	cmd.Dir = root
-	out, err := cmd.Output()
+	out, err := runReferenceCommand("runner-clean dumper", []string{python, script}, root, nil)
 	if err != nil {
-		var stderr string
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = string(ee.Stderr)
-		}
-		t.Fatalf("runner-clean dumper failed: %v\n%s", err, stderr)
+		t.Fatalf("runner-clean dumper failed: %v", err)
 	}
 
 	dec := json.NewDecoder(bytes.NewReader(out))

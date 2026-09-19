@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -50,13 +49,9 @@ func loadApplyPatchDump(t *testing.T) map[string]any {
 		t.Skipf("SKIP: dumper missing at %s", script)
 	}
 
-	cmd := exec.Command(python, script)
-	cmd.Dir = root
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	out, err := runReferenceCommand("apply-patch dumper", []string{python, script}, root, nil)
 	if err != nil {
-		t.Fatalf("dumper failed: %v\nstderr:\n%s", err, stderr.String())
+		t.Fatalf("dumper failed: %v", err)
 	}
 
 	dec := json.NewDecoder(bytes.NewReader(out))

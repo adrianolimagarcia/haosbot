@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -111,15 +110,9 @@ func loadPromptGuardsDump(t *testing.T) *pgDoc {
 		}
 	})
 
-	cmd := exec.Command(python, script, base)
-	cmd.Dir = root
-	out, err := cmd.Output()
+	out, err := runReferenceCommand("prompt-guards dumper", []string{python, script, base}, root, nil)
 	if err != nil {
-		var stderr string
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = string(ee.Stderr)
-		}
-		t.Fatalf("prompt-guards dumper failed: %v\nstderr:\n%s", err, stderr)
+		t.Fatalf("prompt-guards dumper failed: %v", err)
 	}
 
 	var doc pgDoc

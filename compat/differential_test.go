@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -240,15 +239,9 @@ func runDumper(t *testing.T) []byte {
 	}
 
 	// The dumper must run with cwd = repo root so its own path resolution works.
-	cmd := exec.Command(python, script)
-	cmd.Dir = root
-	out, err := cmd.Output()
+	out, err := runReferenceCommand("reference dumper", []string{python, script}, root, nil)
 	if err != nil {
-		var stderr string
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = string(ee.Stderr)
-		}
-		t.Fatalf("reference dumper failed: %v\n%s", err, stderr)
+		t.Fatalf("reference dumper failed: %v", err)
 	}
 	return out
 }

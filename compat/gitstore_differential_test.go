@@ -22,6 +22,7 @@
 package compat
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -889,10 +890,19 @@ func gitBinary(t *testing.T) string {
 }
 
 // gitRunCompat runs git in dir with a hermetic configuration.
+//
+// The call is bounded for the same reason the Python dumpers are: git can block
+// on a lock or a wedged filesystem, and an unbounded wait here would take the
+// whole package down with a timeout that names no command. CombinedOutput's
+// semantics are kept — several callers compare the mixed stream.
 func gitRunCompat(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command(gitBinary(t), args...)
+	ctx, cancel := context.WithTimeout(context.Background(), referenceDumpTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, gitBinary(t), args...)
 	cmd.Dir = dir
+	cmd.WaitDelay = referenceDumpWaitDelay
 	cmd.Env = append(os.Environ(),
 		"PATH=/usr/bin:/bin:/usr/local/bin",
 		"GIT_CONFIG_GLOBAL=/dev/null",
@@ -902,6 +912,10 @@ func gitRunCompat(t *testing.T, dir string, args ...string) string {
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("git %s did not finish within %s and was killed:\n%s",
+				strings.Join(args, " "), referenceDumpTimeout, out)
+		}
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return string(out)

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -91,19 +90,13 @@ func loadLegacyHistoryReference(root string) legacyHistoryRef {
 }
 
 func runLegacyHistoryDumper(python, script, root string, offset *int) (map[string]any, error) {
-	cmd := exec.Command(python, script)
-	cmd.Dir = root
-	cmd.Env = os.Environ()
+	env := os.Environ()
 	if offset != nil {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("LEGACY_HISTORY_UTC_OFFSET_SECONDS=%d", *offset))
+		env = append(env, fmt.Sprintf("LEGACY_HISTORY_UTC_OFFSET_SECONDS=%d", *offset))
 	}
-	out, err := cmd.Output()
+	out, err := runReferenceCommand("legacy-history dumper", []string{python, script}, root, env)
 	if err != nil {
-		var stderr string
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = string(ee.Stderr)
-		}
-		return nil, fmt.Errorf("legacy-history dumper failed: %w\nstderr:\n%s", err, stderr)
+		return nil, fmt.Errorf("legacy-history dumper failed: %w", err)
 	}
 	// UseNumber is load-bearing, not tidiness: st_mtime_ns values are around
 	// 1.6e18, where float64's spacing is 256 ns. Decoding them as float64 moved

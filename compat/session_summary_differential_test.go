@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -105,15 +104,9 @@ func loadSessionSummaryDump(t *testing.T) map[string]any {
 			sessionSummaryErr = fmt.Errorf("dumper missing at %s", script)
 			return
 		}
-		cmd := exec.Command(python, script)
-		cmd.Dir = root
-		out, err := cmd.Output()
+		out, err := runReferenceCommand("session-summary dumper", []string{python, script}, root, nil)
 		if err != nil {
-			var stderr string
-			if ee, ok := err.(*exec.ExitError); ok {
-				stderr = string(ee.Stderr)
-			}
-			sessionSummaryErr = fmt.Errorf("dumper failed: %v\nstderr:\n%s", err, stderr)
+			sessionSummaryErr = fmt.Errorf("dumper failed: %w", err)
 			return
 		}
 		dec := json.NewDecoder(bytes.NewReader(out))

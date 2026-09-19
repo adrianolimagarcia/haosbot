@@ -209,13 +209,9 @@ func runSkillsDump() (*skDoc, string, error) {
 	}
 	skDumpBase = base
 
-	cmd := exec.Command(python, script, base)
-	cmd.Dir = root
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	out, err := runReferenceCommand("skills dumper", []string{python, script, base}, root, nil)
 	if err != nil {
-		return nil, base, fmt.Errorf("skills dumper failed: %w\nstderr:\n%s", err, stderr.String())
+		return nil, base, fmt.Errorf("skills dumper failed: %w", err)
 	}
 
 	var doc skDoc

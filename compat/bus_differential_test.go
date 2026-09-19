@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -48,17 +47,12 @@ func loadBusDump(t *testing.T) map[string]any {
 		t.Skipf("SKIP: dumper missing at %s", script)
 	}
 
-	cmd := exec.Command(python, script)
-	cmd.Dir = root
 	// Stdout only: the reference logs the deliberately-raising handler to
 	// stderr through loguru, which is expected and must not reach the parser.
-	out, err := cmd.Output()
+	// runReferenceCommand captures stderr but returns only stdout on success.
+	out, err := runReferenceCommand("bus dumper", []string{python, script}, root, nil)
 	if err != nil {
-		var stderr string
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = string(ee.Stderr)
-		}
-		t.Fatalf("bus dumper failed: %v\nstderr:\n%s", err, stderr)
+		t.Fatalf("bus dumper failed: %v", err)
 	}
 
 	var doc map[string]any

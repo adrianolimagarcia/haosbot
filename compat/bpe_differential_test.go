@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -135,13 +134,9 @@ func loadBPEDoc(t *testing.T) *bpeDoc {
 			bpeDocSkip = fmt.Sprintf("SKIP: dumper missing at %s", script)
 			return
 		}
-		cmd := exec.Command(python, script)
-		cmd.Dir = root
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
+		out, err := runReferenceCommand("reference BPE dumper", []string{python, script}, root, nil)
 		if err != nil {
-			bpeDocErr = fmt.Errorf("reference BPE dumper failed: %w\n%s", err, stderr.String())
+			bpeDocErr = fmt.Errorf("reference BPE dumper failed: %w", err)
 			return
 		}
 		var doc bpeDoc

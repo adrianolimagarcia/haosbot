@@ -3,7 +3,6 @@ package compat
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -40,15 +39,9 @@ func loadOutboundEventsDump(t *testing.T) map[string]any {
 		t.Skipf("SKIP: dumper missing at %s", script)
 	}
 
-	cmd := exec.Command(python, script)
-	cmd.Dir = root
-	out, err := cmd.Output()
+	out, err := runReferenceCommand("outbound-events dumper", []string{python, script}, root, nil)
 	if err != nil {
-		var stderr string
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = string(ee.Stderr)
-		}
-		t.Fatalf("dumper failed: %v\nstderr:\n%s", err, stderr)
+		t.Fatalf("dumper failed: %v", err)
 	}
 
 	var doc map[string]any

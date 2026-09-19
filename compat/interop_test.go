@@ -3,7 +3,6 @@ package compat
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -33,15 +32,9 @@ func runInterop(t *testing.T, args ...string) map[string]any {
 		t.Skipf("SKIP: reference venv not present at %s — interop check not run", python)
 	}
 
-	cmd := exec.Command(python, append([]string{script}, args...)...)
-	cmd.Dir = root
-	out, err := cmd.Output()
+	out, err := runReferenceCommand("interop harness", append([]string{python, script}, args...), root, nil)
 	if err != nil {
-		var stderr string
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = string(ee.Stderr)
-		}
-		t.Fatalf("interop harness %v failed: %v\n%s", args, err, stderr)
+		t.Fatalf("interop harness %v failed: %v", args, err)
 	}
 	var doc map[string]any
 	if err := json.Unmarshal(out, &doc); err != nil {

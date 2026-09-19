@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -247,13 +246,9 @@ func runTelegramDumper() (*telegramReference, string, error) {
 	if _, err := os.Stat(script); err != nil {
 		return nil, fmt.Sprintf("SKIP: dumper missing at %s", script), nil
 	}
-	cmd := exec.Command(python, script)
-	cmd.Dir = root
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	out, err := runReferenceCommand("telegram dumper", []string{python, script}, root, nil)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w\n%s", err, stderr.String())
+		return nil, "", err
 	}
 	var ref telegramReference
 	dec := json.NewDecoder(bytes.NewReader(out))

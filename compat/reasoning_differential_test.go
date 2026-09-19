@@ -22,7 +22,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -107,15 +106,9 @@ func loadReasoningReference(t *testing.T) *reasoningReference {
 		t.Skipf("SKIP: dumper missing at %s", script)
 	}
 
-	cmd := exec.Command(python, script)
-	cmd.Dir = root
-	out, err := cmd.Output()
+	out, err := runReferenceCommand("reasoning dumper", []string{python, script}, root, nil)
 	if err != nil {
-		var stderr string
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = string(ee.Stderr)
-		}
-		t.Fatalf("reasoning dumper failed: %v\n%s", err, stderr)
+		t.Fatalf("reasoning dumper failed: %v", err)
 	}
 
 	dec := json.NewDecoder(bytes.NewReader(out))

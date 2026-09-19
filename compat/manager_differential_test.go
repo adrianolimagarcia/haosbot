@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -73,15 +72,9 @@ func loadManagerDump(t *testing.T) map[string]any {
 			managerDocErr = fmt.Errorf("dumper missing at %s", script)
 			return
 		}
-		cmd := exec.Command(python, script)
-		cmd.Dir = root
-		out, err := cmd.Output()
+		out, err := runReferenceCommand("manager dumper", []string{python, script}, root, nil)
 		if err != nil {
-			var stderr string
-			if ee, ok := err.(*exec.ExitError); ok {
-				stderr = string(ee.Stderr)
-			}
-			managerDocErr = fmt.Errorf("dumper failed: %v\nstderr:\n%s", err, stderr)
+			managerDocErr = fmt.Errorf("dumper failed: %w", err)
 			return
 		}
 		var doc map[string]any

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -12,11 +14,21 @@ import (
 
 const workspaceGraphMigrationMarker = "graph-workspace-v1.migrated"
 
+func workspaceGraphNamespace(workspace string) string {
+	clean := filepath.Clean(workspace)
+	sum := sha256.Sum256([]byte(clean))
+	return hex.EncodeToString(sum[:12])
+}
+
+func workspaceGraphRoot(dataDir, workspace string) string {
+	return filepath.Join(dataDir, "graph-memory", workspaceGraphNamespace(workspace))
+}
+
 // ensureWorkspaceGraphProjection performs a one-time rebuild of GraphRAG from
 // Memory Fabric's canonical records. Old per-session graph DBs are deliberately
 // left untouched for rollback; the new index lives under graph-memory/.
-func ensureWorkspaceGraphProjection(ctx context.Context, dataDir string, fabric *memoryfabric.Store) error {
-	marker := filepath.Join(dataDir, workspaceGraphMigrationMarker)
+func ensureWorkspaceGraphProjection(ctx context.Context, dataDir, workspace string, fabric *memoryfabric.Store) error {
+	marker := filepath.Join(dataDir, workspaceGraphNamespace(workspace)+"."+workspaceGraphMigrationMarker)
 	if _, err := os.Stat(marker); err == nil {
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {

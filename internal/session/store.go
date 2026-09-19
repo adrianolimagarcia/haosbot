@@ -482,6 +482,7 @@ func (s *Store) loadLocked(key string) (*Session, error) {
 		if err := sess.consumeRecords(journal); err != nil {
 			return nil, err
 		}
+		sess.journalSize = int64(len(journal))
 		if info, statErr := os.Stat(s.journalPath(key)); statErr == nil {
 			sess.updatedAt = info.ModTime()
 			sess.updatedStr = formatNaive(info.ModTime())

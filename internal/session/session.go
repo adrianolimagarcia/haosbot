@@ -58,6 +58,7 @@ type Session struct {
 	providerState json.RawMessage // validated state value, nil when absent
 	providerLine  []byte          // original provider_state record line
 	providerSnap  json.RawMessage // state value at load, for verbatim re-emit
+	journalSize   int64
 }
 
 // newSession returns an empty session for key.
@@ -162,6 +163,7 @@ func (s *Session) AppendMessagesDurable(messages []core.Message) error {
 		}
 
 		s.mu.Lock()
+		s.journalSize += int64(buf.Len())
 		for _, m := range normalized {
 			s.messages = append(s.messages, m)
 			s.snapshots = append(s.snapshots, core.Message{})
@@ -388,6 +390,15 @@ func (s *Session) CompactJournal(minBytes int64) error {
 		if minBytes > 0 && info.Size() < minBytes {
 			return nil
 		}
+		s.mu.Lock()
+		expectedSize := s.journalSize
+		s.mu.Unlock()
+		if expectedSize > 0 && info.Size() != expectedSize {
+			// Another process appended after this Session snapshot was loaded.
+			// Do not compact from stale memory; the next Open invalidates the
+			// cache and replays the externally appended records.
+			return nil
+		}
 		return s.saveLocked()
 	})
 }
@@ -529,6 +540,9 @@ func (s *Session) saveLocked() error {
 	if err := os.Remove(s.store.journalPath(key)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("session: remove journal: %w", err)
 	}
+	s.mu.Lock()
+	s.journalSize = 0
+	s.mu.Unlock()
 	s.store.rememberSaved(s)
 	return nil
 }

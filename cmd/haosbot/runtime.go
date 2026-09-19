@@ -116,7 +116,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("load GraphRAG embedder: %w", err)
 	}
-	graphPool := newGraphStorePoolWithEmbedder(filepath.Join(config.DefaultDataDir(), "graph-memory"), 2, graphEmbedder)
+	graphPool := newGraphStorePoolWithEmbedder(workspaceGraphRoot(config.DefaultDataDir(), workspace), 2, graphEmbedder)
 	// Deep GraphRAG recall is explicit. Keeping it as a tool preserves hybrid
 	// FTS/vector/graph capabilities without making every turn pay retrieval
 	// latency before the provider starts.
@@ -148,7 +148,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("migrate legacy GraphRAG outbox: %w", err)
 	}
-	if err := ensureWorkspaceGraphProjection(context.Background(), config.DefaultDataDir(), memoryFabric); err != nil {
+	if err := ensureWorkspaceGraphProjection(context.Background(), config.DefaultDataDir(), workspace, memoryFabric); err != nil {
 		_ = memoryFabric.Close()
 		_ = graphPool.Close()
 		messageBus.Close()

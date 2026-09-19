@@ -131,6 +131,23 @@ func (f *fakeSessionTranscript) CommitSummaryCheckpoint(summary string, insertAt
 	f.checkpoints = append(f.checkpoints, summary)
 }
 
+func (f *fakeSessionTranscript) checkpointSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.checkpoints...)
+}
+
+func (f *fakeSessionTranscript) lastSummaryText() (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	raw, ok := f.meta["_last_summary"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	text, _ := raw["text"].(string)
+	return text, true
+}
+
 func (f *fakeSessionTranscript) GetHistory(maxMessages, maxTokens int, extendToUser, includeRuntimeContext bool) []core.Message {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -337,8 +354,9 @@ func TestAutoSummarizeUsesStreamingWhenAvailable(t *testing.T) {
 	if maxTokens != DefaultSummarizeMaxTokens {
 		t.Errorf("summarize max_tokens=%d want %d", maxTokens, DefaultSummarizeMaxTokens)
 	}
-	if len(sess.checkpoints) != 1 || sess.checkpoints[0] != "streamed summary text" {
-		t.Errorf("checkpoints=%v", sess.checkpoints)
+	checkpoints := sess.checkpointSnapshot()
+	if len(checkpoints) != 1 || checkpoints[0] != "streamed summary text" {
+		t.Errorf("checkpoints=%v", checkpoints)
 	}
 }
 
@@ -503,22 +521,19 @@ func TestWebUIAutoSummarizeTrigger(t *testing.T) {
 	}
 
 	waitForCondition(t, time.Second, "background summary checkpoint", func() bool {
-		sess.mu.Lock()
-		defer sess.mu.Unlock()
-		return len(sess.checkpoints) == 1
+		return len(sess.checkpointSnapshot()) == 1
 	})
 
-	sess.mu.Lock()
-	if sess.checkpoints[0] != "Summary of past turns: discussed project goals." {
-		t.Errorf("checkpoint summary = %q", sess.checkpoints[0])
+	checkpoints := sess.checkpointSnapshot()
+	if checkpoints[0] != "Summary of past turns: discussed project goals." {
+		t.Errorf("checkpoint summary = %q", checkpoints[0])
 	}
-	lastSummary, ok := sess.meta["_last_summary"].(map[string]any)
-	sess.mu.Unlock()
+	lastSummaryText, ok := sess.lastSummaryText()
 	if !ok {
 		t.Fatalf("missing _last_summary in metadata")
 	}
-	if lastSummary["text"] != "Summary of past turns: discussed project goals." {
-		t.Errorf("metadata summary = %v", lastSummary["text"])
+	if lastSummaryText != "Summary of past turns: discussed project goals." {
+		t.Errorf("metadata summary = %v", lastSummaryText)
 	}
 
 	// The NEXT turn consumes the ready checkpoint summary.
@@ -594,11 +609,12 @@ func TestManualCompactCommand(t *testing.T) {
 	if !strings.Contains(out.Content, "Context compacted successfully.") {
 		t.Errorf("unexpected reply for /compact: %q", out.Content)
 	}
-	if len(sess.checkpoints) != 1 {
-		t.Fatalf("expected 1 checkpoint, got %d", len(sess.checkpoints))
+	checkpoints := sess.checkpointSnapshot()
+	if len(checkpoints) != 1 {
+		t.Fatalf("expected 1 checkpoint, got %d", len(checkpoints))
 	}
-	if sess.checkpoints[0] != "Manual compaction summary." {
-		t.Errorf("got summary %q", sess.checkpoints[0])
+	if checkpoints[0] != "Manual compaction summary." {
+		t.Errorf("got summary %q", checkpoints[0])
 	}
 }
 
@@ -646,8 +662,9 @@ func TestWebUIBelowThresholdNoSummarize(t *testing.T) {
 	}
 
 	// Should not have triggered auto-summarize
-	if len(sess.checkpoints) != 0 {
-		t.Errorf("expected 0 checkpoints, got %d", len(sess.checkpoints))
+	checkpoints := sess.checkpointSnapshot()
+	if len(checkpoints) != 0 {
+		t.Errorf("expected 0 checkpoints, got %d", len(checkpoints))
 	}
 }
 
@@ -695,7 +712,8 @@ func TestNonWebChannelNoAutoSummarizeByDefault(t *testing.T) {
 	if out.Content != "CLI reply." {
 		t.Errorf("got %q, want %q", out.Content, "CLI reply.")
 	}
-	if len(sess.checkpoints) != 0 {
-		t.Errorf("expected 0 checkpoints for cli channel by default, got %d", len(sess.checkpoints))
+	checkpoints := sess.checkpointSnapshot()
+	if len(checkpoints) != 0 {
+		t.Errorf("expected 0 checkpoints for cli channel by default, got %d", len(checkpoints))
 	}
 }

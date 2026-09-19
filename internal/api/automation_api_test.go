@@ -116,6 +116,13 @@ func TestWebUIAutomationPendingIsTransientButVisible(t *testing.T) {
 			}
 		})
 	if err := service.Load(); err != nil { t.Fatal(err) }
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := service.Close(ctx); err != nil {
+			t.Errorf("close automation service: %v", err)
+		}
+	})
 	s := NewServer(cfg, nil, nil)
 	s.SetScheduler(service)
 
@@ -144,4 +151,13 @@ func TestWebUIAutomationPendingIsTransientButVisible(t *testing.T) {
 	}
 
 	close(block)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		got, ok := service.GetJob(job.ID)
+		if ok && !got.State.Pending && len(got.State.RunHistory) == 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for automation run cleanup")
 }

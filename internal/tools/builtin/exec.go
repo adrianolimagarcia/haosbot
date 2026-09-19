@@ -32,9 +32,6 @@ const (
 	// (shell.py:339, exec_session.py:29).
 	execMinOutputChars      = 1000
 	execMaxOutputCharsLimit = 50_000
-	// execMaxYieldMS mirrors MAX_YIELD_MS (exec_session.py:24); it is used for
-	// schema parity only.
-	execMaxYieldMS = 30_000
 )
 
 // execMaxCaptureBytes caps the bytes buffered per stream.
@@ -125,9 +122,16 @@ func NewExec(opts ExecOptions) *Exec {
 					1, execMaxTimeoutSeconds),
 				"shell": nullableStrProp("Shell override; omit for bash, or pass 'sh' or 'zsh'."),
 				"login": nullableBoolProp("Run bash/zsh as a login shell.", false),
-				"yield_time_ms": nullableIntProp(
-					"Return after this many milliseconds if still running; omit to wait for exit.",
-					0, execMaxYieldMS),
+				// yield_time_ms is deliberately NOT advertised. The reference
+				// offers background exec sessions here (shell.py:118-160,
+				// exec_session.py), but this port has no session manager and
+				// rejects the argument at execute time (see the hasYield branch
+				// below). Advertising a parameter that is always refused costs
+				// the model a full provider round trip per command: it sees the
+				// parameter in the schema, sends it, and only then learns that
+				// it is unsupported. parseArgs still accepts the key so that a
+				// model which sends it anyway receives the explanatory error
+				// rather than a generic unknown-argument failure.
 				"max_output_chars": nullableIntProp(
 					"Session output limit in characters (default 10000, max 50000).",
 					execMinOutputChars, execMaxOutputCharsLimit),

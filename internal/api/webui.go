@@ -20,6 +20,9 @@ var hardeningJS []byte
 //go:embed webui/app.js
 var appJS []byte
 
+//go:embed webui/control.js
+var controlJS []byte
+
 //go:embed webui/app.css
 var appCSS []byte
 
@@ -59,6 +62,7 @@ func (s *Server) registerWebUI(mux *http.ServeMux) {
 	s.registerAgentTurn(mux)
 	s.registerAgentTurnStream(mux)
 	s.registerWebUIRender(mux)
+	s.registerWebUIData(mux)
 
 	serveAsset := func(path, contentType string, body []byte) {
 		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
@@ -74,6 +78,7 @@ func (s *Server) registerWebUI(mux *http.ServeMux) {
 	}
 	serveAsset("/webui-hardening.js", "application/javascript; charset=utf-8", hardeningJS)
 	serveAsset("/webui/app.js", "application/javascript; charset=utf-8", appJS)
+	serveAsset("/webui/control.js", "application/javascript; charset=utf-8", controlJS)
 	serveAsset("/webui/app.css", "text/css; charset=utf-8", appCSS)
 	serveAsset("/webui/tailwind.css", "text/css; charset=utf-8", tailwindCSS)
 	serveAsset("/brand/haosbot_mark.png", "image/png", haosbotMarkPNG)

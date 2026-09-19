@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/netpolicy"
 	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
 	"github.com/adrianolimagarcia/nanobot-go/internal/provider"
+	"github.com/adrianolimagarcia/nanobot-go/internal/session"
 )
 
 type Server struct {
@@ -40,6 +42,8 @@ type Server struct {
 	bus     atomic.Pointer[bus.Bus]
 	dataDir atomic.Pointer[string]
 	metrics atomic.Pointer[observability.Registry]
+	sessionStore atomic.Pointer[session.Store]
+	webuiMu sync.Mutex
 
 	// notReady is the process-owned readiness override read by /readyz
 	// (see ready.go). The zero value means "no override".
@@ -75,6 +79,11 @@ func (s *Server) SetDataDir(dir string) { s.dataDir.Store(&dir) }
 // runtime. The endpoint is injected instead of recreated here so it observes
 // the same projection workers and memory fabric as the gateway.
 func (s *Server) SetMetrics(metrics *observability.Registry) { s.metrics.Store(metrics) }
+
+// SetSessionStore exposes the runtime's canonical session store to the WebUI
+// control center. It is the same store used by the agent loop, never a second
+// copy of session state.
+func (s *Server) SetSessionStore(store *session.Store) { s.sessionStore.Store(store) }
 
 func (s *Server) checkAuth(r *http.Request) bool {
 	apiKey := s.cfg.API.APIKey

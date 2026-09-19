@@ -433,6 +433,7 @@ func cmdGateway(args []string) error {
 	apiServer.SetBus(rt.bus)
 	apiServer.SetDataDir(config.DefaultDataDir())
 	apiServer.SetMetrics(rt.metrics)
+	apiServer.SetSessionStore(rt.store)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -169,6 +169,9 @@
     if (stream) stream.replaceChildren();
     const title = document.getElementById('header-chat-title');
     if (title) title.textContent = 'Novo chat';
+    const welcome = document.querySelector('.haosbot-welcome');
+    if (welcome) welcome.classList.remove('hidden');
+    window.dispatchEvent(new CustomEvent('haosbot:session-changed'));
   };
 
   let sendInFlight = false;
@@ -274,6 +277,7 @@
       setTurnRunning(false);
       input.disabled = false;
       input.focus();
+      window.dispatchEvent(new CustomEvent('haosbot:turn-complete'));
     }
 
     const container = document.getElementById('messages-container');
@@ -391,6 +395,41 @@
     } catch (err) {
       status.textContent = `Erro de rede: ${err.message}`;
     }
+  };
+
+  // WebUI control-center bridge. It deliberately reuses the same session-scoped
+  // auth and renderer as chat instead of duplicating credential handling.
+  window.webuiAuthHeaders = function webuiAuthHeaders(extra = {}) {
+    return authHeaders(extra);
+  };
+
+  window.activateWebSession = async function activateWebSession(sessionID, messages, title) {
+    const id = String(sessionID || '').trim();
+    if (!/^[A-Za-z0-9_-]{16,128}$/.test(id)) {
+      throw new Error('invalid HAOSBOT WebUI session id');
+    }
+    sessionStorage.setItem(SESSION_KEY, id);
+    const stream = document.getElementById('chat-stream');
+    if (stream) stream.replaceChildren();
+    const welcome = document.querySelector('.haosbot-welcome');
+    if (welcome) welcome.classList.toggle('hidden', Array.isArray(messages) && messages.length > 0);
+    const heading = document.getElementById('header-chat-title');
+    if (heading) heading.textContent = title || 'Novo chat';
+    if (!stream || !Array.isArray(messages)) return;
+    for (const message of messages) {
+      const role = String(message?.role || '');
+      let text = '';
+      if (typeof message?.content === 'string') text = message.content;
+      else if (Array.isArray(message?.content)) {
+        text = message.content.map(block => typeof block?.text === 'string' ? block.text : '').filter(Boolean).join('\n');
+      }
+      if (!text) continue;
+      if (role === 'user') await appendTextMessage(stream, text, 'user');
+      else if (role === 'assistant') await appendTextMessage(stream, text, 'assistant');
+      else if (role === 'tool') await appendTextMessage(stream, '[tool] ' + text, 'assistant');
+    }
+    const container = document.getElementById('messages-container');
+    if (container) container.scrollTop = container.scrollHeight;
   };
 
   // Remove the persistent legacy token if this browser used an older build.

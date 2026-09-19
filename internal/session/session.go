@@ -366,6 +366,32 @@ func (s *Session) SetProviderState(raw json.RawMessage) {
 	s.providerState = raw
 }
 
+// CompactJournal folds an append-only journal into the canonical JSONL only
+// when it has reached minBytes. The file lock is acquired before checking size
+// and held through saveLocked, so a concurrent AppendMessagesDurable can never
+// be lost between snapshot and journal removal.
+func (s *Session) CompactJournal(minBytes int64) error {
+	if s.store == nil {
+		return errors.New("session: session has no store")
+	}
+	if err := s.store.initErr; err != nil {
+		return err
+	}
+	return s.store.withLock(func() error {
+		info, err := os.Stat(s.store.journalPath(s.key))
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if minBytes > 0 && info.Size() < minBytes {
+			return nil
+		}
+		return s.saveLocked()
+	})
+}
+
 // Save writes the whole session to disk.
 //
 // Mirrors _save_unlocked (manager.py:1314-1361): the metadata record comes

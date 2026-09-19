@@ -692,7 +692,7 @@ func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook
 		}
 
 		if pendingAttached && l.cfg.GraphMemoryEnqueueWithIDError != nil {
-			l.enqueuePendingGraphMemoryAsync(turnID, key, graphContent)
+			l.enqueuePendingGraphMemoryAsync(transcript, turnID, key, graphContent)
 		} else if l.cfg.GraphMemoryEnqueueWithIDError != nil {
 			go func() {
 				if err := l.cfg.GraphMemoryEnqueueWithIDError(turnID, key, graphContent); err != nil {
@@ -740,7 +740,7 @@ func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook
 	}, nil
 }
 
-func (l *Loop) enqueuePendingGraphMemoryAsync(turnID, key, content string) {
+func (l *Loop) enqueuePendingGraphMemoryAsync(transcript Transcript, turnID, key, content string) {
 	callback := l.cfg.GraphMemoryEnqueueWithIDError
 	go func() {
 		if err := callback(turnID, key, content); err != nil {
@@ -748,10 +748,33 @@ func (l *Loop) enqueuePendingGraphMemoryAsync(turnID, key, content string) {
 			// the deterministic turn ID, so retry is idempotent.
 			slog.Warn("agent: async GraphRAG enqueue failed; marker retained",
 				"turn_id", turnID, "session", key, "error", err)
+			return
+		}
+
+		// ACK is represented in memory immediately, without a second disk write
+		// on the response path. The idle journal compactor below eventually
+		// rewrites the canonical JSONL without the marker. If the process dies
+		// first, the on-disk marker simply replays the idempotent job at startup.
+		mutator, ok := transcript.(transcriptMessageMutator)
+		if !ok {
+			return
+		}
+		messages := transcript.Messages()
+		for i := range messages {
+			raw, exists := messages[i].Extra(graphMemoryPendingExtra)
+			if !exists {
+				continue
+			}
+			var pending graphMemoryPending
+			if json.Unmarshal(raw, &pending) != nil || pending.TurnID != turnID {
+				continue
+			}
+			messages[i].DeleteExtra(graphMemoryPendingExtra)
+			_ = mutator.SetMessage(i, messages[i])
+			return
 		}
 	}()
 }
-
 func deterministicTurnID(sessionKey string, historyLen int, content string) string {
 	h := sha256.New()
 	_, _ = h.Write([]byte(sessionKey))
@@ -1077,6 +1100,19 @@ func (l *Loop) scheduleBackgroundSummary(key string, sess sessionTranscript, isW
 			}
 		}
 
+		// Debounce maintenance so a user sending another prompt immediately
+		// after the answer never collides with transcript compaction.
+		idleTimer := time.NewTimer(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			if !idleTimer.Stop() { <-idleTimer.C }
+			return
+		case <-idleTimer.C:
+		}
+		if err := ctx.Err(); err != nil {
+			return
+		}
+
 		history := sess.GetHistory(0, 0, false, true)
 		if len(history) == 0 {
 			return
@@ -1091,6 +1127,12 @@ func (l *Loop) scheduleBackgroundSummary(key string, sess sessionTranscript, isW
 		proactive := threshold * 3 / 4
 		if proactive <= 0 { proactive = threshold }
 		if estimated < proactive || !l.shouldAttemptSummarize(key, estimated) {
+			if compactor, ok := sess.(transcriptJournalCompactor); ok {
+				started := time.Now()
+				if err := compactor.CompactJournal(64 << 10); err == nil && l.cfg.Metrics != nil {
+					l.cfg.Metrics.ObservePersistence(time.Since(started))
+				}
+			}
 			return
 		}
 
@@ -1103,6 +1145,9 @@ func (l *Loop) scheduleBackgroundSummary(key string, sess sessionTranscript, isW
 		if err != nil && !errors.Is(err, context.Canceled) {
 			slog.Warn("agent: background auto-summarize failed",
 				"session", key, "tokens", estimated, "error", err)
+			if compactor, ok := sess.(transcriptJournalCompactor); ok && ctx.Err() == nil {
+				_ = compactor.CompactJournal(64 << 10)
+			}
 		}
 	}()
 }

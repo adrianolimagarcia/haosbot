@@ -46,6 +46,7 @@ type Service struct {
 	wake   chan struct{}
 	wg     sync.WaitGroup
 	running bool
+	loaded  bool
 	maxSleep time.Duration
 }
 
@@ -76,14 +77,30 @@ func (s *Service) SetExecutor(executor Executor) error {
 	return nil
 }
 
+func (s *Service) Load() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.loaded {
+		return nil
+	}
+	if err := s.loadLocked(); err != nil {
+		return err
+	}
+	s.loaded = true
+	return nil
+}
+
 func (s *Service) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.running {
 		return nil
 	}
-	if err := s.loadLocked(); err != nil {
-		return err
+	if !s.loaded {
+		if err := s.loadLocked(); err != nil {
+			return err
+		}
+		s.loaded = true
 	}
 	now := time.Now()
 	for i := range s.store.Jobs {

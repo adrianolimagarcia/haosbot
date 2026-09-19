@@ -20,6 +20,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/bus"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
+	cronruntime "github.com/adrianolimagarcia/nanobot-go/internal/cron"
 	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
 	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
 	"github.com/adrianolimagarcia/nanobot-go/internal/prompt"
@@ -34,12 +35,13 @@ import (
 )
 
 type agentRuntime struct {
-	cfg    *config.Config
-	bus    *bus.Bus
-	loop   *agent.Loop
-	store  *session.Store
-	metrics *observability.Registry
-	closeF func()
+	cfg       *config.Config
+	bus       *bus.Bus
+	loop      *agent.Loop
+	store     *session.Store
+	metrics   *observability.Registry
+	scheduler *cronruntime.Service
+	closeF    func()
 }
 
 type transcriptStore struct{ s *session.Store }
@@ -104,6 +106,12 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		EnableExec:          cfg.Tools.Exec.Enable,
 		EnableNetwork:       cfg.Tools.Web.Enable,
 	})
+
+	scheduler := cronruntime.NewService(filepath.Join(config.DefaultDataDir(), "cron", "jobs.json"), nil)
+	if err := scheduler.Load(); err != nil {
+		return nil, fmt.Errorf("load automation scheduler: %w", err)
+	}
+	registry.Register(cronruntime.NewTool(scheduler, d.Timezone))
 
 	// Bounded by default: the queue limits come from gateway.maxInboundQueue /
 	// gateway.maxOutboundQueue, which default to a non-zero cap. The reference
@@ -188,8 +196,57 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	if err == nil {
 		err = loop.RecoverPendingGraphMemory()
 	}
+	if err == nil {
+		err = scheduler.SetExecutor(func(ctx context.Context, job cronruntime.Job, runID string) (cronruntime.RunResult, error) {
+			key := job.Payload.SessionKey
+			metadata := make(map[string]any, len(job.Payload.OriginMetadata)+2)
+			for k, v := range job.Payload.OriginMetadata {
+				metadata[k] = v
+			}
+			metadata["_cron_trigger"] = map[string]any{
+				"job_id": job.ID, "job_name": job.Name, "run_id": runID,
+			}
+			metadata["_cron_defer_until_session_idle"] = true
+			msg := core.InboundMessage{
+				Channel: job.Payload.OriginChannel,
+				SenderID: "cron",
+				ChatID: job.Payload.OriginChatID,
+				Content: "Scheduled automation triggered: " + job.Name + "\n\n" + job.Payload.Message,
+				Metadata: metadata,
+				SessionKeyOverride: &key,
+			}
+
+			for {
+				out, runErr := loop.ProcessMessage(ctx, msg)
+				if errors.Is(runErr, agent.ErrTurnActive) {
+					timer := time.NewTimer(750 * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						if !timer.Stop() { <-timer.C }
+						return cronruntime.RunResult{RunID: runID}, ctx.Err()
+					case <-timer.C:
+						continue
+					}
+				}
+				if runErr != nil {
+					return cronruntime.RunResult{RunID: runID}, runErr
+				}
+				response := ""
+				if out != nil {
+					response = out.Content
+					if job.Payload.OriginChannel != "webui" {
+						if err := messageBus.PublishOutbound(ctx, *out); err != nil {
+							return cronruntime.RunResult{RunID: runID, Response: response}, err
+						}
+					}
+				}
+				return cronruntime.RunResult{RunID: runID, Response: response}, nil
+			}
+		})
+	}
 	if err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = scheduler.Close(shutdownCtx)
 		projections.Close(shutdownCtx)
 		memoryMDProjection.Close()
 		cancel()
@@ -208,8 +265,10 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		loop:  loop,
 		store: store,
 		metrics: metrics,
+		scheduler: scheduler,
 		closeF: func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = scheduler.Close(shutdownCtx)
 			projections.Close(shutdownCtx)
 			memoryMDProjection.Close()
 			cancel()
@@ -410,6 +469,10 @@ func cmdGateway(args []string) error {
 	// ChannelManager only in the gateway runtime (cli/gateway_runtime.py:715)
 	// and starts it as one of the gateway's tasks (:941). `haosbot run` and
 	// `haosbot chat` drive the agent loop directly and never touch a channel.
+	if err := rt.scheduler.Start(); err != nil {
+		return fmt.Errorf("start automation scheduler: %w", err)
+	}
+
 	channelManager := buildChannelManager(cfg, rt.bus)
 	if names := channelManager.EnabledChannels(); len(names) > 0 {
 		fmt.Printf("haosbot %s channels enabled: %s\n", version, strings.Join(names, ", "))
@@ -437,6 +500,7 @@ func cmdGateway(args []string) error {
 	apiServer.SetDataDir(config.DefaultDataDir())
 	apiServer.SetMetrics(rt.metrics)
 	apiServer.SetSessionStore(rt.store)
+	apiServer.SetScheduler(rt.scheduler)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

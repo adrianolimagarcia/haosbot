@@ -15,15 +15,15 @@ import (
 )
 
 type chatCompletionsRequest struct {
-	Model               string          `json:"model"`
+	Model               string           `json:"model"`
 	Messages            []map[string]any `json:"messages"`
-	Temperature         float64         `json:"temperature"`
-	MaxTokens           int             `json:"max_tokens"`
-	MaxCompletionTokens int             `json:"max_completion_tokens"`
-	ReasoningEffort     string          `json:"reasoning_effort"`
-	Tools               []openAITool    `json:"tools"`
-	ToolChoice          any             `json:"tool_choice"`
-	Stream              bool            `json:"stream"`
+	Temperature         float64          `json:"temperature"`
+	MaxTokens           int              `json:"max_tokens"`
+	MaxCompletionTokens int              `json:"max_completion_tokens"`
+	ReasoningEffort     string           `json:"reasoning_effort"`
+	Tools               []openAITool     `json:"tools"`
+	ToolChoice          any              `json:"tool_choice"`
+	Stream              bool             `json:"stream"`
 }
 
 type openAITool struct {
@@ -194,7 +194,29 @@ func (s *Server) handleChatCompletionStream(w http.ResponseWriter, ctx context.C
 	id := completionID("chatcmpl")
 	writeStreamChunk(w, id, modelName, map[string]any{"role": "assistant"}, "", nil)
 
-	for ev := range stream {
+	for {
+		var ev core.StreamEvent
+		var ok bool
+		select {
+		case <-ctx.Done():
+			// Do not let a provider that fails to close its event channel hold the
+			// HTTP handler (and, eventually, server shutdown) past the request
+			// deadline. Correct providers observe this same context and tear down
+			// their transport when it is cancelled.
+			writeSSEError(w, &core.Response{Content: ctx.Err().Error(), FinishReason: core.FinishError})
+			writeSSEDone(w)
+			return
+		case ev, ok = <-stream:
+			if !ok {
+				// A clean provider stream always includes StreamDone. Treat a bare
+				// channel close as truncation instead of telling the client that a
+				// partial answer completed successfully.
+				writeSSEError(w, &core.Response{Content: "Provider stream ended before completion", FinishReason: core.FinishError})
+				writeSSEDone(w)
+				return
+			}
+		}
+
 		switch ev.Kind {
 		case core.StreamText:
 			writeStreamChunk(w, id, modelName, map[string]any{"content": ev.Text}, "", nil)
@@ -219,12 +241,13 @@ func (s *Server) handleChatCompletionStream(w http.ResponseWriter, ctx context.C
 		case core.StreamDone:
 			if ev.Err != nil || ev.Response == nil || ev.Response.FinishReason == core.FinishError {
 				writeSSEError(w, streamErrorResponse(ev))
-				continue
+			} else {
+				writeStreamChunk(w, id, modelName, map[string]any{}, finishReason(ev.Response), usageMap(ev.Response.Usage))
 			}
-			writeStreamChunk(w, id, modelName, map[string]any{}, finishReason(ev.Response), usageMap(ev.Response.Usage))
+			writeSSEDone(w)
+			return
 		}
 	}
-	writeSSEDone(w)
 }
 
 func writeChatCompletion(w http.ResponseWriter, modelName, content, prefix string) {

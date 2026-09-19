@@ -286,7 +286,11 @@ func (s *Server) handleWebUISkill(w http.ResponseWriter, r *http.Request) {
 	}
 	workspace := webUIWorkspace(s.cfg)
 	loader := skills.New(workspace)
-	workspaceDir := filepath.Join(workspace, "skills", name)
+	workspaceDir, pathErr := resolveWebUIWorkspacePath(workspace, filepath.Join("skills", name))
+	if pathErr != nil {
+		http.Error(w, pathErr.Error(), http.StatusForbidden)
+		return
+	}
 	workspaceFile := filepath.Join(workspaceDir, "SKILL.md")
 
 	switch r.Method {
@@ -331,6 +335,33 @@ func (s *Server) handleWebUISkill(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func resolveWebUIWorkspacePath(workspace, rel string) (string, error) {
+	root, err := filepath.Abs(workspace)
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	target, err := filepath.Abs(filepath.Join(root, filepath.Clean(rel)))
+	if err != nil {
+		return "", err
+	}
+	prefix := root + string(os.PathSeparator)
+	if target != root && !strings.HasPrefix(target, prefix) {
+		return "", errors.New("path escapes workspace")
+	}
+	// For existing paths, resolve symlinks and re-check containment. This closes
+	// the lexical-containment bypass where workspace/link -> /outside.
+	if resolved, err := filepath.EvalSymlinks(target); err == nil {
+		if resolved != root && !strings.HasPrefix(resolved, prefix) {
+			return "", errors.New("symlink escapes workspace")
+		}
+		target = resolved
+	}
+	return target, nil
+}
+
 func (s *Server) handleWebUIFilePreview(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -342,19 +373,10 @@ func (s *Server) handleWebUIFilePreview(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "path is required", http.StatusBadRequest)
 		return
 	}
-	workspace, err := filepath.Abs(webUIWorkspace(s.cfg))
+	workspace := webUIWorkspace(s.cfg)
+	target, err := resolveWebUIWorkspacePath(workspace, rel)
 	if err != nil {
-		http.Error(w, "workspace unavailable", http.StatusInternalServerError)
-		return
-	}
-	target, err := filepath.Abs(filepath.Join(workspace, filepath.Clean(rel)))
-	if err != nil {
-		http.Error(w, "invalid path", http.StatusBadRequest)
-		return
-	}
-	prefix := workspace + string(os.PathSeparator)
-	if target != workspace && !strings.HasPrefix(target, prefix) {
-		http.Error(w, "path escapes workspace", http.StatusForbidden)
+		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 	info, err := os.Stat(target)

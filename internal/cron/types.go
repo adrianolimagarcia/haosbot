@@ -10,9 +10,13 @@ const (
 	PayloadAgentTurn   = "agent_turn"
 	PayloadSystemEvent = "system_event"
 
+	StatusRunning = "running"
 	StatusOK      = "ok"
 	StatusError   = "error"
 	StatusSkipped = "skipped"
+
+	MisfireFireOnce = "fire_once"
+	MisfireSkip     = "skip"
 )
 
 type Schedule struct {
@@ -26,6 +30,7 @@ type Schedule struct {
 type Payload struct {
 	Kind           string         `json:"kind"`
 	Message        string         `json:"message"`
+	SystemEvent    string         `json:"systemEvent,omitempty"`
 	SessionKey     string         `json:"sessionKey,omitempty"`
 	OriginChannel  string         `json:"originChannel,omitempty"`
 	OriginChatID   string         `json:"originChatId,omitempty"`
@@ -33,20 +38,24 @@ type Payload struct {
 }
 
 type RunRecord struct {
-	RunAtMS    int64  `json:"runAtMs"`
-	Status     string `json:"status"`
-	DurationMS int64  `json:"durationMs"`
-	Error      string `json:"error,omitempty"`
-	RunID      string `json:"runId,omitempty"`
+	RunAtMS         int64  `json:"runAtMs"`
+	ScheduledForMS  int64  `json:"scheduledForMs,omitempty"`
+	Status          string `json:"status"`
+	DurationMS      int64  `json:"durationMs"`
+	Error           string `json:"error,omitempty"`
+	RunID           string `json:"runId,omitempty"`
+	IdempotencyKey  string `json:"idempotencyKey,omitempty"`
 }
 
 type State struct {
-	NextRunAtMS *int64      `json:"nextRunAtMs,omitempty"`
-	LastRunAtMS *int64      `json:"lastRunAtMs,omitempty"`
-	LastStatus  string      `json:"lastStatus,omitempty"`
-	LastError   string      `json:"lastError,omitempty"`
-	RunHistory  []RunRecord `json:"runHistory,omitempty"`
-	Pending     bool        `json:"-"`
+	NextRunAtMS        *int64      `json:"nextRunAtMs,omitempty"`
+	LastRunAtMS        *int64      `json:"lastRunAtMs,omitempty"`
+	LastScheduledForMS *int64      `json:"lastScheduledForMs,omitempty"`
+	LastStatus         string      `json:"lastStatus,omitempty"`
+	LastError          string      `json:"lastError,omitempty"`
+	LastIdempotencyKey string      `json:"lastIdempotencyKey,omitempty"`
+	RunHistory         []RunRecord `json:"runHistory,omitempty"`
+	Pending            bool        `json:"-"`
 }
 
 type Job struct {
@@ -59,6 +68,15 @@ type Job struct {
 	CreatedAtMS    int64    `json:"createdAtMs"`
 	UpdatedAtMS    int64    `json:"updatedAtMs"`
 	DeleteAfterRun bool     `json:"deleteAfterRun,omitempty"`
+	TimeoutMS      int64    `json:"timeoutMs,omitempty"`
+	MisfirePolicy  string   `json:"misfirePolicy,omitempty"`
+	MisfireGraceMS int64    `json:"misfireGraceMs,omitempty"`
+
+	// Execution-only fields are never persisted. They bind one dispatch to the
+	// schedule instant that produced it, which makes the idempotency key stable
+	// across retries/restarts.
+	ScheduledForMS int64  `json:"-"`
+	IdempotencyKey string `json:"-"`
 }
 
 type Store struct {
@@ -77,6 +95,9 @@ type Update struct {
 	Schedule       *Schedule
 	Message        *string
 	DeleteAfterRun *bool
+	TimeoutMS      *int64
+	MisfirePolicy  *string
+	MisfireGraceMS *int64
 }
 
 type Executor func(ctx context.Context, job Job, runID string) (RunResult, error)
@@ -100,6 +121,10 @@ func cloneJob(in Job) Job {
 	if in.State.LastRunAtMS != nil {
 		v := *in.State.LastRunAtMS
 		out.State.LastRunAtMS = &v
+	}
+	if in.State.LastScheduledForMS != nil {
+		v := *in.State.LastScheduledForMS
+		out.State.LastScheduledForMS = &v
 	}
 	return out
 }

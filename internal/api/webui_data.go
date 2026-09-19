@@ -136,6 +136,7 @@ func (s *Server) handleWebUIState(w http.ResponseWriter, r *http.Request) {
 			"memory_search": true,
 			"graph_async": true,
 			"streaming": true,
+			"scheduler": s.scheduler.Load() != nil,
 		},
 	})
 }

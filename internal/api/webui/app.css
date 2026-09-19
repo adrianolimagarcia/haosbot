@@ -547,3 +547,34 @@ html[data-theme="dark"] .control-list-row,
 html[data-theme="dark"] .control-pre,
 html[data-theme="dark"] .memory-editor,
 html[data-theme="dark"] .control-input { background: #202023; color: #e4e4e7; border-color: var(--border-color); }
+
+
+.automation-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.automation-schedule-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+.automation-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.automation-job-row,
+.automation-run-row {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+.automation-job-status {
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}

@@ -364,16 +364,298 @@
     root.append(nameInput, area, toolbar);
   }
 
-  function renderAutomations(root) {
-    setPanelTitle('Automações', 'Runtime');
-    const cron = (state.skills || []).find(skill => skill.name === 'cron');
-    const grid = el('div', 'control-grid');
-    grid.append(
-      card('Cron skill', cron ? (cron.available ? 'Disponível para o agente.' : 'Instalada, com requisito ausente.') : 'Skill cron não encontrada.', cron ? 'Detectada' : 'Ausente'),
-      card('Background memory', 'GraphRAG e sumarização automática rodam fora do caminho crítico.', 'Assíncrono'),
-      card('Scheduler nativo', 'Este runtime não expõe um CRUD de scheduler equivalente ao nanobot WebUI; a UI não inventa automações inexistentes.', 'N/A')
+  function automationSessionKey() {
+    if (activeKey) return activeKey;
+    const id = sessionStorage.getItem('haosbot_session_id');
+    return id ? 'webui:' + id : '';
+  }
+
+  function scheduleLabel(schedule) {
+    if (!schedule) return 'sem agenda';
+    if (schedule.kind === 'every') {
+      const ms = Number(schedule.everyMs || 0);
+      if (ms % 3600000 === 0) return 'a cada ' + (ms / 3600000) + 'h';
+      if (ms % 60000 === 0) return 'a cada ' + (ms / 60000) + 'm';
+      if (ms % 1000 === 0) return 'a cada ' + (ms / 1000) + 's';
+      return 'a cada ' + ms + 'ms';
+    }
+    if (schedule.kind === 'cron') return 'cron ' + schedule.expr + (schedule.tz ? ' · ' + schedule.tz : '');
+    if (schedule.kind === 'at' && schedule.atMs) return 'uma vez · ' + new Date(schedule.atMs).toLocaleString();
+    return schedule.kind || 'agenda';
+  }
+
+  function datetimeLocal(ms) {
+    if (!ms) return '';
+    const d = new Date(Number(ms));
+    const pad = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+      'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  function automationEditor(root, job = null) {
+    root.replaceChildren();
+    setPanelTitle(job ? 'Editar automação' : 'Nova automação', 'Scheduler');
+
+    const form = el('div', 'automation-editor');
+    const name = el('input', 'control-input');
+    name.placeholder = 'Nome';
+    name.value = job?.name || '';
+
+    const message = el('textarea', 'memory-editor');
+    message.placeholder = 'Instrução que o HAOSBOT deve executar';
+    message.value = job?.payload?.message || '';
+
+    const session = el('input', 'control-input');
+    session.placeholder = 'Sessão vinculada';
+    session.value = job?.payload?.sessionKey || automationSessionKey();
+
+    const kind = el('select', 'control-input');
+    for (const value of ['every', 'cron', 'at']) {
+      const option = el('option', '', value === 'every' ? 'Intervalo' : value === 'cron' ? 'Cron' : 'Uma vez');
+      option.value = value;
+      kind.appendChild(option);
+    }
+    kind.value = job?.schedule?.kind || 'every';
+
+    const every = el('input', 'control-input');
+    every.type = 'number';
+    every.min = '1';
+    every.placeholder = 'Intervalo em segundos';
+    every.value = job?.schedule?.everyMs ? String(Math.max(1, Math.round(job.schedule.everyMs / 1000))) : '3600';
+
+    const expr = el('input', 'control-input');
+    expr.placeholder = '0 9 * * 1-5';
+    expr.value = job?.schedule?.expr || '';
+
+    const timezone = el('input', 'control-input');
+    timezone.placeholder = 'America/Sao_Paulo';
+    timezone.value = job?.schedule?.tz || state?.config?.agents?.defaults?.timezone || 'UTC';
+
+    const at = el('input', 'control-input');
+    at.type = 'datetime-local';
+    at.value = datetimeLocal(job?.schedule?.atMs);
+
+    const deleteAfter = el('label', 'automation-check');
+    const deleteCheckbox = document.createElement('input');
+    deleteCheckbox.type = 'checkbox';
+    deleteCheckbox.checked = job?.deleteAfterRun ?? (kind.value === 'at');
+    deleteAfter.append(deleteCheckbox, document.createTextNode(' Excluir após executar'));
+
+    const scheduleFields = el('div', 'automation-schedule-fields');
+    const refreshScheduleFields = () => {
+      scheduleFields.replaceChildren();
+      if (kind.value === 'every') scheduleFields.append(every);
+      if (kind.value === 'cron') scheduleFields.append(expr, timezone);
+      if (kind.value === 'at') scheduleFields.append(at, deleteAfter);
+    };
+    kind.addEventListener('change', refreshScheduleFields);
+    refreshScheduleFields();
+
+    const toolbar = el('div', 'control-toolbar');
+    const save = el('button', 'control-button primary', job ? 'Salvar' : 'Criar');
+    save.type = 'button';
+    const cancel = el('button', 'control-button', 'Cancelar');
+    cancel.type = 'button';
+    const status = el('span', 'control-muted', '');
+    cancel.addEventListener('click', () => renderView('automations'));
+
+    save.addEventListener('click', async () => {
+      const schedule = { kind: kind.value };
+      if (kind.value === 'every') {
+        const seconds = Number(every.value);
+        if (!Number.isFinite(seconds) || seconds <= 0) { status.textContent = 'Intervalo inválido'; return; }
+        schedule.everyMs = Math.round(seconds * 1000);
+      } else if (kind.value === 'cron') {
+        schedule.expr = expr.value.trim();
+        schedule.tz = timezone.value.trim() || 'UTC';
+      } else {
+        const ms = Date.parse(at.value);
+        if (!Number.isFinite(ms)) { status.textContent = 'Data/hora inválida'; return; }
+        schedule.atMs = ms;
+      }
+
+      const sessionKey = session.value.trim();
+      if (!sessionKey || !sessionKey.includes(':')) { status.textContent = 'Sessão vinculada inválida'; return; }
+      if (!name.value.trim() || !message.value.trim()) { status.textContent = 'Nome e instrução são obrigatórios'; return; }
+
+      try {
+        status.textContent = 'Salvando…';
+        if (job) {
+          await api('/api/webui/automation?id=' + encodeURIComponent(job.id), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: name.value.trim(),
+              message: message.value.trim(),
+              schedule,
+              delete_after_run: kind.value === 'at' ? deleteCheckbox.checked : false
+            })
+          });
+        } else {
+          await api('/api/webui/automations', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: name.value.trim(),
+              message: message.value.trim(),
+              session_key: sessionKey,
+              schedule,
+              delete_after_run: kind.value === 'at' ? deleteCheckbox.checked : false
+            })
+          });
+        }
+        await renderAutomations(root);
+      } catch (err) {
+        status.textContent = err.message;
+      }
+    });
+
+    toolbar.append(save, cancel, status);
+    form.append(
+      el('div', 'control-section-title', 'Identidade'),
+      name,
+      message,
+      el('div', 'control-section-title', 'Sessão vinculada'),
+      session,
+      el('div', 'control-section-title', 'Agenda'),
+      kind,
+      scheduleFields,
+      toolbar
     );
-    root.appendChild(grid);
+    root.appendChild(form);
+  }
+
+  async function showAutomationRun(root, job, run) {
+    setPanelTitle(job.name, 'Run detail');
+    root.replaceChildren(el('div', 'session-loading', 'Carregando execução…'));
+    try {
+      const detail = await api('/api/webui/automation/run?run_id=' + encodeURIComponent(run.runId));
+      root.replaceChildren();
+      const toolbar = el('div', 'control-toolbar');
+      const back = el('button', 'control-button', '← Automação');
+      back.type = 'button';
+      back.addEventListener('click', () => showAutomation(root, job.id));
+      toolbar.append(back, el('span', 'control-badge', detail.status || 'unknown'));
+      root.append(
+        toolbar,
+        card('Execução', new Date(Number(detail.created_at_ms || 0)).toLocaleString(), (detail.duration_ms || 0) + ' ms'),
+        el('div', 'control-section-title', detail.error ? 'Erro' : 'Resposta'),
+        el('pre', 'control-pre', detail.error || detail.response || '(sem resposta)')
+      );
+    } catch (err) {
+      root.replaceChildren(el('div', 'session-loading', err.message));
+    }
+  }
+
+  async function showAutomation(root, id) {
+    root.replaceChildren(el('div', 'session-loading', 'Carregando automação…'));
+    try {
+      const job = await api('/api/webui/automation?id=' + encodeURIComponent(id));
+      setPanelTitle(job.name, 'Automation');
+      root.replaceChildren();
+
+      const toolbar = el('div', 'control-toolbar');
+      const back = el('button', 'control-button', '← Automações');
+      const run = el('button', 'control-button primary', job.state?.pending ? 'Executando…' : 'Run now');
+      const toggle = el('button', 'control-button', job.enabled ? 'Pausar' : 'Retomar');
+      const edit = el('button', 'control-button', 'Editar');
+      const remove = el('button', 'control-button danger', 'Excluir');
+      back.type = run.type = toggle.type = edit.type = remove.type = 'button';
+      run.disabled = Boolean(job.state?.pending);
+      back.addEventListener('click', () => renderView('automations'));
+      run.addEventListener('click', async () => {
+        try {
+          run.disabled = true; run.textContent = 'Enfileirado…';
+          await api('/api/webui/automation/run?id=' + encodeURIComponent(job.id), { method: 'POST' });
+          setTimeout(() => showAutomation(root, job.id), 700);
+        } catch (err) { run.disabled = false; run.textContent = err.message; }
+      });
+      toggle.addEventListener('click', async () => {
+        await api('/api/webui/automation?id=' + encodeURIComponent(job.id), {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !job.enabled })
+        });
+        showAutomation(root, job.id);
+      });
+      edit.addEventListener('click', () => automationEditor(root, job));
+      remove.addEventListener('click', async () => {
+        if (!window.confirm('Excluir a automação ' + job.name + '?')) return;
+        await api('/api/webui/automation?id=' + encodeURIComponent(job.id), { method: 'DELETE' });
+        renderView('automations');
+      });
+      toolbar.append(back, run, toggle, edit, remove);
+
+      const status = job.state?.pending ? 'executando' : job.enabled ? 'ativa' : 'pausada';
+      const grid = el('div', 'control-grid');
+      grid.append(
+        card('Status', scheduleLabel(job.schedule), status),
+        card('Sessão', job.payload?.sessionKey || '', job.payload?.originChannel || ''),
+        card('Última execução', job.state?.lastRunAtMs ? new Date(job.state.lastRunAtMs).toLocaleString() : 'Nunca', job.state?.lastStatus || '—')
+      );
+      root.append(toolbar, grid, el('div', 'control-section-title', 'Instrução'), el('pre', 'control-pre', job.payload?.message || ''));
+
+      root.appendChild(el('div', 'control-section-title', 'Histórico'));
+      const history = el('div', 'control-list');
+      const runs = Array.isArray(job.state?.runHistory) ? [...job.state.runHistory].reverse() : [];
+      for (const item of runs) {
+        const row = el('button', 'control-list-row automation-run-row');
+        row.type = 'button';
+        row.append(
+          el('div', '', new Date(Number(item.runAtMs || 0)).toLocaleString()),
+          el('div', 'control-muted', (item.status || 'unknown') + ' · ' + (item.durationMs || 0) + ' ms')
+        );
+        if (item.runId) row.addEventListener('click', () => showAutomationRun(root, job, item));
+        else row.disabled = true;
+        history.appendChild(row);
+      }
+      if (!runs.length) history.appendChild(el('div', 'session-loading', 'Nenhuma execução ainda.'));
+      root.appendChild(history);
+    } catch (err) {
+      root.replaceChildren(el('div', 'session-loading', err.message));
+    }
+  }
+
+  async function renderAutomations(root) {
+    setPanelTitle('Automações', 'Scheduler');
+    root.replaceChildren(el('div', 'session-loading', 'Carregando automações…'));
+    try {
+      const payload = await api('/api/webui/automations');
+      root.replaceChildren();
+
+      const toolbar = el('div', 'control-toolbar');
+      const create = el('button', 'control-button primary', 'Nova automação');
+      const refresh = el('button', 'control-button', 'Atualizar');
+      create.type = refresh.type = 'button';
+      create.addEventListener('click', () => automationEditor(root));
+      refresh.addEventListener('click', () => renderAutomations(root));
+      toolbar.append(create, refresh, el('span', 'control-badge', payload.running ? 'scheduler online' : 'scheduler parado'));
+      root.appendChild(toolbar);
+
+      const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+      const grid = el('div', 'control-grid');
+      grid.append(
+        card('Ativas', 'Automações habilitadas', jobs.filter(j => j.enabled).length),
+        card('Executando', 'Runs em andamento', jobs.filter(j => j.state?.pending).length),
+        card('Total', 'Jobs persistidos', jobs.length)
+      );
+      root.appendChild(grid);
+
+      const list = el('div', 'control-list');
+      for (const job of jobs) {
+        const button = el('button', 'control-list-row automation-job-row');
+        button.type = 'button';
+        const left = el('div');
+        left.append(el('div', '', job.name || job.id), el('div', 'control-muted', scheduleLabel(job.schedule)));
+        const right = el('div', 'automation-job-status', job.state?.pending ? 'executando' : job.enabled ? 'ativa' : 'pausada');
+        button.append(left, right);
+        button.addEventListener('click', () => showAutomation(root, job.id));
+        list.appendChild(button);
+      }
+      if (!jobs.length) list.appendChild(el('div', 'session-loading', 'Nenhuma automação criada.'));
+      root.appendChild(list);
+    } catch (err) {
+      root.replaceChildren(el('div', 'session-loading', err.message));
+    }
   }
 
   function renderChannels(root) {

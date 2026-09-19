@@ -70,15 +70,12 @@ type Builder struct {
 	// point both implementations at one directory.
 	BuiltinSkillsDir string
 
-	// memoryCache keeps MEMORY.md out of the per-turn filesystem hot path.
-	// A short stat interval preserves external-editor visibility without doing
-	// an os.ReadFile for every prompt build.
-	memoryMu       sync.Mutex
-	memoryCached   string
-	memoryChecked  time.Time
-	memoryModTime  time.Time
-	memorySize     int64
-	memoryExists   bool
+	// memoryCache keeps MEMORY.md entirely out of the warm per-turn filesystem
+	// path. The first read primes the snapshot and a tiny background watcher
+	// refreshes it; normal prompt builds only take an RWMutex read lock.
+	memoryOnce   sync.Once
+	memoryMu     sync.RWMutex
+	memoryCached string
 }
 
 // New creates a Builder for an agent workspace.
@@ -348,48 +345,37 @@ func (b *Builder) LoadBootstrapFiles(projectWorkspace string) string {
 // The cache checks metadata at most four times per second and reads file bytes
 // only when size/modtime changed.
 func (b *Builder) ReadMemory() string {
-	const statInterval = 250 * time.Millisecond
-	path := filepath.Join(expandPath(b.Workspace), "memory", "MEMORY.md")
-
-	b.memoryMu.Lock()
-	defer b.memoryMu.Unlock()
-
-	now := time.Now()
-	if !b.memoryChecked.IsZero() && now.Sub(b.memoryChecked) < statInterval {
-		return b.memoryCached
-	}
-	b.memoryChecked = now
-
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			b.memoryCached = ""
-			b.memoryExists = false
-			b.memorySize = 0
-			b.memoryModTime = time.Time{}
-		}
-		return b.memoryCached
-	}
-	if b.memoryExists && info.Size() == b.memorySize && info.ModTime().Equal(b.memoryModTime) {
-		return b.memoryCached
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return b.memoryCached
-	}
-	b.memoryCached = string(data)
-	b.memoryExists = true
-	b.memorySize = info.Size()
-	b.memoryModTime = info.ModTime()
-	return b.memoryCached
+	b.memoryOnce.Do(func() {
+		b.refreshMemorySnapshot()
+		go b.watchMemorySnapshot()
+	})
+	b.memoryMu.RLock()
+	value := b.memoryCached
+	b.memoryMu.RUnlock()
+	return value
 }
 
-// InvalidateMemoryCache makes the next prompt observe MEMORY.md immediately.
-// Writers in this process should call it after an atomic memory update.
-func (b *Builder) InvalidateMemoryCache() {
+func (b *Builder) refreshMemorySnapshot() {
+	path := filepath.Join(expandPath(b.Workspace), "memory", "MEMORY.md")
+	data, err := os.ReadFile(path)
+	value := ""
+	if err == nil {
+		value = string(data)
+	} else if !os.IsNotExist(err) {
+		// A transient read failure must not erase the last known-good snapshot.
+		return
+	}
 	b.memoryMu.Lock()
-	b.memoryChecked = time.Time{}
+	b.memoryCached = value
 	b.memoryMu.Unlock()
+}
+
+func (b *Builder) watchMemorySnapshot() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		b.refreshMemorySnapshot()
+	}
 }
 
 // SkillsLoader builds the loader the reference constructs once in

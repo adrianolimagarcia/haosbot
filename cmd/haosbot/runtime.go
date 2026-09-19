@@ -161,6 +161,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("start memory projections: %w", err)
 	}
+	memoryMDProjection := newMemoryMDProjector(filepath.Join(workspace, "memory", "MEMORY.md"), graphPool, 2*time.Second)
 
 	loop, err := agent.NewLoop(agent.LoopConfig{
 		Bus:                   messageBus,
@@ -190,6 +191,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	if err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		projections.Close(shutdownCtx)
+		memoryMDProjection.Close()
 		cancel()
 		graphPool.LogShutdownStats()
 		_ = graphPool.Close()
@@ -209,6 +211,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		closeF: func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			projections.Close(shutdownCtx)
+			memoryMDProjection.Close()
 			cancel()
 			// Logged after the indexer has drained and before Close, so the
 			// counters describe the whole life of the pool: the graph store

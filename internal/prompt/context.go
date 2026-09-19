@@ -73,9 +73,12 @@ type Builder struct {
 	// memoryCache keeps MEMORY.md entirely out of the warm per-turn filesystem
 	// path. The first read primes the snapshot and a tiny background watcher
 	// refreshes it; normal prompt builds only take an RWMutex read lock.
-	memoryOnce   sync.Once
-	memoryMu     sync.RWMutex
-	memoryCached string
+	memoryOnce    sync.Once
+	memoryMu      sync.RWMutex
+	memoryCached  string
+	memoryModTime time.Time
+	memorySize    int64
+	memoryExists  bool
 }
 
 // New creates a Builder for an agent workspace.
@@ -357,16 +360,41 @@ func (b *Builder) ReadMemory() string {
 
 func (b *Builder) refreshMemorySnapshot() {
 	path := filepath.Join(expandPath(b.Workspace), "memory", "MEMORY.md")
+	info, err := os.Stat(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return
+		}
+		b.memoryMu.Lock()
+		if b.memoryExists {
+			b.memoryCached = ""
+			b.memoryModTime = time.Time{}
+			b.memorySize = 0
+			b.memoryExists = false
+		}
+		b.memoryMu.Unlock()
+		return
+	}
+
+	b.memoryMu.RLock()
+	unchanged := b.memoryExists &&
+		b.memorySize == info.Size() &&
+		b.memoryModTime.Equal(info.ModTime())
+	b.memoryMu.RUnlock()
+	if unchanged {
+		return
+	}
+
 	data, err := os.ReadFile(path)
-	value := ""
-	if err == nil {
-		value = string(data)
-	} else if !os.IsNotExist(err) {
+	if err != nil {
 		// A transient read failure must not erase the last known-good snapshot.
 		return
 	}
 	b.memoryMu.Lock()
-	b.memoryCached = value
+	b.memoryCached = string(data)
+	b.memoryModTime = info.ModTime()
+	b.memorySize = info.Size()
+	b.memoryExists = true
 	b.memoryMu.Unlock()
 }
 

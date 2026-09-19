@@ -124,9 +124,15 @@ func TestParametersMatchReference(t *testing.T) {
 		{
 			tool: NewExec(ExecOptions{}),
 			name: "exec",
+			// yield_time_ms is intentionally absent: the reference advertises it
+			// for background exec sessions, but this port has no session manager
+			// and refuses the argument at execute time. Advertising a parameter
+			// that is always rejected made the model spend a provider round trip
+			// per command discovering that, so it is no longer published. The
+			// exact-length check below keeps it out.
 			props: []string{
 				"command", "cmd", "working_dir", "workdir", "timeout", "shell", "login",
-				"yield_time_ms", "max_output_chars", "max_output_tokens",
+				"max_output_chars", "max_output_tokens",
 			},
 			required: nil,
 		},

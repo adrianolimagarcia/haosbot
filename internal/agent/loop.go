@@ -445,6 +445,32 @@ func (l *Loop) ProcessMessageWithHook(ctx context.Context, msg core.InboundMessa
 	return l.processMessage(ctx, msg, hook)
 }
 
+// closeUnansweredTurn records a turn that ended without a final answer.
+//
+// The user message is saved durably before the runner starts, but the turn's
+// own messages are appended only once the runner returns cleanly. A turn that
+// dies to the request deadline or to a cancellation therefore left that user
+// message as the last entry of the transcript, and the next turn saw an
+// unanswered question, answered the stale question, and left the new one
+// unanswered in turn. Appending a terminal marker closes the turn so the
+// transcript never ends on an unanswered user message.
+//
+// Only the marker is persisted, never res.Messages: a cancelled run can stop
+// between an assistant tool_call and its matching tool result, and replaying
+// that pair half-written would send the provider a malformed request on the
+// next turn.
+func (l *Loop) closeUnansweredTurn(transcript Transcript, turnID, reason string) {
+	marker := *core.NewMessage(core.RoleAssistant,
+		fmt.Sprintf("[turn ended without an answer: %s]", reason))
+	marker.Timestamp = isoLocal(time.Now())
+	marker.SetExtra("turn_id", mustRawAny(turnID))
+	transcript.AddMessage(marker)
+	if err := transcript.Save(); err != nil {
+		slog.Warn("agent: could not persist unanswered-turn marker",
+			"session", transcript.Key(), "turn_id", turnID, "error", err)
+	}
+}
+
 func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook Hook) (*core.OutboundMessage, error) {
 	turnStarted := time.Now()
 	if l.cfg.Metrics != nil {
@@ -652,9 +678,11 @@ func (l *Loop) processMessage(ctx context.Context, msg core.InboundMessage, hook
 				l.cfg.Metrics.IncProviderTimeouts()
 			}
 		}
+		l.closeUnansweredTurn(transcript, turnID, err.Error())
 		return nil, fmt.Errorf("agent: run: %w", err)
 	}
 	if res.StopReason == StopCanceled && runCtx.Err() != nil {
+		l.closeUnansweredTurn(transcript, turnID, runCtx.Err().Error())
 		return nil, runCtx.Err()
 	}
 	if l.cfg.Metrics != nil {

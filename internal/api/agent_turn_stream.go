@@ -17,7 +17,23 @@ type agentTurnStreamEvent struct {
 
 type agentTurnStreamHook struct { agent.NopHook; ctx context.Context; events chan<- agentTurnStreamEvent }
 func (h *agentTurnStreamHook) emit(event agentTurnStreamEvent) { select { case h.events <- event: case <-h.ctx.Done(): } }
-func (h *agentTurnStreamHook) BeforeIteration(ctx context.Context, iteration int, messages []core.Message) error { chars:=0; for i:=range messages { if messages[i].Content.IsText(){ chars+=len([]rune(messages[i].Content.Text)) } else { for _,b:=range messages[i].Content.Blocks { chars+=len([]rune(b.Text)) } } }; h.emit(agentTurnStreamEvent{Type:"context_snapshot",Iteration:iteration,MessageCount:len(messages),ContextChars:chars}); return nil }
+// BeforeIteration publishes the context snapshot the WebUI uses for its token
+// indicator and per-iteration activity row. internal/api/webui/enhancements.js
+// consumes "context_snapshot"; dropping the emission silently broke that panel.
+func (h *agentTurnStreamHook) BeforeIteration(ctx context.Context, iteration int, messages []core.Message) error {
+	chars := 0
+	for i := range messages {
+		if messages[i].Content.IsText() {
+			chars += len([]rune(messages[i].Content.Text))
+			continue
+		}
+		for _, block := range messages[i].Content.Blocks {
+			chars += len([]rune(block.Text))
+		}
+	}
+	h.emit(agentTurnStreamEvent{Type:"context_snapshot",Iteration:iteration,MessageCount:len(messages),ContextChars:chars})
+	return nil
+}
 func (h *agentTurnStreamHook) OnTextDelta(ctx context.Context, delta string){ h.emit(agentTurnStreamEvent{Type:"text_delta",Delta:delta}) }
 func (h *agentTurnStreamHook) OnReasoningDelta(ctx context.Context, delta string){ h.emit(agentTurnStreamEvent{Type:"reasoning_delta",Delta:delta}) }
 func (h *agentTurnStreamHook) OnReasoningEnd(ctx context.Context){ h.emit(agentTurnStreamEvent{Type:"reasoning_end"}) }

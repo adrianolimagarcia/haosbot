@@ -114,14 +114,14 @@ func convertCliApp(cli cliAppEntry) SkillItem {
 		desc = "CLI Tool application"
 	}
 	return SkillItem{
-		ID:               "cliapps:" + cli.Name,
-		SkillID:          cli.Name,
-		Name:             cli.Name,
-		Description:      desc,
-		Source:           "CLI-Anything",
-		Provider:         "cliapps",
-		URL:              cli.URL,
-		Version:          cli.Version,
+		ID:          "cliapps:" + cli.Name,
+		SkillID:     cli.Name,
+		Name:        cli.Name,
+		Description: desc,
+		Source:      "CLI-Anything",
+		Provider:    "cliapps",
+		URL:         cli.URL,
+		Version:     cli.Version,
 		// The CLI-Anything registry is a catalogue of external applications; it
 		// exposes no archive this runtime knows how to install, so advertising
 		// an installer here would only produce a guaranteed failure.

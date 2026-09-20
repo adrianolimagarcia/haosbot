@@ -108,13 +108,42 @@ func (c *Client) readLoop(r io.Reader, gen uint64) {
 	c.failGeneration(gen, errTransport)
 }
 
+// writeContext writes b to the MCP server's stdin without blocking past ctx.
+//
+// A pipe write blocks once the child stops draining its buffer, and an *os.File
+// write cannot be interrupted, so the write runs in its own goroutine and the
+// caller waits on ctx instead. On cancellation stdin is closed, which unblocks
+// the writer rather than leaving it (and every other rpc, which needs writeMu)
+// stuck forever.
+func (c *Client) writeContext(ctx context.Context, stdin io.WriteCloser, b []byte) error {
+	done := make(chan error, 1)
+	go func() {
+		c.writeMu.Lock()
+		_, err := stdin.Write(b)
+		c.writeMu.Unlock()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		_ = stdin.Close()
+		return ctx.Err()
+	}
+}
+
 func (c *Client) rpc(ctx context.Context, method string, params any) (json.RawMessage,error) {
 	if err:=c.start(ctx); err!=nil { return nil,err }
 	id:=c.next.Add(1); ch:=make(chan response,1)
 	c.mu.Lock(); if c.cmd==nil { c.mu.Unlock(); return nil,errTransport }; c.pending[id]=ch; stdin:=c.stdin; c.mu.Unlock()
 	b,err:=json.Marshal(request{JSONRPC:"2.0",ID:id,Method:method,Params:params}); if err!=nil{return nil,err}; b=append(b,'\n')
-	c.writeMu.Lock(); _,err=stdin.Write(b); c.writeMu.Unlock()
-	if err!=nil { c.mu.Lock(); delete(c.pending,id); c.mu.Unlock(); return nil,fmt.Errorf("%w: %v",errTransport,err) }
+	if err:=c.writeContext(ctx,stdin,b); err!=nil {
+		c.mu.Lock(); delete(c.pending,id); c.mu.Unlock()
+		// A canceled or expired context is the caller's own deadline, not a
+		// broken transport, so it must not be reported as one.
+		if errors.Is(err,context.Canceled)||errors.Is(err,context.DeadlineExceeded) { return nil,err }
+		return nil,fmt.Errorf("%w: %v",errTransport,err)
+	}
 	select {
 	case <-ctx.Done(): c.mu.Lock(); delete(c.pending,id); c.mu.Unlock(); return nil,ctx.Err()
 	case resp,ok:=<-ch:
@@ -140,12 +169,20 @@ func (c *Client) initialize(ctx context.Context) error {
 	if stdin==nil{c.mu.Unlock(); return errTransport}
 	c.initializedGen=gen
 	c.mu.Unlock()
-	c.writeMu.Lock(); _,err=stdin.Write(b); c.writeMu.Unlock(); return err
+	return c.writeContext(ctx,stdin,b)
 }
 
-func (c *Client) withReconnect(ctx context.Context, fn func(context.Context)(json.RawMessage,error)) (json.RawMessage,error) {
+// withReconnect runs fn, and retries it once on a transport failure when retry
+// is true.
+//
+// Retrying is only safe for read-only operations. A tools/call whose transport
+// breaks after the request bytes reached the server may already have run, so
+// re-sending it would execute the side effect twice.
+func (c *Client) withReconnect(ctx context.Context, retry bool, fn func(context.Context)(json.RawMessage,error)) (json.RawMessage,error) {
+	attempts := 1
+	if retry { attempts = 2 }
 	var last error
-	for attempt:=0; attempt<2; attempt++ {
+	for attempt:=0; attempt<attempts; attempt++ {
 		if attempt>0 { c.reset(); select { case <-ctx.Done(): return nil,ctx.Err(); case <-time.After(50*time.Millisecond): } }
 		if err:=c.initialize(ctx); err!=nil { last=err; if !errors.Is(err,errTransport){return nil,err}; continue }
 		v,err:=fn(ctx); if err==nil{return v,nil}; last=err; if !errors.Is(err,errTransport){return nil,err}
@@ -157,14 +194,15 @@ func (c *Client) reset() { c.mu.Lock(); cmd:=c.cmd; stdin:=c.stdin; c.cmd=nil; c
 
 func (c *Client) ListTools(ctx context.Context) ([]ToolInfo,error) {
 	var out listResult
-	raw,err:=c.withReconnect(ctx,func(ctx context.Context)(json.RawMessage,error){return c.rpc(ctx,"tools/list",map[string]any{})}); if err!=nil{return nil,err}
+	raw,err:=c.withReconnect(ctx,true,func(ctx context.Context)(json.RawMessage,error){return c.rpc(ctx,"tools/list",map[string]any{})}); if err!=nil{return nil,err}
 	if err=json.Unmarshal(raw,&out);err!=nil{return nil,err}; return out.Tools,nil
 }
 
 func (c *Client) Call(ctx context.Context, name string, args json.RawMessage) (tools.Result,error) {
 	var obj map[string]any; if len(args)>0 { if err:=json.Unmarshal(args,&obj);err!=nil{return tools.Result{},err} }; if obj==nil{obj=map[string]any{}}
 	timeout:=time.Duration(c.cfg.ToolTimeout)*time.Second; if timeout<=0{timeout=60*time.Second}; callCtx,cancel:=context.WithTimeout(ctx,timeout); defer cancel()
-	raw,err:=c.withReconnect(callCtx,func(ctx context.Context)(json.RawMessage,error){return c.rpc(ctx,"tools/call",map[string]any{"name":name,"arguments":obj})}); if err!=nil{return tools.Result{},err}
+	// Not retried: see withReconnect.
+	raw,err:=c.withReconnect(callCtx,false,func(ctx context.Context)(json.RawMessage,error){return c.rpc(ctx,"tools/call",map[string]any{"name":name,"arguments":obj})}); if err!=nil{return tools.Result{},err}
 	var out callResult; if err=json.Unmarshal(raw,&out);err!=nil{return tools.Result{},err}; parts:=make([]string,0,len(out.Content)); for _,p:=range out.Content{if p.Text!=""{parts=append(parts,p.Text)}}; return tools.Result{Content:strings.Join(parts,"\n"),IsError:out.IsError},nil
 }
 

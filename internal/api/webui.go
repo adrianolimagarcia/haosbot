@@ -74,6 +74,7 @@ func (s *Server) registerWebUI(mux *http.ServeMux) {
 	s.registerAgentTurnStream(mux)
 	s.registerWebUIRender(mux)
 	s.registerWebUIData(mux)
+	s.registerMarketplace(mux)
 
 	serveAsset := func(path, contentType string, body []byte) {
 		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {

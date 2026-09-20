@@ -195,6 +195,7 @@
     }
     if (view === 'apps') return renderApps(root);
     if (view === 'skills') return renderSkills(root);
+    if (view === 'marketplace') return renderMarketplace(root);
     if (view === 'automations') return renderAutomations(root);
     if (view === 'channels') return renderChannels(root);
     if (view === 'runtime') return renderRuntime(root);
@@ -270,10 +271,13 @@
   function renderSkills(root) {
     setPanelTitle('Skills', 'Capabilities');
     const toolbar = el('div', 'control-toolbar');
-    const create = el('button', 'control-button primary', 'Nova skill');
+    const explore = el('button', 'control-button primary', 'Explorar Mercado de Skills');
+    explore.type = 'button';
+    explore.addEventListener('click', () => openView('marketplace'));
+    const create = el('button', 'control-button', 'Nova skill local');
     create.type = 'button';
     create.addEventListener('click', () => editSkill('', '---\nname: new-skill\ndescription: Describe this skill.\n---\n\n# New Skill\n'));
-    toolbar.appendChild(create);
+    toolbar.append(explore, create);
     root.appendChild(toolbar);
     const list = el('div', 'control-list');
     for (const skill of state.skills || []) {
@@ -294,6 +298,159 @@
       list.appendChild(row);
     }
     root.appendChild(list);
+  }
+
+  let marketplaceProvider = 'all';
+  let marketplaceQuery = '';
+  let marketplaceTimer = null;
+
+  async function renderMarketplace(root) {
+    setPanelTitle('Mercado de Skills & Plugins', 'Catálogo');
+
+    const topBar = el('div', 'control-toolbar');
+    const input = el('input', 'control-input');
+    input.type = 'search';
+    input.placeholder = 'Buscar skills e plugins (ex: image, git, web, research)…';
+    input.style.flex = '1';
+    input.value = marketplaceQuery;
+    topBar.appendChild(input);
+    root.appendChild(topBar);
+
+    const providerBar = el('div', 'control-toolbar');
+    const providers = [
+      { id: 'all', label: 'Todos' },
+      { id: 'skillhub', label: 'SkillHub' },
+      { id: 'skills_sh', label: 'skills.sh' },
+      { id: 'cliapps', label: 'CLI Apps' }
+    ];
+    for (const p of providers) {
+      const btn = el('button', 'control-button' + (marketplaceProvider === p.id ? ' active' : ''), p.label);
+      btn.type = 'button';
+      btn.addEventListener('click', () => {
+        marketplaceProvider = p.id;
+        renderMarketplace(root);
+      });
+      providerBar.appendChild(btn);
+    }
+    root.appendChild(providerBar);
+
+    const status = el('div', 'control-muted', 'Carregando catálogo…');
+    status.style.marginBottom = '12px';
+    const grid = el('div', 'control-grid');
+    grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(280px, 1fr))';
+    root.append(status, grid);
+
+    async function loadItems() {
+      grid.replaceChildren();
+      status.textContent = 'Carregando catálogo…';
+      try {
+        let endpoint = '/api/webui/skills/marketplace/trending?provider=' + encodeURIComponent(marketplaceProvider);
+        if (marketplaceQuery.trim().length >= 2) {
+          endpoint = '/api/webui/skills/marketplace/search?q=' + encodeURIComponent(marketplaceQuery.trim()) + '&provider=' + encodeURIComponent(marketplaceProvider);
+        }
+        const data = await api(endpoint);
+        const skills = data?.skills || [];
+        status.textContent = marketplaceQuery.trim().length >= 2
+          ? `${skills.length} resultado(s) para "${marketplaceQuery.trim()}"`
+          : `Trending em destaque (${skills.length} disponíveis)`;
+
+        if (!skills.length) {
+          grid.appendChild(el('div', 'control-muted', 'Nenhuma skill encontrada para este filtro.'));
+          return;
+        }
+
+        for (const item of skills) {
+          const card = el('div', 'control-card');
+          card.style.display = 'flex';
+          card.style.flexDirection = 'column';
+          card.style.justifyContent = 'space-between';
+
+          const head = el('div');
+          const titleRow = el('div', '');
+          titleRow.style.display = 'flex';
+          titleRow.style.justifyContent = 'space-between';
+          titleRow.style.alignItems = 'flex-start';
+          titleRow.style.gap = '8px';
+          titleRow.append(
+            el('h3', '', item.name || item.skill_id),
+            el('span', 'control-badge', item.provider || 'skill')
+          );
+          const desc = el('p', '', item.description || 'Sem descrição.');
+          desc.style.marginTop = '6px';
+          head.append(titleRow, desc);
+
+          const footer = el('div');
+          footer.style.marginTop = '14px';
+          footer.style.display = 'flex';
+          footer.style.justifyContent = 'space-between';
+          footer.style.alignItems = 'center';
+
+          const meta = el('div', 'control-muted');
+          if (item.installs > 0) meta.textContent = `${item.installs.toLocaleString()} instalações`;
+          else if (item.source) meta.textContent = item.source;
+
+          const actionBtn = el('button', 'control-button' + (item.installed ? ' danger' : ' primary'));
+          actionBtn.type = 'button';
+          actionBtn.textContent = item.installed ? 'Desinstalar' : 'Instalar';
+
+          actionBtn.addEventListener('click', async () => {
+            if (item.installed) {
+              if (!window.confirm(`Desinstalar a skill ${item.name || item.skill_id}?`)) return;
+              actionBtn.disabled = true;
+              actionBtn.textContent = 'Removendo…';
+              try {
+                await api(`/api/webui/skills/marketplace/install?name=${encodeURIComponent(item.skill_id)}&provider=${encodeURIComponent(item.provider)}`, { method: 'DELETE' });
+                item.installed = false;
+                await refreshState();
+                loadItems();
+              } catch (err) {
+                window.alert('Falha ao desinstalar: ' + err.message);
+                actionBtn.disabled = false;
+                actionBtn.textContent = 'Desinstalar';
+              }
+            } else {
+              actionBtn.disabled = true;
+              actionBtn.textContent = 'Instalando…';
+              try {
+                await api('/api/webui/skills/marketplace/install', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    skill_id: item.skill_id,
+                    provider: item.provider,
+                    source: item.source,
+                    version: item.version
+                  })
+                });
+                item.installed = true;
+                await refreshState();
+                loadItems();
+              } catch (err) {
+                window.alert('Falha ao instalar: ' + err.message);
+                actionBtn.disabled = false;
+                actionBtn.textContent = 'Instalar';
+              }
+            }
+          });
+
+          footer.append(meta, actionBtn);
+          card.append(head, footer);
+          grid.appendChild(card);
+        }
+      } catch (err) {
+        status.textContent = 'Erro ao carregar catálogo: ' + err.message;
+      }
+    }
+
+    input.addEventListener('input', () => {
+      clearTimeout(marketplaceTimer);
+      marketplaceTimer = setTimeout(() => {
+        marketplaceQuery = input.value;
+        loadItems();
+      }, 350);
+    });
+
+    loadItems();
   }
 
   async function showSkill(name) {

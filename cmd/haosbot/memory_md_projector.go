@@ -99,16 +99,16 @@ func (p *memoryMDProjector) syncOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	var stale []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
 			return err
 		}
 		stale = append(stale, id)
 	}
-	if err := rows.Close(); err != nil {
+	if err := rows.Err(); err != nil {
 		return err
 	}
 	for _, id := range stale {

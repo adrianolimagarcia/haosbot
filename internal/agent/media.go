@@ -64,7 +64,7 @@ func extractPDFTextBounded(data []byte, limit int) string {
 	appendStream:=func(stream []byte){
 		for i:=0;i<len(stream)&&out.Len()<limit;i++ { if stream[i]!='(' {continue}; i++; var b strings.Builder; depth:=1
 			for i<len(stream)&&depth>0&&out.Len()+b.Len()<limit { c:=stream[i]; if c=='\\'&&i+1<len(stream){i++; switch stream[i]{case 'n':b.WriteByte('\n');case 'r':b.WriteByte('\r');case 't':b.WriteByte('\t');case '(',')','\\':b.WriteByte(stream[i]);default: if stream[i]>='0'&&stream[i]<='7'{j:=i; for j+1<len(stream)&&j<i+2&&stream[j+1]>='0'&&stream[j+1]<='7'{j++}; if v,e:=strconv.ParseInt(string(stream[i:j+1]),8,16);e==nil{b.WriteByte(byte(v))}; i=j}} } else if c=='(' {depth++; b.WriteByte(c)} else if c==')'{depth--; if depth>0{b.WriteByte(c)}} else if c>=32||c=='\n'||c=='\r'||c=='\t'{b.WriteByte(c)}; i++ }
-			t:=strings.TrimSpace(b.String()); if t!=""&&utf8.ValidString(t){ if out.Len()>0{out.WriteByte('\n')}; remaining:=limit-out.Len(); if len(t)>remaining{t=t[:remaining]}; out.WriteString(t) }
+			t:=strings.TrimSpace(b.String()); if t!=""&&utf8.ValidString(t){ if out.Len()>0{out.WriteByte('\n')}; remaining:=limit-out.Len(); if len(t)>remaining{t=t[:remaining]; for len(t)>0 && !utf8.ValidString(t){t=t[:len(t)-1]}}; out.WriteString(t) }
 		}
 	}
 	pos:=0

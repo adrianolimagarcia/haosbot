@@ -257,7 +257,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 					timer := time.NewTimer(750 * time.Millisecond)
 					select {
 					case <-ctx.Done():
-						if !timer.Stop() { <-timer.C }
+						if !timer.Stop() { select { case <-timer.C: default: } }
 						return cronruntime.RunResult{RunID: runID}, ctx.Err()
 					case <-timer.C:
 						continue
@@ -299,7 +299,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 					timer := time.NewTimer(750 * time.Millisecond)
 					select {
 					case <-ctx.Done():
-						if !timer.Stop() { <-timer.C }
+						if !timer.Stop() { select { case <-timer.C: default: } }
 						return "", ctx.Err()
 					case <-timer.C:
 						continue

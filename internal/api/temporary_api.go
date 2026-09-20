@@ -24,6 +24,6 @@ func (s *Server) handleWebUITemporary(w http.ResponseWriter,r *http.Request){
 		_ = cleanupWebUIMedia(s.webUIMediaRoot(),id)
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		w.Header().Set("Allow","POST, DELETE");http.Error(w,"Method not allowed",405)
+		w.Header().Set("Allow","POST, DELETE");http.Error(w,"Method not allowed",http.StatusMethodNotAllowed)
 	}
 }

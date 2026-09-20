@@ -68,6 +68,9 @@ func (t *Tool) Execute(ctx context.Context, raw json.RawMessage) (tools.Result, 
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return tools.Errf("Error: invalid cron arguments: %v", err), nil
 	}
+	if t.service == nil {
+		return tools.Errf("Error: automation scheduler is not configured"), nil
+	}
 	switch args.Action {
 	case "list":
 		jobs := t.service.ListJobs(true)

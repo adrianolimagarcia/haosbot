@@ -441,7 +441,12 @@ func (s *Server) handleWebUIFilePreview(w http.ResponseWriter, r *http.Request) 
 	raw, err := io.ReadAll(io.LimitReader(f, maxPreview+1))
 	if err != nil { http.Error(w, err.Error(), http.StatusInternalServerError); return }
 	truncated := len(raw) > maxPreview
-	if truncated { raw = raw[:maxPreview] }
+	if truncated {
+		raw = raw[:maxPreview]
+		for i := 0; i < 4 && len(raw) > 0 && !utf8.Valid(raw); i++ {
+			raw = raw[:len(raw)-1]
+		}
+	}
 	if !utf8.Valid(raw) {
 		writeWebUIJSON(w, map[string]any{
 			"path": rel, "directory": false, "binary": true,

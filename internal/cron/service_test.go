@@ -243,7 +243,7 @@ func TestDirtyExecutionBlocksAnotherRunUntilPersisted(t *testing.T) {
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
 		dirty := s.dirty
-		active := s.active[job.ID]
+		_, active := s.active[job.ID]
 		s.mu.Unlock()
 		if dirty && !active { break }
 		time.Sleep(10 * time.Millisecond)

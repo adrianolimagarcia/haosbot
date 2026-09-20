@@ -43,4 +43,25 @@ func(s *TransientSession)Metadata()map[string]any{s.mu.Lock();defer s.mu.Unlock(
 func(s *TransientSession)UpdatedAt()time.Time{s.mu.Lock();defer s.mu.Unlock();return s.updatedAt}
 func(s *TransientSession)LastArchived()int{s.mu.Lock();defer s.mu.Unlock();return s.lastArchived}
 func(s *TransientSession)GetHistory(maxMessages,maxTokens int,extendToUser,includeRuntimeContext bool)[]core.Message{s.mu.Lock();defer s.mu.Unlock();start:=s.lastArchived;if start<0||start>len(s.messages){start=0};out:=append([]core.Message(nil),s.messages[start:]...);if maxMessages>0&&len(out)>maxMessages{out=out[len(out)-maxMessages:]};return out}
-func(s *TransientSession)CommitSummaryCheckpoint(summary string,insertAt *int,lastActive *time.Time){s.mu.Lock();defer s.mu.Unlock();boundary:=len(s.messages);if insertAt!=nil{boundary=*insertAt};marker:=core.Message{Role:core.RoleUser,Content:core.TextContent("Continue the active task from the working-memory checkpoint above.")};marker.SetExtra("_hidden_history",json.RawMessage("true"));if boundary>=len(s.messages){s.messages=append(s.messages,marker)}else{s.messages=append(s.messages[:boundary+1],s.messages[boundary:]...);s.messages[boundary]=marker};active:=s.updatedAt;if lastActive!=nil{active=*lastActive};s.meta["_last_summary"]=map[string]any{"text":summary,"last_active":active.Format(time.RFC3339)};s.lastArchived=boundary;s.updatedAt=time.Now()}
+func(s *TransientSession)CommitSummaryCheckpoint(summary string,insertAt *int,lastActive *time.Time){
+	s.mu.Lock();defer s.mu.Unlock()
+	boundary:=len(s.messages)
+	if insertAt!=nil{boundary=*insertAt}
+	idx:=boundary
+	n:=len(s.messages)
+	if idx<0{idx+=n;if idx<0{idx=0}}
+	if idx>n{idx=n}
+	marker:=core.Message{Role:core.RoleUser,Content:core.TextContent("Continue the active task from the working-memory checkpoint above.")}
+	marker.SetExtra("_hidden_history",json.RawMessage("true"))
+	if idx>=len(s.messages){
+		s.messages=append(s.messages,marker)
+	}else{
+		s.messages=append(s.messages[:idx+1],s.messages[idx:]...)
+		s.messages[idx]=marker
+	}
+	active:=s.updatedAt
+	if lastActive!=nil{active=*lastActive}
+	s.meta["_last_summary"]=map[string]any{"text":summary,"last_active":active.Format(time.RFC3339)}
+	s.lastArchived=boundary
+	s.updatedAt=time.Now()
+}

@@ -1,5 +1,5 @@
 const CACHE = 'haosbot-webui-v1';
-const SHELL = ['/', '/webui/app.css', '/webui/tailwind.css', '/webui/app.js', '/webui/control.js', '/webui-hardening.js', '/brand/haosbot_mark.png', '/manifest.webmanifest'];
+const SHELL = ['/', '/webui/app.css', '/webui/tailwind.css', '/webui/app.js', '/webui/control.js', '/webui/enhancements.js', '/webui-hardening.js', '/brand/haosbot_mark.png', '/manifest.webmanifest'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
 });

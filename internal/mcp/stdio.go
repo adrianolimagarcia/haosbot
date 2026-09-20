@@ -44,6 +44,7 @@ type Client struct {
 	next atomic.Uint64
 	closed bool
 	generation uint64
+	initializedGen uint64
 }
 
 func NewClient(name string, cfg config.MCPServerConfig) *Client { return &Client{name:name, cfg:cfg, pending:make(map[uint64]chan response)} }
@@ -124,10 +125,22 @@ func (c *Client) rpc(ctx context.Context, method string, params any) (json.RawMe
 }
 
 func (c *Client) initialize(ctx context.Context) error {
+	c.mu.Lock()
+	if c.initializedGen == c.generation && c.cmd != nil {
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
 	_,err:=c.rpc(ctx,"initialize",map[string]any{"protocolVersion":protocolVersion,"capabilities":map[string]any{},"clientInfo":map[string]any{"name":"haosbot","version":"1"}}); if err!=nil{return err}
 	// initialized is a notification: no id and no response expected.
 	b,_:=json.Marshal(map[string]any{"jsonrpc":"2.0","method":"notifications/initialized"}); b=append(b,'\n')
-	c.mu.Lock(); stdin:=c.stdin; c.mu.Unlock(); if stdin==nil{return errTransport}; c.writeMu.Lock(); _,err=stdin.Write(b); c.writeMu.Unlock(); return err
+	c.mu.Lock()
+	stdin:=c.stdin
+	gen:=c.generation
+	if stdin==nil{c.mu.Unlock(); return errTransport}
+	c.initializedGen=gen
+	c.mu.Unlock()
+	c.writeMu.Lock(); _,err=stdin.Write(b); c.writeMu.Unlock(); return err
 }
 
 func (c *Client) withReconnect(ctx context.Context, fn func(context.Context)(json.RawMessage,error)) (json.RawMessage,error) {

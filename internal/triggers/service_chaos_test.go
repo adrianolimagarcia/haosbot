@@ -64,13 +64,21 @@ func TestRetryPreservesDeliveryIdentityAndEventuallySucceeds(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if err := s.Start(); err != nil { t.Fatal(err) }
 	t.Cleanup(func(){ ctx,cancel:=context.WithTimeout(context.Background(),time.Second); defer cancel(); _=s.Close(ctx) })
-	waitUntil(t, time.Second, func() bool { return attempts.Load() >= 3 })
+	waitUntil(t, 2*time.Second, func() bool {
+		if attempts.Load() < 3 {
+			return false
+		}
+		raw, err := os.ReadFile(filepath.Join(s.runs, d.ID+".json"))
+		if err != nil {
+			return false
+		}
+		var record map[string]any
+		if err := json.Unmarshal(raw, &record); err != nil {
+			return false
+		}
+		return record["status"] == "ok"
+	})
 	if attempts.Load() != 3 { t.Fatalf("attempts=%d want 3", attempts.Load()) }
-	raw, err := os.ReadFile(filepath.Join(s.runs, d.ID+".json"))
-	if err != nil { t.Fatal(err) }
-	var record map[string]any
-	if err := json.Unmarshal(raw, &record); err != nil { t.Fatal(err) }
-	if record["status"] != "ok" { t.Fatalf("final status=%v want ok", record["status"]) }
 }
 
 func TestMalformedInboxPayloadIsQuarantined(t *testing.T) {

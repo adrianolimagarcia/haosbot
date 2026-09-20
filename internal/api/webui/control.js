@@ -22,7 +22,9 @@
     const res = await fetch(path, { ...options, headers });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     if (res.status === 204) return null;
-    return res.json();
+    const text = await res.text();
+    if (!text || !text.trim()) return null;
+    return JSON.parse(text);
   }
 
   async function refreshState() {

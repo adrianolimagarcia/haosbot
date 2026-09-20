@@ -156,11 +156,17 @@
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
-        onEvent(JSON.parse(trimmed));
+        try {
+          onEvent(JSON.parse(trimmed));
+        } catch (_) {}
       }
       if (done) break;
     }
-    if (buffer.trim()) onEvent(JSON.parse(buffer.trim()));
+    if (buffer.trim()) {
+      try {
+        onEvent(JSON.parse(buffer.trim()));
+      } catch (_) {}
+    }
   }
 
   window.newSession = function newSession() {

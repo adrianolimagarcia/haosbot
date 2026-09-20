@@ -1135,7 +1135,9 @@ func (l *Loop) scheduleBackgroundSummary(key string, sess sessionTranscript, isW
 			timer := time.NewTimer(25 * time.Millisecond)
 			select {
 			case <-ctx.Done():
-				if !timer.Stop() { <-timer.C }
+				if !timer.Stop() {
+					select { case <-timer.C: default: }
+				}
 				return
 			case <-timer.C:
 			}
@@ -1146,7 +1148,9 @@ func (l *Loop) scheduleBackgroundSummary(key string, sess sessionTranscript, isW
 		idleTimer := time.NewTimer(l.backgroundMaintenanceDelay())
 		select {
 		case <-ctx.Done():
-			if !idleTimer.Stop() { <-idleTimer.C }
+			if !idleTimer.Stop() {
+				select { case <-idleTimer.C: default: }
+			}
 			return
 		case <-idleTimer.C:
 		}

@@ -10,6 +10,6 @@ export GOPATH="$NANOBOT_ROOT/.tools/gopath"
 export GOMODCACHE="$GOPATH/pkg/mod"
 export GOCACHE="$NANOBOT_ROOT/.tools/gocache"
 export GOTMPDIR="$NANOBOT_ROOT/.tools/tmp"
-export TMPDIR="$GOTMPDIR"
+export TMPDIR="${TMPDIR:-/tmp}"
 export GOTOOLCHAIN=local
 export PATH="$GOROOT/bin:$PATH"

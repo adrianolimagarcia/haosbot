@@ -93,7 +93,7 @@ func (s *Server) handleWebUIAutomations(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusCreated)
 		writeWebUIJSON(w, automationJobPayload(job))
 	default:
-		w.Header().Set("Allow", "GET, POST, DELETE")
+		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
@@ -227,7 +227,7 @@ func (s *Server) handleWebUIAutomationRun(w http.ResponseWriter, r *http.Request
 			"response": record["response"],
 		})
 	default:
-		w.Header().Set("Allow", "GET, POST")
+		w.Header().Set("Allow", "GET, POST, DELETE")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }

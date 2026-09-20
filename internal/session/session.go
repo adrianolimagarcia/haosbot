@@ -58,6 +58,7 @@ type Session struct {
 	providerState json.RawMessage // validated state value, nil when absent
 	providerLine  []byte          // original provider_state record line
 	providerSnap  json.RawMessage // state value at load, for verbatim re-emit
+	journalSize   int64
 }
 
 // newSession returns an empty session for key.
@@ -110,6 +111,74 @@ func (s *Session) AddMessage(m core.Message) {
 	now := nowTimestamp()
 	s.updatedAt = now
 	s.updatedStr = formatNaive(now)
+}
+
+
+// AppendMessagesDurable is the latency-first persistence path.
+//
+// Instead of rewriting the complete session JSONL before every provider call,
+// it appends only the new message records to a journal sidecar under the same
+// cross-process session lock. A later Save compacts the journal into the
+// canonical JSONL. The method updates the in-memory transcript only after the
+// append succeeds, so callers never observe a message that was not durably
+// recorded.
+func (s *Session) AppendMessagesDurable(messages []core.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	if s.store == nil {
+		return errors.New("session: session has no store")
+	}
+	if err := s.store.initErr; err != nil {
+		return err
+	}
+
+	normalized := make([]core.Message, len(messages))
+	copy(normalized, messages)
+	for i := range normalized {
+		if normalized[i].Timestamp == "" {
+			normalized[i].Timestamp = formatNaive(nowTimestamp())
+		}
+	}
+	var buf bytes.Buffer
+	for i := range normalized {
+		if err := encodeMessage(&buf, &normalized[i]); err != nil {
+			return err
+		}
+		buf.WriteByte('\n')
+	}
+
+	return s.store.withLock(func() error {
+		path := s.store.journalPath(s.key)
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+		if err != nil {
+			return fmt.Errorf("session: open journal %s: %w", path, err)
+		}
+		if _, err := f.Write(buf.Bytes()); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("session: append journal %s: %w", path, err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("session: close journal %s: %w", path, err)
+		}
+
+		s.mu.Lock()
+		s.journalSize += int64(buf.Len())
+		for _, m := range normalized {
+			s.messages = append(s.messages, m)
+			s.snapshots = append(s.snapshots, core.Message{})
+			s.rawLines = append(s.rawLines, nil)
+		}
+		now := nowTimestamp()
+		s.updatedAt = now
+		s.updatedStr = formatNaive(now)
+		s.mu.Unlock()
+
+		// Refresh the composite base+journal cache fingerprint. Subsequent turns
+		// stay entirely in memory unless another process changes either file.
+		s.store.rememberCurrent(s)
+		return nil
+	})
 }
 
 // SetMessage replaces the message at index i.
@@ -299,6 +368,41 @@ func (s *Session) SetProviderState(raw json.RawMessage) {
 	s.providerState = raw
 }
 
+// CompactJournal folds an append-only journal into the canonical JSONL only
+// when it has reached minBytes. The file lock is acquired before checking size
+// and held through saveLocked, so a concurrent AppendMessagesDurable can never
+// be lost between snapshot and journal removal.
+func (s *Session) CompactJournal(minBytes int64) error {
+	if s.store == nil {
+		return errors.New("session: session has no store")
+	}
+	if err := s.store.initErr; err != nil {
+		return err
+	}
+	return s.store.withLock(func() error {
+		info, err := os.Stat(s.store.journalPath(s.key))
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if minBytes > 0 && info.Size() < minBytes {
+			return nil
+		}
+		s.mu.Lock()
+		expectedSize := s.journalSize
+		s.mu.Unlock()
+		if expectedSize > 0 && info.Size() != expectedSize {
+			// Another process appended after this Session snapshot was loaded.
+			// Do not compact from stale memory; the next Open invalidates the
+			// cache and replays the externally appended records.
+			return nil
+		}
+		return s.saveLocked()
+	})
+}
+
 // Save writes the whole session to disk.
 //
 // Mirrors _save_unlocked (manager.py:1314-1361): the metadata record comes
@@ -427,10 +531,18 @@ func (s *Session) saveLocked() error {
 	if err := writeAtomic(path, buf.Bytes(), 0o666); err != nil {
 		return fmt.Errorf("session: write %s: %w", path, err)
 	}
-	// A full save supersedes the volatile sidecar (manager.py:1348).
+	// A full save supersedes both volatile sidecars. Because Save holds the
+	// same session-files lock as AppendMessagesDurable, no newer journal append
+	// can be deleted by this compaction.
 	if err := os.Remove(s.store.checkpointPath(key)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("session: remove checkpoint: %w", err)
 	}
+	if err := os.Remove(s.store.journalPath(key)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("session: remove journal: %w", err)
+	}
+	s.mu.Lock()
+	s.journalSize = 0
+	s.mu.Unlock()
 	s.store.rememberSaved(s)
 	return nil
 }

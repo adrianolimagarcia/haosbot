@@ -12,6 +12,10 @@ import (
 
 type agentTurnStreamEvent struct {
 	Type       string `json:"type"`
+	Iteration  int    `json:"iteration,omitempty"`
+	MessageCount int  `json:"messageCount,omitempty"`
+	ContextChars int  `json:"contextChars,omitempty"`
+	FileDiffs  any    `json:"fileDiffs,omitempty"`
 	SessionID string `json:"sessionId,omitempty"`
 	Delta      string `json:"delta,omitempty"`
 	Content    string `json:"content,omitempty"`
@@ -35,6 +39,17 @@ func (h *agentTurnStreamHook) emit(event agentTurnStreamEvent) {
 	}
 }
 
+func (h *agentTurnStreamHook) BeforeIteration(ctx context.Context, iteration int, messages []core.Message) error {
+	chars := 0
+	for i := range messages {
+		if messages[i].Content.IsText() { chars += len([]rune(messages[i].Content.Text)) } else {
+			for _, block := range messages[i].Content.Blocks { chars += len([]rune(block.Text)) }
+		}
+	}
+	h.emit(agentTurnStreamEvent{Type: "context_snapshot", Iteration: iteration, MessageCount: len(messages), ContextChars: chars})
+	return nil
+}
+
 func (h *agentTurnStreamHook) OnTextDelta(ctx context.Context, delta string) {
 	h.emit(agentTurnStreamEvent{Type: "text_delta", Delta: delta})
 }
@@ -52,7 +67,7 @@ func (h *agentTurnStreamHook) OnToolStart(ctx context.Context, call core.ToolCal
 }
 
 func (h *agentTurnStreamHook) OnToolEnd(ctx context.Context, call core.ToolCall, result core.ToolResult) {
-	h.emit(agentTurnStreamEvent{Type: "tool_end", ToolCallID: call.ID, ToolName: call.Name, ToolError: result.IsError})
+	h.emit(agentTurnStreamEvent{Type: "tool_end", ToolCallID: call.ID, ToolName: call.Name, ToolError: result.IsError, FileDiffs: result.FileDiffs})
 }
 
 func (s *Server) registerAgentTurnStream(mux *http.ServeMux) {
@@ -67,7 +82,7 @@ func (s *Server) registerAgentTurnStream(mux *http.ServeMux) {
 			http.Error(w, "Agent loop is not available", http.StatusServiceUnavailable)
 			return
 		}
-		sessionID, message, ok := decodeAgentTurnRequest(w, r)
+		sessionID, message, media, ok := decodeAgentTurnRequest(w, r)
 		if !ok { return }
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -93,7 +108,7 @@ func (s *Server) registerAgentTurnStream(mux *http.ServeMux) {
 			defer close(events)
 			out, err := loop.ProcessMessageWithHook(ctx, core.InboundMessage{
 				Channel: "webui", SenderID: sessionID, ChatID: sessionID,
-				Content: message, Timestamp: time.Now(),
+				Content: message, Media: media, Timestamp: time.Now(),
 				Metadata: map[string]any{"source": "webui", "session_id": sessionID},
 			}, hook)
 			resultCh <- struct {

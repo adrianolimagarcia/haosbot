@@ -39,8 +39,10 @@
   }
 
   function focusSearch() {
-    const filter = window.prompt('Filtrar comandos ou mensagens:');
-    if (filter) byId('user-input').value = filter;
+    const wrap = byId('session-search-wrap');
+    const input = byId('session-search');
+    if (wrap) wrap.classList.remove('hidden');
+    if (input) input.focus();
   }
 
   function onModelSelectChange(value) {
@@ -117,3 +119,10 @@
     });
   }
 })();
+
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}

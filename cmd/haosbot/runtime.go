@@ -20,6 +20,8 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/bus"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
+	cronruntime "github.com/adrianolimagarcia/nanobot-go/internal/cron"
+	"github.com/adrianolimagarcia/nanobot-go/internal/memory"
 	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
 	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
 	"github.com/adrianolimagarcia/nanobot-go/internal/prompt"
@@ -28,23 +30,29 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/session"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools/builtin"
+	triggersruntime "github.com/adrianolimagarcia/nanobot-go/internal/triggers"
 	wsbootstrap "github.com/adrianolimagarcia/nanobot-go/internal/workspace"
 
 	"strconv"
 )
 
 type agentRuntime struct {
-	cfg    *config.Config
-	bus    *bus.Bus
-	loop   *agent.Loop
-	store  *session.Store
-	metrics *observability.Registry
-	closeF func()
+	cfg       *config.Config
+	bus       *bus.Bus
+	loop      *agent.Loop
+	store     *session.Store
+	metrics   *observability.Registry
+	scheduler *cronruntime.Service
+	triggers  *triggersruntime.Service
+	closeF    func()
 }
 
 type transcriptStore struct{ s *session.Store }
 
 func (t transcriptStore) Open(key string) (agent.Transcript, error) {
+	if session.IsTransientKey(key) {
+		return session.DefaultTransientStore().Open(key)
+	}
 	sess, err := t.s.Open(key)
 	if err != nil {
 		return nil, err
@@ -105,6 +113,13 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		EnableNetwork:       cfg.Tools.Web.Enable,
 	})
 
+	scheduler := cronruntime.NewService(filepath.Join(config.DefaultDataDir(), "cron", workspaceGraphNamespace(workspace), "jobs.json"), nil)
+	if err := scheduler.Load(); err != nil {
+		return nil, fmt.Errorf("load automation scheduler: %w", err)
+	}
+	triggerSvc := triggersruntime.NewService(filepath.Join(workspace, "triggers"), nil)
+	registry.Register(cronruntime.NewTool(scheduler, d.Timezone))
+
 	// Bounded by default: the queue limits come from gateway.maxInboundQueue /
 	// gateway.maxOutboundQueue, which default to a non-zero cap. The reference
 	// runs these queues unbounded; see internal/config/bus.go.
@@ -116,7 +131,11 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("load GraphRAG embedder: %w", err)
 	}
-	graphPool := newGraphStorePoolWithEmbedder(filepath.Join(config.DefaultDataDir(), "graph-sessions"), resolveGraphPoolMaxOpenStores(), graphEmbedder)
+	graphPool := newGraphStorePoolWithEmbedder(workspaceGraphRoot(config.DefaultDataDir(), workspace), 2, graphEmbedder)
+	// Deep GraphRAG recall is explicit. Keeping it as a tool preserves hybrid
+	// FTS/vector/graph capabilities without making every turn pay retrieval
+	// latency before the provider starts.
+	registry.Register(newMemorySearchTool(graphPool))
 	metrics := observability.New()
 	metrics.SetVectorEnabled(graphEmbedder != nil)
 	metrics.SetEmbedderLoaded(graphEmbedder != nil)
@@ -144,6 +163,12 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("migrate legacy GraphRAG outbox: %w", err)
 	}
+	if err := ensureWorkspaceGraphProjection(context.Background(), config.DefaultDataDir(), workspace, memoryFabric); err != nil {
+		_ = memoryFabric.Close()
+		_ = graphPool.Close()
+		messageBus.Close()
+		return nil, fmt.Errorf("prepare workspace GraphRAG projection: %w", err)
+	}
 	projections, err := newProjectionManager(memoryFabric, graphPool, filepath.Join(config.DefaultDataDir(), "obsidian-memory"), profile.ProjectionWorkers, time.Duration(profile.ProjectionPollMs)*time.Millisecond, profile.ObsidianEnabled, metrics)
 	if err != nil {
 		_ = memoryFabric.Close()
@@ -151,12 +176,20 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("start memory projections: %w", err)
 	}
+	memoryMDProjection := newMemoryMDProjector(filepath.Join(workspace, "memory", "MEMORY.md"), graphPool, 2*time.Second)
 
 	loop, err := agent.NewLoop(agent.LoopConfig{
 		Bus:                   messageBus,
 		Store:                 transcriptStore{store},
 		Provider:              prov,
 		Tools:                 registry,
+		ToolsForMessage: func(msg core.InboundMessage) (*tools.Registry, error) {
+			event, _ := msg.Metadata["_system_event"].(string)
+			if event != "dream" { return nil, nil }
+			memoryStore, err := memory.NewMemoryStore(workspace, memory.DefaultMaxHistory)
+			if err != nil { return nil, err }
+			return memoryStore.BuildDreamTools()
+		},
 		Prompt:                prompt.New(workspace),
 		Model:                 model,
 		MaxTokens:             d.MaxTokens,
@@ -168,7 +201,6 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		MaxToolResultChars:    d.MaxToolResultChars,
 		SequentialTools:       false,
 		IncludeMemory:         profile.MemoryRetrievalEnabled,
-		GraphMemoryForSession:     graphPool.Store,
 		GraphMemoryEnqueue:           projections.Enqueue,
 		GraphMemoryEnqueueWithID:     projections.EnqueueWithID,
 		GraphMemoryEnqueueWithIDError: projections.EnqueueWithIDError,
@@ -178,9 +210,99 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	if err == nil {
 		err = loop.RecoverPendingGraphMemory()
 	}
+	if err == nil {
+		err = scheduler.SetExecutor(func(ctx context.Context, job cronruntime.Job, runID string) (cronruntime.RunResult, error) {
+			if job.Payload.Kind == cronruntime.PayloadSystemEvent {
+				return executeSystemAutomation(ctx, loop, workspace, job, runID)
+			}
+			key := job.Payload.SessionKey
+			metadata := make(map[string]any, len(job.Payload.OriginMetadata)+2)
+			for k, v := range job.Payload.OriginMetadata {
+				metadata[k] = v
+			}
+			metadata["_cron_trigger"] = map[string]any{
+				"job_id": job.ID, "job_name": job.Name, "run_id": runID,
+				"scheduled_for_ms": job.ScheduledForMS, "idempotency_key": job.IdempotencyKey,
+			}
+			metadata["_cron_defer_until_session_idle"] = true
+			msg := core.InboundMessage{
+				Channel: job.Payload.OriginChannel,
+				SenderID: "cron",
+				ChatID: job.Payload.OriginChatID,
+				Content: "Scheduled automation triggered: " + job.Name + "\n\n" + job.Payload.Message,
+				Metadata: metadata,
+				SessionKeyOverride: &key,
+			}
+
+			for {
+				out, runErr := loop.ProcessMessage(ctx, msg)
+				if errors.Is(runErr, agent.ErrTurnActive) {
+					timer := time.NewTimer(750 * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						if !timer.Stop() { <-timer.C }
+						return cronruntime.RunResult{RunID: runID}, ctx.Err()
+					case <-timer.C:
+						continue
+					}
+				}
+				if runErr != nil {
+					return cronruntime.RunResult{RunID: runID}, runErr
+				}
+				response := ""
+				if out != nil {
+					response = out.Content
+					if job.Payload.OriginChannel != "webui" {
+						if err := messageBus.PublishOutbound(ctx, *out); err != nil {
+							return cronruntime.RunResult{RunID: runID, Response: response}, err
+						}
+					}
+				}
+				return cronruntime.RunResult{RunID: runID, Response: response}, nil
+			}
+		})
+	}
+	if err == nil {
+		err = triggerSvc.SetExecutor(func(ctx context.Context, trigger triggersruntime.Trigger, delivery triggersruntime.Delivery) (string, error) {
+			metadata := make(map[string]any, len(trigger.OriginMetadata)+2)
+			for k, v := range trigger.OriginMetadata { metadata[k] = v }
+			metadata["_local_trigger"] = map[string]any{
+				"trigger_id": trigger.ID, "trigger_name": trigger.Name,
+				"delivery_id": delivery.ID, "created_at_ms": delivery.CreatedAtMS,
+			}
+			key := trigger.SessionKey
+			msg := core.InboundMessage{
+				Channel: trigger.Channel, SenderID: trigger.SenderID, ChatID: trigger.ChatID,
+				Content: "Local trigger received: " + trigger.Name + "\n\n" + delivery.Content,
+				Metadata: metadata, SessionKeyOverride: &key,
+			}
+			for {
+				out, runErr := loop.ProcessMessage(ctx, msg)
+				if errors.Is(runErr, agent.ErrTurnActive) {
+					timer := time.NewTimer(750 * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						if !timer.Stop() { <-timer.C }
+						return "", ctx.Err()
+					case <-timer.C:
+						continue
+					}
+				}
+				if runErr != nil { return "", runErr }
+				if out == nil { return "", nil }
+				if trigger.Channel != "webui" {
+					if err := messageBus.PublishOutbound(ctx, *out); err != nil { return out.Content, err }
+				}
+				return out.Content, nil
+			}
+		})
+	}
+
 	if err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = scheduler.Close(shutdownCtx)
 		projections.Close(shutdownCtx)
+		memoryMDProjection.Close()
 		cancel()
 		graphPool.LogShutdownStats()
 		_ = graphPool.Close()
@@ -197,9 +319,14 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		loop:  loop,
 		store: store,
 		metrics: metrics,
+		scheduler: scheduler,
+		triggers: triggerSvc,
 		closeF: func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = triggerSvc.Close(shutdownCtx)
+			_ = scheduler.Close(shutdownCtx)
 			projections.Close(shutdownCtx)
+			memoryMDProjection.Close()
 			cancel()
 			// Logged after the indexer has drained and before Close, so the
 			// counters describe the whole life of the pool: the graph store
@@ -398,6 +525,16 @@ func cmdGateway(args []string) error {
 	// ChannelManager only in the gateway runtime (cli/gateway_runtime.py:715)
 	// and starts it as one of the gateway's tasks (:941). `haosbot run` and
 	// `haosbot chat` drive the agent loop directly and never touch a channel.
+	if err := configureSystemAutomations(cfg, cfg.WorkspacePath(), rt.scheduler); err != nil {
+		return fmt.Errorf("configure system automations: %w", err)
+	}
+	if err := rt.scheduler.Start(); err != nil {
+		return fmt.Errorf("start automation scheduler: %w", err)
+	}
+	if err := rt.triggers.Start(); err != nil {
+		return fmt.Errorf("start local trigger service: %w", err)
+	}
+
 	channelManager := buildChannelManager(cfg, rt.bus)
 	if names := channelManager.EnabledChannels(); len(names) > 0 {
 		fmt.Printf("haosbot %s channels enabled: %s\n", version, strings.Join(names, ", "))
@@ -424,6 +561,9 @@ func cmdGateway(args []string) error {
 	apiServer.SetBus(rt.bus)
 	apiServer.SetDataDir(config.DefaultDataDir())
 	apiServer.SetMetrics(rt.metrics)
+	apiServer.SetSessionStore(rt.store)
+	apiServer.SetScheduler(rt.scheduler)
+	apiServer.SetTriggerService(rt.triggers)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

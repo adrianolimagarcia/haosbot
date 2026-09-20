@@ -8,6 +8,7 @@
   <meta name="description" content="HAOSBOT WebUI — autonomous agent workspace.">
   <link rel="icon" type="image/png" href="/brand/haosbot_mark.png">
   <link rel="apple-touch-icon" href="/brand/haosbot_mark.png">
+  <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/webui/tailwind.css">
   <link rel="stylesheet" href="/webui/app.css">
 </head>
@@ -66,68 +67,43 @@
       </div>
       <!-- Top Action Buttons -->
       <div class="nanobot-utility-nav">
-        <button data-action="switch-tab" data-tab="devices" class="sidebar-action">
-          <svg class="icon" aria-hidden="true"><use href="#i-diagram-project"></use></svg>
-          <span>Conexões</span>
+        <button data-action="open-view" data-view="apps" class="sidebar-action">
+          <svg class="icon" aria-hidden="true"><use href="#i-diagram-project"></use></svg><span>Apps</span>
         </button>
-        <button data-action="switch-tab" data-tab="skills" class="sidebar-action">
-          <svg class="icon" aria-hidden="true"><use href="#i-robot"></use></svg>
-          <span>Agentes &amp; Skills</span>
+        <button data-action="open-view" data-view="skills" class="sidebar-action">
+          <svg class="icon" aria-hidden="true"><use href="#i-robot"></use></svg><span>Skills</span>
         </button>
-        <button data-action="open-settings" class="sidebar-action">
-          <svg class="icon" aria-hidden="true"><use href="#i-sun"></use></svg>
-          <span>Modelos</span>
+        <button data-action="open-view" data-view="automations" class="sidebar-action">
+          <svg class="icon" aria-hidden="true"><use href="#i-clock"></use></svg><span>Automações</span>
         </button>
-        <button data-action="open-settings" class="sidebar-action">
-          <svg class="icon" aria-hidden="true"><use href="#i-arrow-up-right-from-square"></use></svg>
-          <span>Gateway</span>
+        <button data-action="open-view" data-view="channels" class="sidebar-action">
+          <svg class="icon" aria-hidden="true"><use href="#i-comment"></use></svg><span>Canais</span>
         </button>
       </div>
 
       <!-- Recentes List -->
       <div class="sidebar-session-area flex-1 overflow-y-auto px-2 py-2 space-y-3">
-        <div>
-          <div class="flex items-center justify-between px-2 text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1">
-            <span>Recentes</span>
-            <svg class="icon text-[10px] cursor-pointer hover:text-gray-600" aria-hidden="true"><use href="#i-gear"></use></svg>
-          </div>
-          <div id="recent-session-item" class="p-2 bg-gray-200/60 rounded-lg cursor-pointer flex flex-col space-y-1">
-            <div class="flex items-center justify-between">
-              <span id="recent-title" class="font-medium text-xs text-gray-800 truncate">Sessão Atual</span>
-              <span class="text-[10px] text-gray-400">Agora</span>
-            </div>
-            <div class="flex items-center space-x-1.5 text-[10px] text-gray-500">
-              <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-              <span>default</span>
-              <span class="text-gray-300">•</span>
-              <span class="bg-gray-100 border border-gray-200 px-1 rounded text-[9px]">workspace</span>
-            </div>
-          </div>
+        <div id="session-search-wrap" class="session-search-wrap hidden">
+          <input id="session-search" type="search" autocomplete="off" placeholder="Pesquisar chats…" aria-label="Pesquisar chats">
+          <div id="session-search-results" class="session-search-results hidden"></div>
         </div>
-
-        <!-- Skills list in sidebar when toggled -->
-        <div id="sidebar-skills-panel" class="hidden">
-          <div class="px-2 text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Habilidades / Skills</div>
-          <div class="space-y-1.5 text-xs">
-            <div class="p-2 bg-white border border-gray-200 rounded shadow-sm">
-              <div class="font-semibold text-gray-800">python_exec</div>
-              <div class="text-[11px] text-gray-500">CPython Minimal + SQLite</div>
-            </div>
-            <div class="p-2 bg-white border border-gray-200 rounded shadow-sm">
-              <div class="font-semibold text-gray-800">exec</div>
-              <div class="text-[11px] text-gray-500">Comandos Shell &amp; Rede</div>
-            </div>
-            <div class="p-2 bg-white border border-gray-200 rounded shadow-sm">
-              <div class="font-semibold text-gray-800">file_ops</div>
-              <div class="text-[11px] text-gray-500">Manipulação de Arquivos</div>
-            </div>
+        <div>
+          <div class="session-section-label">
+            <span>Recentes</span>
+            <button data-action="refresh-state" class="mini-icon-button" title="Atualizar" aria-label="Atualizar">
+              <svg class="icon" aria-hidden="true"><use href="#i-rotate"></use></svg>
+            </button>
           </div>
+          <div id="session-list" class="session-list">
+            <div class="session-loading">Carregando sessões…</div>
+          </div>
+          <button id="toggle-archived" data-action="toggle-archived" class="archived-toggle hidden">Mostrar arquivados</button>
         </div>
       </div>
 
       <!-- Bottom Settings Button -->
       <div class="sidebar-bottom p-3">
-        <button data-action="open-settings" class="w-full flex items-center space-x-2 text-xs text-gray-600 hover:text-black py-1 px-1 transition">
+        <button data-action="open-view" data-view="settings" class="w-full flex items-center space-x-2 text-xs text-gray-600 hover:text-black py-1 px-1 transition">
           <svg class="icon text-gray-500" aria-hidden="true"><use href="#i-gear"></use></svg>
           <span class="font-medium">Configurações</span>
         </button>
@@ -156,6 +132,22 @@
         </button>
       </div>
     </header>
+
+    <section id="workspace-panel" class="workspace-panel hidden" aria-live="polite">
+      <div class="workspace-panel-header">
+        <div>
+          <div id="workspace-panel-kicker" class="workspace-panel-kicker">HAOSBOT</div>
+          <h2 id="workspace-panel-title">Control Center</h2>
+        </div>
+        <div class="workspace-panel-actions">
+          <button data-action="refresh-state" class="thread-icon-button" title="Atualizar" aria-label="Atualizar">
+            <svg class="icon" aria-hidden="true"><use href="#i-rotate"></use></svg>
+          </button>
+          <button data-action="close-view" class="thread-icon-button" title="Fechar" aria-label="Fechar">&times;</button>
+        </div>
+      </div>
+      <div id="workspace-panel-content" class="workspace-panel-content"></div>
+    </section>
 
     <!-- Chat Messages Scroll Area -->
     <div id="messages-container" class="flex-1 overflow-y-auto px-8 py-6 max-w-4xl mx-auto w-full space-y-6">
@@ -290,5 +282,6 @@
   </div>
 
   <script src="/webui/app.js"></script>
+  <script src="/webui/control.js"></script>
 </body>
 </html>

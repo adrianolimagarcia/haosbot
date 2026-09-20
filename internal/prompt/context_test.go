@@ -74,7 +74,7 @@ func TestCurrentProjectSectionWhenWorkspacesDiffer(t *testing.T) {
 		t.Errorf("working directory not reported; got:\n%s", got)
 	}
 	// The agent workspace must be advertised separately.
-	if !strings.Contains(got, "Nanobot's agent workspace is at: ") {
+	if !strings.Contains(got, "HAOSBOT's agent workspace is at: ") {
 		t.Error("agent workspace line missing when workspaces differ")
 	}
 }

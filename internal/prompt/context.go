@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/skills"
 	"github.com/adrianolimagarcia/nanobot-go/internal/textutil"
@@ -67,6 +69,16 @@ type Builder struct {
 	// skills.NewWithBuiltinDir, which is what the differential harness uses to
 	// point both implementations at one directory.
 	BuiltinSkillsDir string
+
+	// memoryCache keeps MEMORY.md entirely out of the warm per-turn filesystem
+	// path. The first read primes the snapshot and a tiny background watcher
+	// refreshes it; normal prompt builds only take an RWMutex read lock.
+	memoryOnce    sync.Once
+	memoryMu      sync.RWMutex
+	memoryCached  string
+	memoryModTime time.Time
+	memorySize    int64
+	memoryExists  bool
 }
 
 // New creates a Builder for an agent workspace.
@@ -172,7 +184,7 @@ func (b *Builder) identity(channel, root string) string {
 	sb.WriteString("\n\n## Workspace\n")
 
 	if agentWorkspacePath != workspacePath {
-		fmt.Fprintf(&sb, "Nanobot's agent workspace is at: %s\n", agentWorkspacePath)
+		fmt.Fprintf(&sb, "HAOSBOT's agent workspace is at: %s\n", agentWorkspacePath)
 		fmt.Fprintf(&sb, "- Agent profile: %s/SOUL.md and %s/USER.md\n", agentWorkspacePath, agentWorkspacePath)
 		fmt.Fprintf(&sb, "- Long-term memory: %s/memory/MEMORY.md\n", agentWorkspacePath)
 		fmt.Fprintf(&sb, "- History log: %s/memory/history.jsonl (append-only JSONL; prefer built-in `grep` for search).\n", agentWorkspacePath)
@@ -329,14 +341,69 @@ func (b *Builder) LoadBootstrapFiles(projectWorkspace string) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// ReadMemory reads the long-term memory file.
-// Mirrors memory.read_memory() reading workspace/memory/MEMORY.md.
+// ReadMemory reads the long-term memory file through a hot snapshot cache.
+//
+// MEMORY.md remains the canonical, human-readable memory. GraphRAG is a derived
+// asynchronous index; the normal prompt path only needs this compact snapshot.
+// The cache checks metadata at most four times per second and reads file bytes
+// only when size/modtime changed.
 func (b *Builder) ReadMemory() string {
-	data, err := os.ReadFile(filepath.Join(expandPath(b.Workspace), "memory", "MEMORY.md"))
+	b.memoryOnce.Do(func() {
+		b.refreshMemorySnapshot()
+		go b.watchMemorySnapshot()
+	})
+	b.memoryMu.RLock()
+	value := b.memoryCached
+	b.memoryMu.RUnlock()
+	return value
+}
+
+func (b *Builder) refreshMemorySnapshot() {
+	path := filepath.Join(expandPath(b.Workspace), "memory", "MEMORY.md")
+	info, err := os.Stat(path)
 	if err != nil {
-		return ""
+		if !os.IsNotExist(err) {
+			return
+		}
+		b.memoryMu.Lock()
+		if b.memoryExists {
+			b.memoryCached = ""
+			b.memoryModTime = time.Time{}
+			b.memorySize = 0
+			b.memoryExists = false
+		}
+		b.memoryMu.Unlock()
+		return
 	}
-	return string(data)
+
+	b.memoryMu.RLock()
+	unchanged := b.memoryExists &&
+		b.memorySize == info.Size() &&
+		b.memoryModTime.Equal(info.ModTime())
+	b.memoryMu.RUnlock()
+	if unchanged {
+		return
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// A transient read failure must not erase the last known-good snapshot.
+		return
+	}
+	b.memoryMu.Lock()
+	b.memoryCached = string(data)
+	b.memoryModTime = info.ModTime()
+	b.memorySize = info.Size()
+	b.memoryExists = true
+	b.memoryMu.Unlock()
+}
+
+func (b *Builder) watchMemorySnapshot() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		b.refreshMemorySnapshot()
+	}
 }
 
 // SkillsLoader builds the loader the reference constructs once in

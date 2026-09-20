@@ -16,6 +16,18 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
 )
 
+func waitForCondition(t *testing.T, timeout time.Duration, description string, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", description)
+}
+
 type fakeSessionTranscript struct {
 	mu           sync.Mutex
 	key          string
@@ -117,6 +129,23 @@ func (f *fakeSessionTranscript) CommitSummaryCheckpoint(summary string, insertAt
 	}
 	f.lastArchived = boundary
 	f.checkpoints = append(f.checkpoints, summary)
+}
+
+func (f *fakeSessionTranscript) checkpointSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.checkpoints...)
+}
+
+func (f *fakeSessionTranscript) lastSummaryText() (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	raw, ok := f.meta["_last_summary"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	text, _ := raw["text"].(string)
+	return text, true
 }
 
 func (f *fakeSessionTranscript) GetHistory(maxMessages, maxTokens int, extendToUser, includeRuntimeContext bool) []core.Message {
@@ -291,8 +320,9 @@ func TestAutoSummarizeUsesStreamingWhenAvailable(t *testing.T) {
 		Prompt:               prompt.New(t.TempDir()),
 		Model:                "test-model",
 		ContextWindowTokens:  128_000,
-		AutoSummarizeTokens:  100,
-		AutoSummarizeTimeout: 5 * time.Second,
+		AutoSummarizeTokens:       100,
+		AutoSummarizeTimeout:      5 * time.Second,
+		BackgroundMaintenanceDelay: 5 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("NewLoop: %v", err)
@@ -310,6 +340,10 @@ func TestAutoSummarizeUsesStreamingWhenAvailable(t *testing.T) {
 		t.Fatalf("ProcessMessage: %v", err)
 	}
 
+	waitForCondition(t, time.Second, "background streamed summary", func() bool {
+		_, streamCalls, _ := prov.counts()
+		return streamCalls == 1
+	})
 	chatCalls, streamCalls, maxTokens := prov.counts()
 	if chatCalls != 0 {
 		t.Errorf("summarize used the non-streaming path %d time(s); it must stream", chatCalls)
@@ -320,8 +354,9 @@ func TestAutoSummarizeUsesStreamingWhenAvailable(t *testing.T) {
 	if maxTokens != DefaultSummarizeMaxTokens {
 		t.Errorf("summarize max_tokens=%d want %d", maxTokens, DefaultSummarizeMaxTokens)
 	}
-	if len(sess.checkpoints) != 1 || sess.checkpoints[0] != "streamed summary text" {
-		t.Errorf("checkpoints=%v", sess.checkpoints)
+	checkpoints := sess.checkpointSnapshot()
+	if len(checkpoints) != 1 || checkpoints[0] != "streamed summary text" {
+		t.Errorf("checkpoints=%v", checkpoints)
 	}
 }
 
@@ -345,8 +380,9 @@ func TestAutoSummarizeFailureDoesNotRetryEveryTurn(t *testing.T) {
 		Prompt:               prompt.New(t.TempDir()),
 		Model:                "test-model",
 		ContextWindowTokens:  128_000,
-		AutoSummarizeTokens:  100,
-		AutoSummarizeTimeout: 2 * time.Second,
+		AutoSummarizeTokens:       100,
+		AutoSummarizeTimeout:      2 * time.Second,
+		BackgroundMaintenanceDelay: 5 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("NewLoop: %v", err)
@@ -358,12 +394,22 @@ func TestAutoSummarizeFailureDoesNotRetryEveryTurn(t *testing.T) {
 	sess.AddMessage(*core.NewMessage(core.RoleUser, big))
 	sess.AddMessage(*core.NewMessage(core.RoleAssistant, big))
 
-	for i := 0; i < 4; i++ {
+	if _, err := loop.ProcessMessage(ctx, core.InboundMessage{
+		Channel: "webui", ChatID: "wedge-test", Content: "turn 0",
+	}); err != nil {
+		t.Fatalf("ProcessMessage 0: %v", err)
+	}
+	waitForCondition(t, time.Second, "first failed background summary", func() bool {
+		return prov.summarizeCalls() == 1
+	})
+
+	for i := 1; i < 4; i++ {
 		if _, err := loop.ProcessMessage(ctx, core.InboundMessage{
 			Channel: "webui", ChatID: "wedge-test", Content: fmt.Sprintf("turn %d", i),
 		}); err != nil {
 			t.Fatalf("ProcessMessage %d: %v", i, err)
 		}
+		time.Sleep(15 * time.Millisecond)
 	}
 
 	if got := prov.summarizeCalls(); got != 1 {
@@ -420,7 +466,8 @@ func TestWebUIAutoSummarizeTrigger(t *testing.T) {
 		Model:               "test-model",
 		MaxTokens:           1024,
 		ContextWindowTokens: 128_000,
-		AutoSummarizeTokens: 500, // Trigger at 500 tokens for test
+		AutoSummarizeTokens:       500, // Trigger at 500 tokens for test
+		BackgroundMaintenanceDelay: 5 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("NewLoop: %v", err)
@@ -459,32 +506,52 @@ func TestWebUIAutoSummarizeTrigger(t *testing.T) {
 		t.Errorf("got content %q, want %q", out.Content, "Understood, moving to next step.")
 	}
 
-	// Verify that CommitSummaryCheckpoint was called
-	if len(sess.checkpoints) != 1 {
-		t.Fatalf("expected 1 summary checkpoint, got %d", len(sess.checkpoints))
+	// The triggering turn must NOT wait for summarization. Its provider request
+	// happens first; the summary is generated only after the response and idle delay.
+	prov.mu.Lock()
+	initialReqs := append([]provider.ChatRequest(nil), prov.requests...)
+	prov.mu.Unlock()
+	if len(initialReqs) != 1 {
+		t.Fatalf("triggering turn made %d provider requests before returning, want exactly 1", len(initialReqs))
 	}
-	if sess.checkpoints[0] != "Summary of past turns: discussed project goals." {
-		t.Errorf("checkpoint summary = %q", sess.checkpoints[0])
+	for _, m := range initialReqs[0].Messages {
+		if m.Role == core.RoleSystem && strings.Contains(m.Content.Text, "[Archived Context Summary]") {
+			t.Fatal("triggering turn unexpectedly waited for the background summary")
+		}
 	}
 
-	// Verify metadata holds _last_summary
-	lastSummary, ok := sess.meta["_last_summary"].(map[string]any)
+	waitForCondition(t, time.Second, "background summary checkpoint", func() bool {
+		return len(sess.checkpointSnapshot()) == 1
+	})
+
+	checkpoints := sess.checkpointSnapshot()
+	if checkpoints[0] != "Summary of past turns: discussed project goals." {
+		t.Errorf("checkpoint summary = %q", checkpoints[0])
+	}
+	lastSummaryText, ok := sess.lastSummaryText()
 	if !ok {
 		t.Fatalf("missing _last_summary in metadata")
 	}
-	if lastSummary["text"] != "Summary of past turns: discussed project goals." {
-		t.Errorf("metadata summary = %v", lastSummary["text"])
+	if lastSummaryText != "Summary of past turns: discussed project goals." {
+		t.Errorf("metadata summary = %v", lastSummaryText)
 	}
 
-	// Verify that the system prompt in the final model request contained [Archived Context Summary]
+	// The NEXT turn consumes the ready checkpoint summary.
+	next, err := loop.ProcessMessage(ctx, core.InboundMessage{
+		Channel: "webui", SenderID: "test-session", ChatID: "test-session",
+		Content: "Turn 4: use the compacted context.",
+		Metadata: map[string]any{"source": "webui"},
+	})
+	if err != nil {
+		t.Fatalf("next ProcessMessage failed: %v", err)
+	}
+	if next.Content != "Understood, moving to next step." {
+		t.Errorf("next content = %q", next.Content)
+	}
+
 	prov.mu.Lock()
-	reqs := prov.requests
+	reqs := append([]provider.ChatRequest(nil), prov.requests...)
 	prov.mu.Unlock()
-
-	if len(reqs) < 2 {
-		t.Fatalf("expected at least 2 provider requests (1 summary, 1 chat turn), got %d", len(reqs))
-	}
-
 	lastReq := reqs[len(reqs)-1]
 	foundSummaryInSystemPrompt := false
 	for _, m := range lastReq.Messages {
@@ -496,8 +563,9 @@ func TestWebUIAutoSummarizeTrigger(t *testing.T) {
 		}
 	}
 	if !foundSummaryInSystemPrompt {
-		t.Errorf("system prompt did not contain [Archived Context Summary]")
+		t.Errorf("next turn system prompt did not contain [Archived Context Summary]")
 	}
+
 }
 
 func TestManualCompactCommand(t *testing.T) {
@@ -541,11 +609,12 @@ func TestManualCompactCommand(t *testing.T) {
 	if !strings.Contains(out.Content, "Context compacted successfully.") {
 		t.Errorf("unexpected reply for /compact: %q", out.Content)
 	}
-	if len(sess.checkpoints) != 1 {
-		t.Fatalf("expected 1 checkpoint, got %d", len(sess.checkpoints))
+	checkpoints := sess.checkpointSnapshot()
+	if len(checkpoints) != 1 {
+		t.Fatalf("expected 1 checkpoint, got %d", len(checkpoints))
 	}
-	if sess.checkpoints[0] != "Manual compaction summary." {
-		t.Errorf("got summary %q", sess.checkpoints[0])
+	if checkpoints[0] != "Manual compaction summary." {
+		t.Errorf("got summary %q", checkpoints[0])
 	}
 }
 
@@ -593,8 +662,9 @@ func TestWebUIBelowThresholdNoSummarize(t *testing.T) {
 	}
 
 	// Should not have triggered auto-summarize
-	if len(sess.checkpoints) != 0 {
-		t.Errorf("expected 0 checkpoints, got %d", len(sess.checkpoints))
+	checkpoints := sess.checkpointSnapshot()
+	if len(checkpoints) != 0 {
+		t.Errorf("expected 0 checkpoints, got %d", len(checkpoints))
 	}
 }
 
@@ -642,7 +712,8 @@ func TestNonWebChannelNoAutoSummarizeByDefault(t *testing.T) {
 	if out.Content != "CLI reply." {
 		t.Errorf("got %q, want %q", out.Content, "CLI reply.")
 	}
-	if len(sess.checkpoints) != 0 {
-		t.Errorf("expected 0 checkpoints for cli channel by default, got %d", len(sess.checkpoints))
+	checkpoints := sess.checkpointSnapshot()
+	if len(checkpoints) != 0 {
+		t.Errorf("expected 0 checkpoints for cli channel by default, got %d", len(checkpoints))
 	}
 }

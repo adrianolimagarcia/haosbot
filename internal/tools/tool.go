@@ -122,6 +122,39 @@ func IsExclusive(t Tool) bool {
 	return false
 }
 
+type requestRouteContextKey struct{}
+
+type RequestRoute struct {
+	SessionKey string
+	Channel    string
+	ChatID     string
+	Metadata   map[string]any
+}
+
+func WithRequestRoute(ctx context.Context, route RequestRoute) context.Context {
+	if len(route.Metadata) > 0 {
+		copyMeta := make(map[string]any, len(route.Metadata))
+		for k, v := range route.Metadata {
+			copyMeta[k] = v
+		}
+		route.Metadata = copyMeta
+	}
+	return context.WithValue(ctx, requestRouteContextKey{}, route)
+}
+
+func RequestRouteFromContext(ctx context.Context) RequestRoute {
+	route, _ := ctx.Value(requestRouteContextKey{}).(RequestRoute)
+	return route
+}
+
+func WithSessionKey(ctx context.Context, key string) context.Context {
+	return WithRequestRoute(ctx, RequestRoute{SessionKey: key})
+}
+
+func SessionKeyFromContext(ctx context.Context) string {
+	return RequestRouteFromContext(ctx).SessionKey
+}
+
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------

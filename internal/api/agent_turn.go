@@ -17,8 +17,9 @@ import (
 var webSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
 
 type agentTurnRequest struct {
-	SessionID string `json:"sessionId"`
-	Message   string `json:"message"`
+	SessionID string   `json:"sessionId"`
+	Message   string   `json:"message"`
+	Media     []string `json:"media,omitempty"`
 }
 
 type agentTurnResponse struct {
@@ -38,21 +39,21 @@ func (s *Server) registerAgentTurn(mux *http.ServeMux) {
 			return
 		}
 
-		sessionID, message, ok := decodeAgentTurnRequest(w, r)
+		sessionID, message, media, ok := decodeAgentTurnRequest(w, r)
 		if !ok { return }
 
 		ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
 		defer cancel()
+		metadata := map[string]any{"source": "webui", "session_id": sessionID}
+		if strings.HasPrefix(sessionID, "tmp_") { metadata["_temporary_chat"] = true }
 		out, err := loop.ProcessMessage(ctx, core.InboundMessage{
 			Channel:   "webui",
 			SenderID:  sessionID,
 			ChatID:    sessionID,
 			Content:   message,
+			Media:     media,
 			Timestamp: time.Now(),
-			Metadata: map[string]any{
-				"source":     "webui",
-				"session_id": sessionID,
-			},
+			Metadata: metadata,
 		})
 		if err != nil {
 			status := http.StatusInternalServerError
@@ -73,24 +74,27 @@ func (s *Server) registerAgentTurn(mux *http.ServeMux) {
 	})
 }
 
-func decodeAgentTurnRequest(w http.ResponseWriter, r *http.Request) (string, string, bool) {
+func decodeAgentTurnRequest(w http.ResponseWriter, r *http.Request) (string, string, []string, bool) {
 	var req agentTurnRequest
-	dec := json.NewDecoder(r.Body)
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid JSON request: %v", err), http.StatusBadRequest)
-		return "", "", false
+		return "", "", nil, false
 	}
 	sessionID := strings.TrimSpace(req.SessionID)
 	if sessionID == "" { sessionID = strings.TrimSpace(r.Header.Get("X-HAOS-Session-ID")) }
 	if !webSessionIDPattern.MatchString(sessionID) {
 		http.Error(w, "Invalid or missing sessionId", http.StatusBadRequest)
-		return "", "", false
+		return "", "", nil, false
 	}
 	message := strings.TrimSpace(req.Message)
 	if message == "" {
 		http.Error(w, "message is required", http.StatusBadRequest)
-		return "", "", false
+		return "", "", nil, false
 	}
-	return sessionID, message, true
+	if len(req.Media) > 8 { http.Error(w, "too many attachments", http.StatusBadRequest); return "", "", nil, false }
+	media := make([]string, 0, len(req.Media))
+	for _, item := range req.Media { if p := strings.TrimSpace(item); p != "" { media = append(media, p) } }
+	return sessionID, message, media, true
 }

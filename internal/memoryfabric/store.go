@@ -412,6 +412,49 @@ func (s *Store) decrementPendingCounter(ctx context.Context, tx *sql.Tx, recordI
 	return err
 }
 
+// RequeueProjection schedules every canonical record for projection again.
+//
+// It is used for derived-index migrations (for example per-session GraphRAG ->
+// workspace GraphRAG). Canonical memory_records are untouched. The operation is
+// idempotent at the data level and rebuilds queue counters transactionally.
+func (s *Store) RequeueProjection(ctx context.Context, projection string) error {
+	if strings.TrimSpace(projection) == "" {
+		return errors.New("memoryfabric: projection is empty")
+	}
+	now := time.Now().UnixMilli()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil { return err }
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO memory_outbox(job_id,projection,record_id,state,attempts,lease_until,next_attempt_at,last_error,created_at,updated_at)
+SELECT record_id,?,record_id,?,0,0,0,'',created_at,?
+FROM memory_records
+`, projection, stateQueued, now); err != nil {
+		return fmt.Errorf("memoryfabric: seed projection rebuild: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE memory_outbox
+SET state=?,attempts=0,lease_until=0,next_attempt_at=0,last_error='',updated_at=?
+WHERE projection=?
+`, stateQueued, now, projection); err != nil {
+		return fmt.Errorf("memoryfabric: requeue projection: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM memory_projection_receipts WHERE projection=?", projection); err != nil {
+		return fmt.Errorf("memoryfabric: clear projection receipts: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE memory_queue_counters SET
+ pending_jobs=(SELECT COUNT(*) FROM memory_outbox WHERE state IN (?,?)),
+ pending_bytes=(SELECT COALESCE(SUM(LENGTH(content)),0) FROM memory_records WHERE record_id IN
+   (SELECT DISTINCT record_id FROM memory_outbox WHERE state IN (?,?)))
+WHERE singleton=1
+`, stateQueued, stateRunning, stateQueued, stateRunning); err != nil {
+		return fmt.Errorf("memoryfabric: rebuild counters after requeue: %w", err)
+	}
+	return tx.Commit()
+}
+
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	var out Stats
 	var pendingTotal int64

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +28,7 @@ const (
 	workspaceMigrationLock = ".workspace-migration.lock"
 	workspaceMarkerName    = ".workspace"
 	sessionSuffix          = ".jsonl"
+	journalSuffix          = ".journal.jsonl"
 	checkpointSuffix       = ".checkpoint.json"
 	migrationLockTimeout   = 30 * time.Second
 	sessionCacheMaxEntries = 4
@@ -57,11 +59,14 @@ type Store struct {
 }
 
 type cachedSession struct {
-	sess    *Session
-	exists  bool
-	size    int64
-	modTime time.Time
-	used    uint64
+	sess          *Session
+	exists        bool
+	size          int64
+	modTime       time.Time
+	journalExists bool
+	journalSize   int64
+	journalModTime time.Time
+	used          uint64
 }
 
 // NewStore returns a store for workspace, persisting under sessionsRoot.
@@ -176,6 +181,14 @@ func (s *Store) checkpointPath(key string) string {
 	return filepath.Join(s.dir, StorageKey(key)+checkpointSuffix)
 }
 
+// journalPath is the append-only fast-path sidecar. Normal interactive turns
+// append only the new records here; a background full Save compacts the journal
+// back into the canonical JSONL. The sidecar is intentionally private to the Go
+// runtime and is replayed before a session is returned.
+func (s *Store) journalPath(key string) string {
+	return filepath.Join(s.dir, StorageKey(key)+journalSuffix)
+}
+
 // legacyLossyPath returns the retired in-directory path for a key. It is only
 // ever unlinked (manager.py:1032-1033, :1410-1416); it is never read or
 // written.
@@ -210,8 +223,16 @@ func (s *Store) Open(key string) (*Session, error) {
 			return fmt.Errorf("session: stat %s: %w", path, statErr)
 		}
 		_, checkpointErr := os.Stat(s.checkpointPath(key))
+		journalInfo, journalErr := os.Stat(s.journalPath(key))
+		journalExists := journalErr == nil
+		if journalErr != nil && !os.IsNotExist(journalErr) {
+			return fmt.Errorf("session: stat journal: %w", journalErr)
+		}
+		// Cache validation includes BOTH the canonical file and journal. That
+		// keeps a warm session O(1) while still detecting another process that
+		// appended to the journal.
 		if checkpointErr != nil && os.IsNotExist(checkpointErr) {
-			if cached, ok := s.cachedSession(key, exists, info); ok {
+			if cached, ok := s.cachedSession(key, exists, info, journalExists, journalInfo); ok {
 				sess = cached
 				return nil
 			}
@@ -221,7 +242,7 @@ func (s *Store) Open(key string) (*Session, error) {
 			return err
 		}
 		sess = loaded
-		s.rememberSession(key, loaded, exists, info)
+		s.rememberSession(key, loaded, exists, info, journalExists, journalInfo)
 		return nil
 	})
 	if err != nil {
@@ -252,31 +273,56 @@ func (s *Store) List() ([]string, error) {
 			key     string
 			updated string
 		}
-		rows := make([]row, 0, len(entries))
+		byKey := make(map[string]row, len(entries))
 		for _, entry := range entries {
 			name := entry.Name()
-			// Python's glob("*.jsonl") does not match dotfiles, which keeps
-			// temp files and the lock file out of the listing.
-			if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, sessionSuffix) {
+			if strings.HasPrefix(name, ".") || entry.IsDir() {
 				continue
 			}
-			if entry.IsDir() {
-				// glob would match a directory here and the reference would
-				// then fail with IsADirectoryError (spec §12 item 27); skipping
-				// is the deliberate, documented divergence.
+
+			// Canonical session file.
+			if strings.HasSuffix(name, sessionSuffix) && !strings.HasSuffix(name, journalSuffix) {
+				stem := strings.TrimSuffix(name, sessionSuffix)
+				key, ok := SessionKeyFromStem(stem)
+				if !ok {
+					continue
+				}
+				updated, ok := s.firstRecordUpdatedAt(filepath.Join(s.dir, name), key)
+				if !ok {
+					continue
+				}
+				byKey[key] = row{key: key, updated: updated}
 				continue
 			}
-			stem := strings.TrimSuffix(name, sessionSuffix)
-			key, ok := SessionKeyFromStem(stem)
-			if !ok {
-				continue
+
+			// Journal-only sessions must remain discoverable before the
+			// background compactor has produced the canonical JSONL.
+			if strings.HasSuffix(name, journalSuffix) {
+				stem := strings.TrimSuffix(name, journalSuffix)
+				key, ok := SessionKeyFromStem(stem)
+				if !ok {
+					continue
+				}
+				info, statErr := entry.Info()
+				if statErr != nil {
+					continue
+				}
+				updated := formatNaive(info.ModTime())
+				if prev, exists := byKey[key]; !exists || updated > prev.updated {
+					byKey[key] = row{key: key, updated: updated}
+				}
 			}
-			path := filepath.Join(s.dir, name)
-			updated, ok := s.firstRecordUpdatedAt(path, key)
-			if !ok {
-				continue
+		}
+		rows := make([]row, 0, len(byKey))
+		for _, r := range byKey {
+			// A journal newer than the base determines the effective update
+			// time even when both files exist.
+			if info, err := os.Stat(s.journalPath(r.key)); err == nil {
+				if journalUpdated := formatNaive(info.ModTime()); journalUpdated > r.updated {
+					r.updated = journalUpdated
+				}
 			}
-			rows = append(rows, row{key: key, updated: updated})
+			rows = append(rows, r)
 		}
 		sort.SliceStable(rows, func(i, j int) bool {
 			if rows[i].updated != rows[j].updated {
@@ -315,7 +361,7 @@ func (s *Store) Delete(key string) error {
 	return s.withLock(func() error {
 		defer s.forgetSession(key)
 		var firstErr error
-		for _, path := range []string{s.Path(key), s.checkpointPath(key), s.legacyLossyPath(key)} {
+		for _, path := range []string{s.Path(key), s.journalPath(key), s.checkpointPath(key), s.legacyLossyPath(key)} {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				if firstErr == nil {
 					firstErr = fmt.Errorf("session: delete %s: %w", path, err)
@@ -326,14 +372,18 @@ func (s *Store) Delete(key string) error {
 	})
 }
 
-func (s *Store) cachedSession(key string, exists bool, info os.FileInfo) (*Session, bool) {
+func (s *Store) cachedSession(key string, exists bool, info os.FileInfo, journalExists bool, journalInfo os.FileInfo) (*Session, bool) {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
 	cached, ok := s.cache[key]
-	if !ok || cached.exists != exists {
+	if !ok || cached.exists != exists || cached.journalExists != journalExists {
 		return nil, false
 	}
 	if exists && (info == nil || cached.size != info.Size() || !cached.modTime.Equal(info.ModTime())) {
+		delete(s.cache, key)
+		return nil, false
+	}
+	if journalExists && (journalInfo == nil || cached.journalSize != journalInfo.Size() || !cached.journalModTime.Equal(journalInfo.ModTime())) {
 		delete(s.cache, key)
 		return nil, false
 	}
@@ -343,17 +393,20 @@ func (s *Store) cachedSession(key string, exists bool, info os.FileInfo) (*Sessi
 	return cached.sess, true
 }
 
-func (s *Store) rememberSession(key string, sess *Session, exists bool, info os.FileInfo) {
+func (s *Store) rememberSession(key string, sess *Session, exists bool, info os.FileInfo, journalExists bool, journalInfo os.FileInfo) {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
-	if exists && (info == nil || info.Size() > sessionCacheMaxBytes) {
-		delete(s.cache, key)
-		return
-	}
+	// The in-memory session is the hot copy. Bound cache entries by count; do
+	// not evict a live long conversation merely because its canonical JSONL is
+	// larger than the old 256 KiB threshold, otherwise every turn has to parse
+	// the entire transcript again.
 	s.cacheSeq++
-	entry := cachedSession{sess: sess, exists: exists, used: s.cacheSeq}
+	entry := cachedSession{sess: sess, exists: exists, journalExists: journalExists, used: s.cacheSeq}
 	if info != nil {
 		entry.size, entry.modTime = info.Size(), info.ModTime()
+	}
+	if journalInfo != nil {
+		entry.journalSize, entry.journalModTime = journalInfo.Size(), journalInfo.ModTime()
 	}
 	if len(s.cache) >= sessionCacheMaxEntries {
 		oldestKey := ""
@@ -363,19 +416,32 @@ func (s *Store) rememberSession(key string, sess *Session, exists bool, info os.
 				oldestKey, oldest = candidate, cached.used
 			}
 		}
-		if oldestKey != "" && oldestKey != key { delete(s.cache, oldestKey) }
+		if oldestKey != "" && oldestKey != key {
+			delete(s.cache, oldestKey)
+		}
 	}
 	s.cache[key] = entry
 }
 
-func (s *Store) rememberSaved(sess *Session) {
+func (s *Store) rememberCurrent(sess *Session) {
 	path := s.Path(sess.Key())
 	info, err := os.Stat(path)
-	if err != nil {
+	exists := err == nil
+	if err != nil && !os.IsNotExist(err) {
 		s.forgetSession(sess.Key())
 		return
 	}
-	s.rememberSession(sess.Key(), sess, true, info)
+	journalInfo, journalErr := os.Stat(s.journalPath(sess.Key()))
+	journalExists := journalErr == nil
+	if journalErr != nil && !os.IsNotExist(journalErr) {
+		s.forgetSession(sess.Key())
+		return
+	}
+	s.rememberSession(sess.Key(), sess, exists, info, journalExists, journalInfo)
+}
+
+func (s *Store) rememberSaved(sess *Session) {
+	s.rememberCurrent(sess)
 }
 
 func (s *Store) forgetSession(key string) {
@@ -400,25 +466,71 @@ func (s *Store) withLock(fn func() error) error {
 // loadLocked reads a session file. The caller must hold the session-files lock.
 func (s *Store) loadLocked(key string) (*Session, error) {
 	path := s.Path(key)
+	sess := s.newSession(key)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return s.newSession(key), nil
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("session: read %s: %w", path, err)
 		}
-		return nil, fmt.Errorf("session: read %s: %w", path, err)
-	}
-
-	sess := s.newSession(key)
-	if err := sess.consumeRecords(data); err != nil {
+	} else if err := sess.consumeRecords(data); err != nil {
 		return nil, err
 	}
+
+	// Replay the append-only journal after the canonical file. This is the
+	// crash-recovery path for the latency fast path: if the process dies before
+	// background compaction, every acknowledged message is still present.
+	if journal, err := os.ReadFile(s.journalPath(key)); err == nil {
+		journalSess := s.newSession(key)
+		if err := journalSess.consumeRecords(journal); err != nil {
+			return nil, err
+		}
+
+		// If a previous full save replaced the canonical file but failed while
+		// unlinking the journal, the journal begins with messages already at the
+		// end of the canonical transcript. Skip only that exact prefix overlap,
+		// then replay any records appended later by another process.
+		overlap := 0
+		maxOverlap := len(journalSess.messages)
+		if len(sess.messages) < maxOverlap {
+			maxOverlap = len(sess.messages)
+		}
+		for candidate := maxOverlap; candidate > 0; candidate-- {
+			baseStart := len(sess.messages) - candidate
+			matched := true
+			for i := 0; i < candidate; i++ {
+				if !reflect.DeepEqual(sess.messages[baseStart+i], journalSess.messages[i]) {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				overlap = candidate
+				break
+			}
+		}
+		if overlap < len(journalSess.messages) {
+			sess.messages = append(sess.messages, journalSess.messages[overlap:]...)
+			sess.snapshots = append(sess.snapshots, journalSess.snapshots[overlap:]...)
+			sess.rawLines = append(sess.rawLines, journalSess.rawLines[overlap:]...)
+		}
+		sess.journalSize = int64(len(journal))
+		if info, statErr := os.Stat(s.journalPath(key)); statErr == nil {
+			sess.updatedAt = info.ModTime()
+			sess.updatedStr = formatNaive(info.ModTime())
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("session: read journal: %w", err)
+	}
+
 	// Session.__post_init__ resets an out-of-range archive offset to 0,
 	// because a corrupt offset would hide the whole transcript
 	// (manager.py:295-301).
 	if sess.lastArchived < 0 || sess.lastArchived > len(sess.messages) {
 		sess.lastArchived = 0
 	}
-	s.overlayCheckpointLocked(sess, path)
+	if _, err := os.Stat(path); err == nil {
+		s.overlayCheckpointLocked(sess, path)
+	}
 	return sess, nil
 }
 

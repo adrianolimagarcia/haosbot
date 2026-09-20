@@ -20,6 +20,12 @@ var hardeningJS []byte
 //go:embed webui/app.js
 var appJS []byte
 
+//go:embed webui/control.js
+var controlJS []byte
+
+//go:embed webui/enhancements.js
+var enhancementsJS []byte
+
 //go:embed webui/app.css
 var appCSS []byte
 
@@ -28,6 +34,12 @@ var tailwindCSS []byte
 
 //go:embed webui/haosbot_mark.png
 var haosbotMarkPNG []byte
+
+//go:embed webui/manifest.webmanifest
+var manifestWebmanifest []byte
+
+//go:embed webui/sw.js
+var serviceWorkerJS []byte
 
 // webUIContentSecurityPolicy is the policy sent with the browser shell.
 //
@@ -44,6 +56,8 @@ const webUIContentSecurityPolicy = "default-src 'none'; " +
 	"style-src 'self'; " +
 	"img-src 'self' data:; " +
 	"connect-src 'self'; " +
+	"manifest-src 'self'; " +
+	"worker-src 'self'; " +
 	"base-uri 'none'; " +
 	"form-action 'none'; " +
 	"frame-ancestors 'none'; " +
@@ -59,6 +73,7 @@ func (s *Server) registerWebUI(mux *http.ServeMux) {
 	s.registerAgentTurn(mux)
 	s.registerAgentTurnStream(mux)
 	s.registerWebUIRender(mux)
+	s.registerWebUIData(mux)
 
 	serveAsset := func(path, contentType string, body []byte) {
 		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
@@ -74,9 +89,13 @@ func (s *Server) registerWebUI(mux *http.ServeMux) {
 	}
 	serveAsset("/webui-hardening.js", "application/javascript; charset=utf-8", hardeningJS)
 	serveAsset("/webui/app.js", "application/javascript; charset=utf-8", appJS)
+	serveAsset("/webui/control.js", "application/javascript; charset=utf-8", controlJS)
+	serveAsset("/webui/enhancements.js", "application/javascript; charset=utf-8", enhancementsJS)
 	serveAsset("/webui/app.css", "text/css; charset=utf-8", appCSS)
 	serveAsset("/webui/tailwind.css", "text/css; charset=utf-8", tailwindCSS)
 	serveAsset("/brand/haosbot_mark.png", "image/png", haosbotMarkPNG)
+	serveAsset("/manifest.webmanifest", "application/manifest+json; charset=utf-8", manifestWebmanifest)
+	serveAsset("/sw.js", "application/javascript; charset=utf-8", serviceWorkerJS)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" && r.URL.Path != "/index.html" {
@@ -92,7 +111,7 @@ func (s *Server) registerWebUI(mux *http.ServeMux) {
 
 		// Keep the legacy UI source intact for now, but load the security layer
 		// after it so vulnerable global functions are replaced before user input.
-		page := bytes.Replace(indexHTML, []byte("</body>"), []byte("<script src=\"/webui-hardening.js\"></script>\n</body>"), 1)
+		page := bytes.Replace(indexHTML, []byte("</body>"), []byte("<script src=\"/webui-hardening.js\"></script>\n<script src=\"/webui/enhancements.js\"></script>\n</body>"), 1)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(page)
 	})

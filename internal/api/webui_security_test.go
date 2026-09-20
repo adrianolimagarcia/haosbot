@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -77,6 +79,8 @@ func TestWebUIResponseCarriesStrictSecurityHeaders(t *testing.T) {
 		"script-src":      "'self'",
 		"style-src":       "'self'",
 		"connect-src":     "'self'",
+		"manifest-src":    "'self'",
+		"worker-src":      "'self'",
 		"base-uri":        "'none'",
 		"form-action":     "'none'",
 		"frame-ancestors": "'none'",
@@ -206,7 +210,7 @@ func TestWebUIAssetsAreServedByTheApplication(t *testing.T) {
 func TestWebUIAssetsAvoidDangerousDOMAPIs(t *testing.T) {
 	h := webUIHandler()
 
-	for _, path := range []string{"/", "/webui/app.js", "/webui-hardening.js"} {
+	for _, path := range []string{"/", "/webui/app.js", "/webui/control.js", "/webui-hardening.js", "/sw.js"} {
 		body := getWebUI(t, h, path).Body.String()
 		for _, forbidden := range []string{
 			"marked.parse(",
@@ -419,5 +423,116 @@ func TestWebUITokenRotationKeepsCurrentCredentialUntilRestart(t *testing.T) {
 	}
 	if !strings.Contains(app, "window.promotePendingToken()") {
 		t.Error("restartAgent does not promote the pending token after acknowledgement")
+	}
+}
+
+
+func TestWebUIFilePreviewRejectsTraversalAndSymlinkEscape(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("outside-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	s := NewServer(cfg, nil, nil)
+
+	for _, rel := range []string{"../secret.txt", "../../etc/passwd"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/webui/file-preview?path="+rel, nil)
+		rr := httptest.NewRecorder()
+		s.handleWebUIFilePreview(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("preview traversal %q status=%d want 403", rel, rr.Code)
+		}
+	}
+
+	link := filepath.Join(workspace, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/webui/file-preview?path=escape/secret.txt", nil)
+	rr := httptest.NewRecorder()
+	s.handleWebUIFilePreview(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("preview symlink escape status=%d body=%s want 403", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "outside-secret") {
+		t.Fatal("preview leaked content outside workspace")
+	}
+}
+
+func TestWebUISkillWorkspaceCRUD(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	s := NewServer(cfg, nil, nil)
+
+	content := "---\nname: demo-skill\ndescription: test\n---\n\n# Demo\n"
+	body, _ := json.Marshal(map[string]string{"content": content})
+	req := httptest.NewRequest(http.MethodPut, "/api/webui/skill?name=demo-skill", strings.NewReader(string(body)))
+	rr := httptest.NewRecorder()
+	s.handleWebUISkill(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT skill status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/webui/skill?name=demo-skill", nil)
+	rr = httptest.NewRecorder()
+	s.handleWebUISkill(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET skill status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "# Demo") {
+		t.Fatalf("GET skill body missing content: %s", rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/webui/skill?name=demo-skill", nil)
+	rr = httptest.NewRecorder()
+	s.handleWebUISkill(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("DELETE skill status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "skills", "demo-skill")); !os.IsNotExist(err) {
+		t.Fatalf("workspace skill still exists after DELETE: %v", err)
+	}
+}
+
+func TestWebUISkillRejectsInvalidNames(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	s := NewServer(cfg, nil, nil)
+	for _, name := range []string{"../escape", "a/b", "", ".."} {
+		req := httptest.NewRequest(http.MethodGet, "/api/webui/skill?name="+name, nil)
+		rr := httptest.NewRecorder()
+		s.handleWebUISkill(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("skill name %q status=%d want 400", name, rr.Code)
+		}
+	}
+}
+
+
+func TestWebUISkillRejectsSymlinkedParentEscape(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(workspace, "skills")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	s := NewServer(cfg, nil, nil)
+
+	body, _ := json.Marshal(map[string]string{
+		"content": "---\nname: escaped\ndescription: no\n---\n# Escape\n",
+	})
+	req := httptest.NewRequest(http.MethodPut, "/api/webui/skill?name=escaped", strings.NewReader(string(body)))
+	rr := httptest.NewRecorder()
+	s.handleWebUISkill(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("symlinked skills root status=%d body=%s want 403", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(outside, "escaped", "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatalf("skill escaped workspace through symlink, stat err=%v", err)
 	}
 }

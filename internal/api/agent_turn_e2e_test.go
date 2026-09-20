@@ -227,8 +227,14 @@ func TestAgentTurnStreamEndpointForwardsStatefulDeltas(t *testing.T) {
 		events = append(events, event)
 	}
 	if err := scanner.Err(); err != nil { t.Fatal(err) }
-	if len(events) < 3 || events[0].Type != "context_snapshot" || events[1].Type != "text_delta" || events[1].Delta != "stream" {
-		t.Fatalf("events=%+v, want context_snapshot followed by text delta", events)
+	if len(events) < 3 {
+		t.Fatalf("events=%+v, want context snapshot, text delta, and done", events)
+	}
+	if events[0].Type != "context_snapshot" {
+		t.Fatalf("events=%+v, want context snapshot first", events)
+	}
+	if events[1].Type != "text_delta" || events[1].Delta != "stream" {
+		t.Fatalf("events=%+v, want streamed text delta after context snapshot", events)
 	}
 	last := events[len(events)-1]
 	if last.Type != "done" || last.Content != "streamed" { t.Fatalf("last event=%+v", last) }

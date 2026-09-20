@@ -18,10 +18,37 @@ type TransientStore struct {
 	mu sync.Mutex
 	sessions map[string]*TransientSession
 }
+
+// A temporary chat is meant to be discarded by the client (DELETE
+// /api/webui/temporary). When the client never does — a crashed tab, a dropped
+// request — nothing else reclaims it, so the store bounds itself instead of
+// retaining every message list for the lifetime of the process.
+const (
+	transientTTL         = 6 * time.Hour
+	maxTransientSessions = 64
+)
+
 func NewTransientStore()*TransientStore{return &TransientStore{sessions:map[string]*TransientSession{}}}
-func(s *TransientStore)Open(key string)(*TransientSession,error){s.mu.Lock();defer s.mu.Unlock();if v:=s.sessions[key];v!=nil{return v,nil};v:=&TransientSession{key:key,meta:map[string]any{},updatedAt:time.Now()};s.sessions[key]=v;return v,nil}
+func(s *TransientStore)Open(key string)(*TransientSession,error){s.mu.Lock();defer s.mu.Unlock();s.evictLocked(key);if v:=s.sessions[key];v!=nil{v.touch();return v,nil};v:=&TransientSession{key:key,meta:map[string]any{},updatedAt:time.Now()};s.sessions[key]=v;return v,nil}
 func(s *TransientStore)Delete(key string){s.mu.Lock();delete(s.sessions,key);s.mu.Unlock()}
-func(s *TransientStore)Count()int{s.mu.Lock();defer s.mu.Unlock();return len(s.sessions)}
+func(s *TransientStore)Count()int{s.mu.Lock();defer s.mu.Unlock();s.evictLocked("");return len(s.sessions)}
+
+// evictLocked drops sessions that have been idle for longer than transientTTL
+// and then, while still at capacity, the least recently used ones. keep is
+// never evicted, so opening a session cannot discard the one being opened.
+//
+// Lock order is store.mu then session.mu; no path takes them the other way
+// round, so this cannot deadlock.
+func(s *TransientStore)evictLocked(keep string){
+	now:=time.Now()
+	for k,v:=range s.sessions{if k==keep{continue};if now.Sub(v.lastUsed())>transientTTL{delete(s.sessions,k)}}
+	for len(s.sessions)>=maxTransientSessions{
+		oldestKey:="";var oldest time.Time
+		for k,v:=range s.sessions{if k==keep{continue};if at:=v.lastUsed();oldestKey==""||at.Before(oldest){oldestKey,oldest=k,at}}
+		if oldestKey==""{return}
+		delete(s.sessions,oldestKey)
+	}
+}
 
 type TransientSession struct {
 	mu sync.Mutex
@@ -41,6 +68,8 @@ func(s *TransientSession)CompactJournal(int64)error{return nil}
 func(s *TransientSession)SetMessage(i int,m core.Message)error{s.mu.Lock();defer s.mu.Unlock();if i>=0&&i<len(s.messages){s.messages[i]=m};return nil}
 func(s *TransientSession)Metadata()map[string]any{s.mu.Lock();defer s.mu.Unlock();out:=make(map[string]any,len(s.meta));for k,v:=range s.meta{out[k]=v};return out}
 func(s *TransientSession)UpdatedAt()time.Time{s.mu.Lock();defer s.mu.Unlock();return s.updatedAt}
+func(s *TransientSession)lastUsed()time.Time{s.mu.Lock();defer s.mu.Unlock();return s.updatedAt}
+func(s *TransientSession)touch(){s.mu.Lock();s.updatedAt=time.Now();s.mu.Unlock()}
 func(s *TransientSession)LastArchived()int{s.mu.Lock();defer s.mu.Unlock();return s.lastArchived}
 func(s *TransientSession)GetHistory(maxMessages,maxTokens int,extendToUser,includeRuntimeContext bool)[]core.Message{s.mu.Lock();defer s.mu.Unlock();start:=s.lastArchived;if start<0||start>len(s.messages){start=0};out:=append([]core.Message(nil),s.messages[start:]...);if maxMessages>0&&len(out)>maxMessages{out=out[len(out)-maxMessages:]};return out}
 func(s *TransientSession)CommitSummaryCheckpoint(summary string,insertAt *int,lastActive *time.Time){

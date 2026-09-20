@@ -233,3 +233,20 @@ func TestUninstallRejectsUnsafeNames(t *testing.T) {
 		}
 	}
 }
+
+func TestReadOnlyProviderIsNotInstallable(t *testing.T) {
+	svc := NewService(Options{Workspace: t.TempDir(), AllowRemoteInstall: true})
+	_, err := svc.Install(context.Background(), InstallRequest{Provider: "cliapps", SkillID: "feishu"})
+	if err == nil {
+		t.Fatal("Install(cliapps) succeeded, want rejection")
+	}
+	if !strings.Contains(err.Error(), "read-only catalogue") {
+		t.Fatalf("err=%v, want the read-only catalogue explanation", err)
+	}
+
+	// The catalogue entry must not advertise an installer either.
+	item := convertCliApp(cliAppEntry{Name: "feishu", Description: "chat"})
+	if item.InstallSupported {
+		t.Fatal("CLI Apps entry advertises install_supported=true")
+	}
+}

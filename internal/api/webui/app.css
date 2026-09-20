@@ -601,3 +601,5 @@ html[data-theme="dark"] .control-input { background: #202023; color: #e4e4e7; bo
 .haos-temp-button:hover{background:var(--bg-hover);color:var(--text-main)}
 
 .qa-modal{position:fixed;inset:0;z-index:85;background:rgba(0,0,0,.35);display:grid;place-items:center;padding:18px}.qa-modal.hidden{display:none}.qa-card{width:min(520px,96vw);background:var(--bg-main);border:1px solid var(--border-color);border-radius:16px;padding:16px;box-shadow:0 24px 80px rgba(0,0,0,.2)}.qa-card h3{margin:0 0 12px}.qa-field{display:flex;flex-direction:column;gap:5px;margin:9px 0;color:var(--text-muted);font-size:11px}.qa-field textarea{min-height:110px;resize:vertical}.qa-card .control-toolbar{margin-top:12px}
+
+.control-input{min-height:34px;border:1px solid var(--border-color);border-radius:9px;background:var(--bg-elevated);color:var(--text-main);padding:6px 9px}

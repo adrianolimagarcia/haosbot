@@ -168,56 +168,7 @@ func installSkillsShSkill(ctx context.Context, client *http.Client, workspace, s
 		}, nil
 	}
 
-	// Fallback: fetch directly from GitHub raw content
-	branches := []string{"main", "master"}
-	paths := []string{
-		fmt.Sprintf("skills/%s/SKILL.md", skillID),
-		fmt.Sprintf("%s/SKILL.md", skillID),
-		"SKILL.md",
-	}
-
-	var content []byte
-	for _, branch := range branches {
-		for _, p := range paths {
-			rawURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s", source, branch, p)
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-			if err != nil {
-				continue
-			}
-			resp, err := client.Do(req)
-			if err != nil || resp.StatusCode != http.StatusOK {
-				if resp != nil {
-					resp.Body.Close()
-				}
-				continue
-			}
-			data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB
-			resp.Body.Close()
-			if err == nil && len(data) > 0 {
-				content = data
-				break
-			}
-		}
-		if len(content) > 0 {
-			break
-		}
-	}
-
-	if len(content) == 0 {
-		return nil, fmt.Errorf("could not download skill from %s (npx is not installed and GitHub raw fetch was not found)", source)
-	}
-
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(filepath.Join(destDir, "SKILL.md"), content, 0o644); err != nil {
-		return nil, err
-	}
-
-	return &InstallResponse{
-		Installed: true,
-		Name:      skillID,
-		Provider:  "skills_sh",
-		Message:   "skill installed directly from source repository",
-	}, nil
+	// Fallback: copy the skill directory straight from the source repository.
+	// This path needs no external CLI, so it also covers hosts without npx.
+	return installGitHubSkill(ctx, client, workspace, source, skillID)
 }

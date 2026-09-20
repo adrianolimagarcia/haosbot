@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -155,6 +156,12 @@ func convertSkillHubRow(row skillhubSkillRow) *SkillItem {
 }
 
 func installSkillHubSkill(ctx context.Context, client *http.Client, workspace, skillID, version string) (*InstallResponse, error) {
+	return installSkillHubSkillFrom(ctx, client, skillhubAPIBase, workspace, skillID, version)
+}
+
+// installSkillHubSkillFrom takes the API base explicitly so tests can drive the
+// installer against a local server instead of the public registry.
+func installSkillHubSkillFrom(ctx context.Context, client *http.Client, apiBase, workspace, skillID, version string) (*InstallResponse, error) {
 	if !skillSlugRE.MatchString(skillID) {
 		return nil, fmt.Errorf("invalid skill name %q", skillID)
 	}
@@ -168,7 +175,7 @@ func installSkillHubSkill(ctx context.Context, client *http.Client, workspace, s
 		}, nil
 	}
 
-	downloadURL := fmt.Sprintf("%s/api/v1/download?slug=%s", skillhubAPIBase, url.QueryEscape(skillID))
+	downloadURL := fmt.Sprintf("%s/api/v1/download?slug=%s", apiBase, url.QueryEscape(skillID))
 	if version != "" {
 		downloadURL += "&version=" + url.QueryEscape(version)
 	}
@@ -216,11 +223,11 @@ func installSkillHubSkill(ctx context.Context, client *http.Client, workspace, s
 
 	var totalUnpacked int64
 	for _, f := range zr.File {
-		clean := filepath.Clean(f.Name)
-		if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) || strings.HasPrefix(clean, "/") {
+		clean := filepath.Clean(filepath.ToSlash(f.Name))
+		if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || filepath.IsAbs(clean) {
 			return nil, fmt.Errorf("unsafe path in archive: %q", f.Name)
 		}
-		target := filepath.Join(stageDir, clean)
+		target := filepath.Join(stageDir, filepath.FromSlash(clean))
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return nil, err
@@ -237,7 +244,13 @@ func installSkillHubSkill(ctx context.Context, client *http.Client, workspace, s
 			return nil, err
 		}
 
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, f.Mode()&0o755)
+		// Archives produced by some writers carry mode 0, which would create an
+		// unreadable skill; mask to a sane default instead of trusting the entry.
+		mode := os.FileMode(0o644)
+		if m := f.Mode().Perm() & 0o755; m != 0 {
+			mode = m
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 		if err != nil {
 			rc.Close()
 			return nil, err
@@ -253,6 +266,10 @@ func installSkillHubSkill(ctx context.Context, client *http.Client, workspace, s
 		if totalUnpacked > maxZipUnpacked {
 			return nil, fmt.Errorf("unpacked archive exceeded limit of %d bytes", maxZipUnpacked)
 		}
+	}
+
+	if _, err := os.Stat(filepath.Join(stageDir, "SKILL.md")); err != nil {
+		return nil, errors.New("downloaded archive has no SKILL.md at its root")
 	}
 
 	// Atomic replace

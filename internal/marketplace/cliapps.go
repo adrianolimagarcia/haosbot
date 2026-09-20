@@ -16,12 +16,12 @@ const (
 )
 
 type cliAppEntry struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	NpmPackage  string `json:"npm_package"`
-	Version     string `json:"version"`
-	URL         string `json:"url"`
-	EntryPoint  string `json:"entry_point"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	NpmPackage  string   `json:"npm_package"`
+	Version     string   `json:"version"`
+	URL         string   `json:"url"`
+	EntryPoint  string   `json:"entry_point"`
 	Args        []string `json:"args"`
 }
 

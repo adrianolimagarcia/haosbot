@@ -2,6 +2,7 @@ package marketplace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -9,21 +10,60 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/adrianolimagarcia/nanobot-go/internal/netpolicy"
 )
 
-type Service struct {
-	workspace string
-	client    *http.Client
+// marketplaceHosts is the fixed set of upstream hosts the catalogue talks to.
+// Every request also carries the operator's SSRF whitelist so a deployment can
+// extend the boundary without widening it for unrelated tools.
+var marketplaceHosts = []string{
+	"skills.sh",
+	"api.skillhub.cn",
+	"api.github.com",
+	"codeload.github.com",
+	"raw.githubusercontent.com",
+	"clianything.cc",
 }
 
-func NewService(workspace string) *Service {
+// Options configures a catalogue service.
+type Options struct {
+	// Workspace is the agent workspace; skills are installed under <workspace>/skills.
+	Workspace string
+	// AllowRemoteInstall gates every code-writing operation. When false the
+	// catalogue is read-only, which is the default.
+	AllowRemoteInstall bool
+	// SSRFWhitelist extends the outbound allowlist for the catalogue client.
+	SSRFWhitelist []string
+	// Client overrides the outbound client. Tests use it to reach local servers.
+	Client *http.Client
+}
+
+type Service struct {
+	workspace    string
+	allowInstall bool
+	client       *http.Client
+}
+
+// NewService builds a catalogue service. Remote installs are disabled unless
+// explicitly enabled, so a read-only catalogue is the default posture.
+func NewService(opts Options) *Service {
+	client := opts.Client
+	if client == nil {
+		allowlist := make([]string, 0, len(marketplaceHosts)+len(opts.SSRFWhitelist))
+		allowlist = append(allowlist, opts.SSRFWhitelist...)
+		allowlist = append(allowlist, marketplaceHosts...)
+		client = netpolicy.NewClient(45*time.Second, netpolicy.Policy{Allowlist: allowlist})
+	}
 	return &Service{
-		workspace: workspace,
-		client: &http.Client{
-			Timeout: 45 * time.Second,
-		},
+		workspace:    opts.Workspace,
+		allowInstall: opts.AllowRemoteInstall,
+		client:       client,
 	}
 }
+
+// InstallSupported reports whether this service may write to the workspace.
+func (s *Service) InstallSupported() bool { return s.allowInstall }
 
 func (s *Service) installedSkills() map[string]bool {
 	installed := make(map[string]bool)
@@ -105,7 +145,7 @@ func (s *Service) Trending(ctx context.Context, provider string, limit int) (*Tr
 	return &TrendingResponse{
 		Skills:           items,
 		Provider:         p,
-		InstallSupported: true,
+		InstallSupported: s.allowInstall,
 	}, nil
 }
 
@@ -178,11 +218,19 @@ func (s *Service) Search(ctx context.Context, query, provider string, limit int)
 		Query:            q,
 		Skills:           items,
 		Provider:         p,
-		InstallSupported: true,
+		InstallSupported: s.allowInstall,
 	}, nil
 }
 
+// ErrInstallDisabled is returned when remote installation is not enabled by the
+// operator. Installing a skill writes files the agent will later execute, so it
+// stays opt-in.
+var ErrInstallDisabled = errors.New("remote skill installation is disabled by configuration (tools.webuiAllowRemotePackageInstall)")
+
 func (s *Service) Install(ctx context.Context, req InstallRequest) (*InstallResponse, error) {
+	if !s.allowInstall {
+		return nil, ErrInstallDisabled
+	}
 	skillID := strings.TrimSpace(req.SkillID)
 	if skillID == "" {
 		return nil, fmt.Errorf("skill_id is required")
@@ -211,6 +259,9 @@ func (s *Service) Install(ctx context.Context, req InstallRequest) (*InstallResp
 }
 
 func (s *Service) Uninstall(ctx context.Context, name string) error {
+	if !s.allowInstall {
+		return ErrInstallDisabled
+	}
 	name = strings.TrimSpace(name)
 	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
 		return fmt.Errorf("invalid skill name %q", name)

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -17,8 +18,11 @@ func (s *Server) registerMarketplace(mux *http.ServeMux) {
 }
 
 func (s *Server) marketplaceService() *marketplace.Service {
-	workspace := webUIWorkspace(s.cfg)
-	return marketplace.NewService(workspace)
+	return marketplace.NewService(marketplace.Options{
+		Workspace:          webUIWorkspace(s.cfg),
+		AllowRemoteInstall: s.cfg.Tools.WebUIAllowRemotePackageInstall,
+		SSRFWhitelist:      s.cfg.Tools.SSRFWhitelist,
+	})
 }
 
 func (s *Server) handleMarketplaceTrending(w http.ResponseWriter, r *http.Request) {
@@ -96,6 +100,10 @@ func (s *Server) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request
 
 		res, err := svc.Install(r.Context(), req)
 		if err != nil {
+			if errors.Is(err, marketplace.ErrInstallDisabled) {
+				writeAPIError(w, http.StatusForbidden, "forbidden", "install_disabled", err.Error())
+				return
+			}
 			writeAPIError(w, http.StatusBadRequest, "install_failed", "marketplace_install_failed", err.Error())
 			return
 		}
@@ -110,13 +118,15 @@ func (s *Server) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request
 			return
 		}
 
-		provider := strings.TrimSpace(r.URL.Query().Get("provider"))
 		if err := svc.Uninstall(r.Context(), name); err != nil {
+			if errors.Is(err, marketplace.ErrInstallDisabled) {
+				writeAPIError(w, http.StatusForbidden, "forbidden", "install_disabled", err.Error())
+				return
+			}
 			writeAPIError(w, http.StatusBadRequest, "uninstall_failed", "marketplace_uninstall_failed", err.Error())
 			return
 		}
 
-		_ = provider
 		w.WriteHeader(http.StatusOK)
 		writeWebUIJSON(w, map[string]any{"ok": true, "uninstalled": name})
 

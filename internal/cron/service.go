@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -27,6 +28,7 @@ var (
 	ErrUnbound   = errors.New("cron: agent job is not bound to a session")
 	ErrActive    = errors.New("cron: job is already running")
 	ErrLeaseHeld = errors.New("cron: scheduler lease is held by another gateway")
+	ErrClosed    = errors.New("cron: scheduler is shut down")
 )
 
 type SkippedError struct{ Reason string }
@@ -54,6 +56,11 @@ type Service struct {
 	running       bool
 	loaded        bool
 	dirty         bool
+	// closed is set under mu by Close before the context is canceled. Read under
+	// the same mu by RunNow and dispatchDue, it stops new work from starting
+	// after shutdown — and, with wg.Add moved inside that critical section, it
+	// stops a concurrent Add from racing the WaitGroup Wait in Close.
+	closed        bool
 	maxSleep      time.Duration
 	maxConcurrent int
 	lease         *processLease
@@ -155,6 +162,7 @@ func (s *Service) Start() error {
 		return err
 	}
 	s.running = true
+	s.closed = false
 	s.wg.Add(1)
 	s.mu.Unlock()
 
@@ -228,7 +236,14 @@ func shouldFireMisfire(job Job, now time.Time) bool {
 }
 
 func (s *Service) Close(ctx context.Context) error {
+	// Mark the service closed while holding mu, then cancel: any RunNow or
+	// dispatchDue that acquires mu after this point is rejected before it can
+	// call wg.Add, and any that acquired it earlier has already done so before
+	// the Wait below starts.
+	s.mu.Lock()
+	s.closed = true
 	s.cancel()
+	s.mu.Unlock()
 	s.signal()
 	done := make(chan struct{})
 	go func() {
@@ -316,6 +331,10 @@ func (s *Service) dispatchDue() {
 	var candidates []dueJob
 
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
 	if s.dirty {
 		if err := s.saveLocked(); err != nil {
 			s.mu.Unlock()
@@ -355,11 +374,13 @@ func (s *Service) dispatchDue() {
 		snapshot.ScheduledForMS = candidate.at
 		snapshot.IdempotencyKey = idempotencyKey(snapshot.ID, candidate.at)
 		launches = append(launches, launch{ctx: ctx, job: snapshot})
+		// Registered while mu is still held so the counter can never be zero
+		// when Close's Wait runs concurrently with this Add.
+		s.wg.Add(1)
 	}
 	s.mu.Unlock()
 
 	for _, item := range launches {
-		s.wg.Add(1)
 		go func(item launch) {
 			defer s.wg.Done()
 			s.execute(item.ctx, item.job)
@@ -381,7 +402,11 @@ func (s *Service) execute(parent context.Context, snapshot Job) {
 		RunAtMS: start.UnixMilli(), ScheduledForMS: snapshot.ScheduledForMS,
 		Status: StatusRunning, RunID: runID, IdempotencyKey: snapshot.IdempotencyKey,
 	}
-	_ = s.writeRunRecord(snapshot, running, "")
+	// The run record is the only durable trace of this execution and the API
+	// reads it back by run_id, so a failure to write it must not be silent.
+	if err := s.writeRunRecord(snapshot, running, ""); err != nil {
+		slog.Warn("cron: could not persist running run record", "job", snapshot.ID, "run_id", runID, "error", err)
+	}
 
 	timeout := defaultJobTimeout
 	if snapshot.TimeoutMS > 0 {
@@ -419,7 +444,9 @@ func (s *Service) execute(parent context.Context, snapshot Job) {
 		Status: status, DurationMS: end.Sub(start).Milliseconds(), Error: errText,
 		RunID: result.RunID, IdempotencyKey: snapshot.IdempotencyKey,
 	}
-	_ = s.writeRunRecord(snapshot, record, result.Response)
+	if err := s.writeRunRecord(snapshot, record, result.Response); err != nil {
+		slog.Warn("cron: could not persist run record", "job", snapshot.ID, "run_id", result.RunID, "error", err)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -465,7 +492,9 @@ func (s *Service) execute(parent context.Context, snapshot Job) {
 	} else {
 		job.State.NextRunAtMS = nil
 	}
-	_ = s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		slog.Warn("cron: could not persist job state after run", "job", job.ID, "error", err)
+	}
 	s.signal()
 }
 
@@ -546,9 +575,12 @@ func (s *Service) AddJob(job Job) (Job, error) {
 		return Job{}, fmt.Errorf("cron: duplicate job id %q", job.ID)
 	}
 	s.store.Jobs = append(s.store.Jobs, cloneJob(job))
+	wasDirty := s.dirty
 	if err := s.saveLocked(); err != nil {
 		s.store.Jobs = s.store.Jobs[:len(s.store.Jobs)-1]
-		s.dirty = false
+		// Restore the previous dirty state rather than clearing it: a change
+		// that was already pending persistence must keep blocking a second run.
+		s.dirty = wasDirty
 		return Job{}, err
 	}
 	s.signal()
@@ -707,9 +739,11 @@ func (s *Service) UpdateJob(id string, update Update) (Job, error) {
 	}
 
 	s.store.Jobs[idx] = candidate
+	wasDirty := s.dirty
 	if err := s.saveLocked(); err != nil {
 		s.store.Jobs[idx] = original
-		s.dirty = false
+		// Keep any pre-existing pending-persistence state (see AddJob).
+		s.dirty = wasDirty
 		return Job{}, err
 	}
 	s.signal()
@@ -733,11 +767,13 @@ func (s *Service) RemoveJob(id string) error {
 	}
 	original := cloneJob(s.store.Jobs[idx])
 	s.store.Jobs = append(s.store.Jobs[:idx], s.store.Jobs[idx+1:]...)
+	wasDirty := s.dirty
 	if err := s.saveLocked(); err != nil {
 		s.store.Jobs = append(s.store.Jobs, Job{})
 		copy(s.store.Jobs[idx+1:], s.store.Jobs[idx:])
 		s.store.Jobs[idx] = original
-		s.dirty = false
+		// Keep any pre-existing pending-persistence state (see AddJob).
+		s.dirty = wasDirty
 		return err
 	}
 	s.signal()
@@ -746,6 +782,10 @@ func (s *Service) RemoveJob(id string) error {
 
 func (s *Service) RunNow(id string, force bool) error {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrClosed
+	}
 	if s.dirty {
 		if err := s.saveLocked(); err != nil {
 			s.mu.Unlock()
@@ -780,9 +820,11 @@ func (s *Service) RunNow(id string, force bool) error {
 	runCtx, cancel := context.WithCancel(s.ctx)
 	s.active[id] = cancel
 	s.store.Jobs[idx].State.Pending = true
+	// Registered under mu, before the unlock, so Close's Wait cannot observe a
+	// zero counter while this Add is in flight.
+	s.wg.Add(1)
 	s.mu.Unlock()
 
-	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		s.execute(runCtx, job)

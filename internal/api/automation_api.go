@@ -191,6 +191,10 @@ func (s *Server) handleWebUIAutomationRun(w http.ResponseWriter, r *http.Request
 				http.NotFound(w, r)
 			case errors.Is(err, cronruntime.ErrActive):
 				http.Error(w, err.Error(), http.StatusConflict)
+			case errors.Is(err, cronruntime.ErrClosed):
+				// The gateway is shutting down; the request is valid but the
+				// scheduler can no longer accept work.
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			default:
 				http.Error(w, err.Error(), http.StatusBadRequest)
 			}

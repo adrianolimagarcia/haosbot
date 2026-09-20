@@ -254,10 +254,10 @@ func (s *Server) handleWebUISearch(w http.ResponseWriter, r *http.Request) {
 		for _, message := range sess.Messages() {
 			if !message.Content.IsText() { continue }
 			text := message.Content.Text
-			pos := strings.Index(strings.ToLower(text), query)
-			if pos < 0 { continue }
-			start := pos - 80; if start < 0 { start = 0 }
-			end := pos + len(query) + 160; if end > len(text) { end = len(text) }
+			matchStart, matchEnd, found := caseInsensitiveSpan(text, query)
+			if !found { continue }
+			start := snapRuneStart(text, matchStart-80)
+			end := snapRuneEnd(text, matchEnd+160)
 			results = append(results, map[string]any{
 				"key": key, "title": title, "snippet": strings.TrimSpace(text[start:end]),
 			})
@@ -500,6 +500,50 @@ func webUIWorkspace(cfg *config.Config) string {
 		}
 	}
 	return path
+}
+
+// caseInsensitiveSpan returns the byte offsets of the first case-insensitive
+// match of query inside text.
+//
+// It compares rune by rune rather than searching a lowercased copy: strings
+// .ToLower can change a string's byte length ('İ' U+0130 expands to two runes,
+// 'K' U+212A contracts to one), so an offset taken from the lowercased copy
+// would point into the middle of a different character in text.
+func caseInsensitiveSpan(text, query string) (int, int, bool) {
+	if query == "" { return 0, 0, false }
+	runes := []rune(text)
+	q := []rune(query)
+	if len(q) == 0 || len(q) > len(runes) { return 0, 0, false }
+	byteAt := make([]int, len(runes)+1)
+	offset := 0
+	for i, r := range runes {
+		byteAt[i] = offset
+		offset += utf8.RuneLen(r)
+	}
+	byteAt[len(runes)] = offset
+	for i := 0; i+len(q) <= len(runes); i++ {
+		if strings.EqualFold(string(runes[i:i+len(q)]), query) {
+			return byteAt[i], byteAt[i+len(q)], true
+		}
+	}
+	return 0, 0, false
+}
+
+// snapRuneStart moves offset back to the start of the rune containing it, so a
+// slice taken from that offset never begins mid-character.
+func snapRuneStart(text string, offset int) int {
+	if offset <= 0 { return 0 }
+	if offset >= len(text) { return len(text) }
+	for offset > 0 && !utf8.RuneStart(text[offset]) { offset-- }
+	return offset
+}
+
+// snapRuneEnd moves offset forward to just past the rune containing it.
+func snapRuneEnd(text string, offset int) int {
+	if offset <= 0 { return 0 }
+	if offset >= len(text) { return len(text) }
+	for offset < len(text) && !utf8.RuneStart(text[offset]) { offset++ }
+	return offset
 }
 
 func titleFromMessages(messages []core.Message) string {

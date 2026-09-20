@@ -93,14 +93,20 @@ func searchSkillHub(ctx context.Context, client *http.Client, query string, limi
 	}
 
 	var payload struct {
-		Skills []skillhubSkillRow `json:"skills"`
+		Skills  []skillhubSkillRow `json:"skills"`
+		Results []skillhubSkillRow `json:"results"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&payload); err != nil {
 		return nil, fmt.Errorf("skillhub decode: %w", err)
 	}
 
+	rawRows := payload.Skills
+	if len(rawRows) == 0 {
+		rawRows = payload.Results
+	}
+
 	items := make([]SkillItem, 0)
-	for _, row := range payload.Skills {
+	for _, row := range rawRows {
 		item := convertSkillHubRow(row)
 		if item != nil {
 			items = append(items, *item)

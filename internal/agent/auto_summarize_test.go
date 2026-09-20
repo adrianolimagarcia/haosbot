@@ -340,9 +340,8 @@ func TestAutoSummarizeUsesStreamingWhenAvailable(t *testing.T) {
 		t.Fatalf("ProcessMessage: %v", err)
 	}
 
-	waitForCondition(t, time.Second, "background streamed summary", func() bool {
-		_, streamCalls, _ := prov.counts()
-		return streamCalls == 1
+	waitForCondition(t, time.Second, "background streamed summary checkpoint", func() bool {
+		return len(sess.checkpointSnapshot()) == 1
 	})
 	chatCalls, streamCalls, maxTokens := prov.counts()
 	if chatCalls != 0 {

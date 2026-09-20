@@ -44,6 +44,7 @@
     box.prepend(row);
   }
   function renderChips() {
+    prunePending();
     const root=document.getElementById('haos-attachment-chips'); if(!root)return; root.replaceChildren();
     pending.forEach((item,index)=>{
       const chip=document.createElement('span'); chip.className='haos-attachment-chip';
@@ -53,12 +54,21 @@
       chip.appendChild(x);root.appendChild(chip);
     });
   }
+  // The server stores an upload under the media directory of the session that
+  // uploaded it and rejects a turn whose media belongs to another session, so a
+  // chip left over from a previous conversation would fail the next turn with a
+  // 400 after the composer had already been cleared.
+  function prunePending() {
+    const id=sessionID();
+    pending=pending.filter(item=>item.__session===id);
+  }
   async function uploadFiles(files) {
+    prunePending();
     for (const file of files.slice(0,Math.max(0,maxFiles-pending.length))) {
       const form=new FormData(); form.append('sessionId',sessionID()); form.append('file',file,file.name);
       const res=await fetch('/api/webui/attachment',{method:'POST',headers:headers(),body:form});
       if(!res.ok){window.alert('Falha ao anexar '+file.name+': '+await res.text());continue;}
-      pending.push(await res.json()); renderChips();
+      const item=await res.json(); item.__session=sessionID(); pending.push(item); renderChips();
     }
     const input=document.getElementById('haos-attachment-input'); if(input)input.value='';
   }
@@ -93,17 +103,19 @@
   }
 
   const originalNewSession=window.newSession;
-  window.newSession=async function(){await discardCurrentTemporary();return originalNewSession?.();};
+  window.newSession=async function(){await discardCurrentTemporary();pending=[];renderChips();return originalNewSession?.();};
   window.newTemporaryChat=newTemporaryChat;
   window.stopTurn=()=>{if(aborter)aborter.abort();};
   window.handleSend=async function(){
     if(aborter)return;
     const input=document.getElementById('user-input'); if(!input)return;
+    prunePending();
     const text=input.value.trim(); if(!text&&!pending.length)return;
     const attachments=pending.slice(); pending=[];renderChips();input.value='';input.disabled=true;
     const stream=document.getElementById('chat-stream');appendUser(stream,text,attachments);
     const assistant=appendAssistant(stream);let content='',failed='';const active=new Map();
     aborter=new AbortController();
+    if(typeof window.setTurnRunning==='function')window.setTurnRunning(true);
     try{
       const res=await fetch('/api/agent/turn/stream',{method:'POST',headers:headers({'Content-Type':'application/json','X-HAOS-Session-ID':sessionID()}),body:JSON.stringify({sessionId:sessionID(),message:text||'Please inspect the attached file(s).',media:attachments.map(a=>a.path)}),signal:aborter.signal});
       if(!res.ok)throw new Error('HTTP '+res.status+': '+await res.text());
@@ -119,7 +131,7 @@
       if(failed)throw new Error(failed);
       await renderMarkdown(content||'(sem resposta)',assistant.body);
     }catch(err){assistant.body.textContent=err?.name==='AbortError'?'Turno interrompido pelo usuário.':'Erro: '+escapeText(err.message);assistant.body.className='text-red-700 text-sm whitespace-pre-wrap';}
-    finally{aborter=null;input.disabled=false;input.focus();window.dispatchEvent(new CustomEvent('haosbot:turn-complete'));const c=document.getElementById('messages-container');if(c)c.scrollTop=c.scrollHeight;}
+    finally{aborter=null;input.disabled=false;input.focus();if(typeof window.setTurnRunning==='function')window.setTurnRunning(false);window.dispatchEvent(new CustomEvent('haosbot:turn-complete'));const c=document.getElementById('messages-container');if(c)c.scrollTop=c.scrollHeight;}
   };
 
   window.haosbotLoadContext=async function(key){

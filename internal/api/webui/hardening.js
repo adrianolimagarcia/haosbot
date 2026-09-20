@@ -79,7 +79,7 @@
       const copy = document.createElement('button');
       copy.className = 'hover:text-black';
       copy.textContent = 'Copiar';
-      copy.addEventListener('click', () => navigator.clipboard.writeText(text));
+      copy.addEventListener('click', () => copyToClipboard(text, copy));
       top.append(label, copy);
 
       // LLM output is untrusted. The server renders it (internal/api/markdown.go)
@@ -187,6 +187,39 @@
   // context from the request context (internal/api/agent_turn_stream.go), so
   // aborting the request cancels the turn itself and not merely this browser's
   // view of it.
+  // navigator.clipboard only exists in a secure context, and this server has no
+  // TLS listener, so a plain-HTTP LAN deployment has to fall back to the legacy
+  // selection-based copy instead of throwing a TypeError.
+  function copyToClipboard(text, button) {
+    const done = ok => {
+      if (!button) return;
+      const previous = button.textContent;
+      button.textContent = ok ? 'Copiado' : 'Falhou';
+      setTimeout(() => { button.textContent = previous; }, 1200);
+    };
+    const legacy = () => {
+      try {
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.setAttribute('readonly', '');
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(area);
+        return ok;
+      } catch (_) {
+        return false;
+      }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => done(true), () => done(legacy()));
+      return;
+    }
+    done(legacy());
+  }
+
   function setTurnRunning(running) {
     const stopButton = document.getElementById('stop-button');
     const sendButton = document.getElementById('send-button');
@@ -200,6 +233,10 @@
       sendButton.disabled = running;
     }
   }
+  // enhancements.js is injected after this file and replaces window.handleSend,
+  // which would otherwise leave this helper unreachable — and with it the Stop
+  // button, since this is the only code that reveals it.
+  window.setTurnRunning = setTurnRunning;
 
   window.stopTurn = function stopTurn() {
     if (turnAbort) turnAbort.abort();
@@ -339,11 +376,19 @@
   };
 
   window.openSettings = async function openSettings() {
-    document.getElementById('dlg-status').textContent = '';
+    const status = document.getElementById('dlg-status');
+    status.textContent = '';
+    status.className = 'text-xs text-emerald-600 font-medium';
     document.getElementById('settings-dialog').classList.remove('hidden');
     try {
       const res = await fetch('/api/config', { headers: authHeaders() });
-      if (!res.ok) return;
+      // Leaving the dialog open with empty fields and no explanation looks like
+      // a configuration that was wiped; say what happened and block saving.
+      if (!res.ok) {
+        status.textContent = 'Falha ao carregar configuração (HTTP ' + res.status + '). Feche e tente novamente.';
+        status.className = 'text-xs text-red-700';
+        return;
+      }
       const cfg = await res.json();
       document.getElementById('dlg-llm-base').value = cfg.providers?.openai?.apiBase || '';
       document.getElementById('dlg-llm-key').value = '';
@@ -356,6 +401,8 @@
         ? 'Token configurado — informe o token atual para autenticar'
         : 'Bearer token';
     } catch (err) {
+      status.textContent = 'Falha ao carregar configuração: ' + (err && err.message ? err.message : err);
+      status.className = 'text-xs text-red-700';
       console.warn('Falha ao carregar configuração:', err);
     }
   };

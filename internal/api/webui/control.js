@@ -5,6 +5,10 @@
   let showArchived = false;
   let activeKey = null;
   let activeView = null;
+  // True while an editor form owns the panel. refreshState() re-renders the
+  // active view (on every turn completion and on the refresh button), which
+  // used to replace a draft the user was still filling in with the list view.
+  let editorMounted = false;
   let searchTimer = null;
 
   const byId = id => document.getElementById(id);
@@ -27,11 +31,26 @@
     return JSON.parse(text);
   }
 
+  function errorMessage(err) {
+    return err && err.message ? err.message : String(err);
+  }
+
+  // Failures used to surface only as unhandled promise rejections in the
+  // console, leaving the panel looking like the click did nothing at all.
+  function reportError(message) {
+    console.warn('haosbot:', message);
+    const stream = byId('chat-stream');
+    if (!stream) return;
+    stream.appendChild(el('div', 'session-loading', message));
+    const container = byId('messages-container');
+    if (container) container.scrollTop = container.scrollHeight;
+  }
+
   async function refreshState() {
     try {
       state = await api('/api/webui/state');
       renderSessions();
-      if (activeView) renderView(activeView);
+      if (activeView && !editorMounted) renderView(activeView);
       const model = state?.config?.agents?.defaults?.model;
       if (model && byId('model-selector-badge')) byId('model-selector-badge').textContent = model;
       const usage = Number(state?.metrics?.total_tokens || 0);
@@ -51,6 +70,7 @@
   }
 
   function configEditor(title, key, value) {
+    editorMounted = true;
     const wrap = el('div', 'control-editor-block');
     wrap.appendChild(el('div', 'control-section-title', title));
     const area = el('textarea', 'memory-editor');
@@ -112,6 +132,14 @@
       open.type = 'button';
       open.dataset.sessionKey = session.key;
       open.dataset.sessionId = session.session_id || '';
+      // Only webui:* sessions can be opened here; the server marks the others
+      // with selectable=false and ships no session_id. Rendering them as live
+      // buttons made a click look broken instead of unavailable.
+      if (!session.selectable || !session.session_id) {
+        open.disabled = true;
+        open.classList.add('session-open-disabled');
+        open.title = 'Sessão de canal externo — não pode ser aberta no WebUI';
+      }
       const title = el('span', 'session-title', session.title || 'Novo chat');
       const meta = el('span', 'session-meta');
       meta.append(
@@ -141,13 +169,17 @@
 
   async function openSession(key, sessionID) {
     if (!sessionID) return;
-    const data = await api('/api/webui/session?key=' + encodeURIComponent(key));
-    activeKey = key;
-    if (typeof window.activateWebSession === 'function') {
-      await window.activateWebSession(sessionID, data.messages || [], sessionTitle(key));
+    try {
+      const data = await api('/api/webui/session?key=' + encodeURIComponent(key));
+      activeKey = key;
+      if (typeof window.activateWebSession === 'function') {
+        await window.activateWebSession(sessionID, data.messages || [], sessionTitle(key));
+      }
+      closeView();
+      renderSessions();
+    } catch (err) {
+      reportError('Falha ao abrir a sessão: ' + errorMessage(err));
     }
-    closeView();
-    renderSessions();
   }
 
   function sessionTitle(key) {
@@ -176,6 +208,7 @@
 
   function closeView() {
     activeView = null;
+    editorMounted = false;
     const panel = byId('workspace-panel');
     if (panel) panel.classList.add('hidden');
   }
@@ -186,6 +219,7 @@
   }
 
   function renderView(view) {
+    editorMounted = false;
     const root = byId('workspace-panel-content');
     if (!root) return;
     root.replaceChildren();
@@ -269,6 +303,7 @@
   }
 
   function renderSkills(root) {
+    editorMounted = false;
     setPanelTitle('Skills', 'Capabilities');
     const toolbar = el('div', 'control-toolbar');
     const explore = el('button', 'control-button primary', 'Explorar Mercado de Skills');
@@ -305,6 +340,7 @@
   let marketplaceTimer = null;
 
   async function renderMarketplace(root) {
+    editorMounted = false;
     setPanelTitle('Mercado de Skills & Plugins', 'Catálogo');
 
     const topBar = el('div', 'control-toolbar');
@@ -340,23 +376,30 @@
     grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(280px, 1fr))';
     root.append(status, grid);
 
+    // Responses are matched against the request that produced them: a slow
+    // search must not append its cards on top of a newer render.
+    let loadSeq = 0;
     async function loadItems() {
-      grid.replaceChildren();
+      const seq = ++loadSeq;
+      const query = marketplaceQuery.trim();
+      const provider = marketplaceProvider;
       status.textContent = 'Carregando catálogo…';
       try {
-        let endpoint = '/api/webui/skills/marketplace/trending?provider=' + encodeURIComponent(marketplaceProvider);
-        if (marketplaceQuery.trim().length >= 2) {
-          endpoint = '/api/webui/skills/marketplace/search?q=' + encodeURIComponent(marketplaceQuery.trim()) + '&provider=' + encodeURIComponent(marketplaceProvider);
+        let endpoint = '/api/webui/skills/marketplace/trending?provider=' + encodeURIComponent(provider);
+        if (query.length >= 2) {
+          endpoint = '/api/webui/skills/marketplace/search?q=' + encodeURIComponent(query) + '&provider=' + encodeURIComponent(provider);
         }
         const data = await api(endpoint);
+        if (seq !== loadSeq) return;
         const skills = data?.skills || [];
         const installEnabled = data?.install_supported !== false;
-        status.textContent = marketplaceQuery.trim().length >= 2
-          ? `${skills.length} resultado(s) para "${marketplaceQuery.trim()}"`
+        status.textContent = query.length >= 2
+          ? `${skills.length} resultado(s) para "${query}"`
           : `Trending em destaque (${skills.length} disponíveis)`;
         if (!installEnabled) {
           status.textContent += ' — instalação remota desabilitada (tools.webuiAllowRemotePackageInstall)';
         }
+        grid.replaceChildren();
 
         if (!skills.length) {
           grid.appendChild(el('div', 'control-muted', 'Nenhuma skill encontrada para este filtro.'));
@@ -450,6 +493,7 @@
           grid.appendChild(card);
         }
       } catch (err) {
+        if (seq !== loadSeq) return;
         status.textContent = 'Erro ao carregar catálogo: ' + err.message;
       }
     }
@@ -501,6 +545,7 @@
   function editSkill(existingName, content) {
     const root = byId('workspace-panel-content');
     if (!root) return;
+    editorMounted = true;
     setPanelTitle(existingName || 'Nova skill', 'Skill editor');
     root.replaceChildren();
     const nameInput = el('input', 'control-input');
@@ -565,6 +610,7 @@
 
   function automationEditor(root, job = null) {
     root.replaceChildren();
+    editorMounted = true;
     setPanelTitle(job ? 'Editar automação' : 'Nova automação', 'Scheduler');
 
     const form = el('div', 'automation-editor');
@@ -579,6 +625,12 @@
     const session = el('input', 'control-input');
     session.placeholder = 'Sessão vinculada';
     session.value = job?.payload?.sessionKey || automationSessionKey();
+    // PATCH /api/webui/automation does not accept session_key, so an edit here
+    // would be silently dropped. Freeze it instead of pretending it is editable.
+    if (job) {
+      session.disabled = true;
+      session.title = 'A sessão vinculada não pode ser alterada depois de criada';
+    }
 
     const kind = el('select', 'control-input');
     for (const value of ['every', 'cron', 'at']) {
@@ -787,6 +839,7 @@
   }
 
   async function renderAutomations(root) {
+    editorMounted = false;
     setPanelTitle('Automações', 'Scheduler');
     root.replaceChildren(el('div', 'session-loading', 'Carregando automações…'));
     try {
@@ -975,6 +1028,14 @@
   }
 
   document.addEventListener('click', async event => {
+    try {
+      await handleClick(event);
+    } catch (err) {
+      reportError('Falha na ação: ' + errorMessage(err));
+    }
+  });
+
+  async function handleClick(event) {
     const target = event.target instanceof Element ? event.target : null;
     if (!target) return;
 
@@ -1014,9 +1075,13 @@
     const searchResult = target.closest('[data-search-session-key]');
     if (searchResult) {
       const session = state?.sessions?.find(s => s.key === searchResult.dataset.searchSessionKey);
-      if (session?.session_id) await openSession(session.key, session.session_id);
+      if (session?.session_id) {
+        await openSession(session.key, session.session_id);
+      } else {
+        reportError('Sessão de canal externo — não pode ser aberta no WebUI.');
+      }
     }
-  });
+  }
 
   document.addEventListener('input', event => {
     if (event.target?.id !== 'session-search') return;

@@ -140,6 +140,9 @@ func (s *Service) Trending(ctx context.Context, provider string, limit int) (*Tr
 		if installed[items[i].SkillID] {
 			items[i].Installed = true
 		}
+		// The operator gate is authoritative: a provider that cannot install at
+		// all stays uninstallable even when remote installs are enabled.
+		items[i].InstallSupported = items[i].InstallSupported && s.allowInstall
 	}
 
 	return &TrendingResponse{
@@ -212,6 +215,7 @@ func (s *Service) Search(ctx context.Context, query, provider string, limit int)
 		if installed[items[i].SkillID] {
 			items[i].Installed = true
 		}
+		items[i].InstallSupported = items[i].InstallSupported && s.allowInstall
 	}
 
 	return &SearchResponse{
@@ -245,6 +249,11 @@ func (s *Service) Install(ctx context.Context, req InstallRequest) (*InstallResp
 			source = skillID
 		}
 		return installSkillsShSkill(ctx, s.client, s.workspace, source, skillID)
+	case "cliapps":
+		// The CLI-Anything registry publishes catalogue entries only; there is
+		// no archive to install. Saying so is better than silently trying an
+		// unrelated provider and reporting its failure.
+		return nil, fmt.Errorf("provider %q is a read-only catalogue and cannot be installed", p)
 	default:
 		// Try skillhub first, then skills_sh
 		resp, err := installSkillHubSkill(ctx, s.client, s.workspace, skillID, req.Version)

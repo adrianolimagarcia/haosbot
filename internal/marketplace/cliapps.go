@@ -122,6 +122,9 @@ func convertCliApp(cli cliAppEntry) SkillItem {
 		Provider:         "cliapps",
 		URL:              cli.URL,
 		Version:          cli.Version,
-		InstallSupported: true,
+		// The CLI-Anything registry is a catalogue of external applications; it
+		// exposes no archive this runtime knows how to install, so advertising
+		// an installer here would only produce a guaranteed failure.
+		InstallSupported: false,
 	}
 }

@@ -350,9 +350,13 @@
         }
         const data = await api(endpoint);
         const skills = data?.skills || [];
+        const installEnabled = data?.install_supported !== false;
         status.textContent = marketplaceQuery.trim().length >= 2
           ? `${skills.length} resultado(s) para "${marketplaceQuery.trim()}"`
           : `Trending em destaque (${skills.length} disponíveis)`;
+        if (!installEnabled) {
+          status.textContent += ' — instalação remota desabilitada (tools.webuiAllowRemotePackageInstall)';
+        }
 
         if (!skills.length) {
           grid.appendChild(el('div', 'control-muted', 'Nenhuma skill encontrada para este filtro.'));
@@ -391,7 +395,15 @@
 
           const actionBtn = el('button', 'control-button' + (item.installed ? ' danger' : ' primary'));
           actionBtn.type = 'button';
-          actionBtn.textContent = item.installed ? 'Desinstalar' : 'Instalar';
+          const itemInstallable = item.install_supported !== false;
+          actionBtn.textContent = item.installed ? 'Desinstalar' : (itemInstallable ? 'Instalar' : 'Somente catálogo');
+          if (!itemInstallable && !item.installed) {
+            actionBtn.disabled = true;
+            actionBtn.title = 'Este provedor é somente leitura';
+          } else if (!installEnabled) {
+            actionBtn.disabled = true;
+            actionBtn.title = 'Instalação remota desabilitada pelo operador';
+          }
 
           actionBtn.addEventListener('click', async () => {
             if (item.installed) {

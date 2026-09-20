@@ -18,11 +18,18 @@ func (s *Server) registerMarketplace(mux *http.ServeMux) {
 }
 
 func (s *Server) marketplaceService() *marketplace.Service {
-	return marketplace.NewService(marketplace.Options{
+	if svc := s.marketplaceSvc.Load(); svc != nil {
+		return svc
+	}
+	svc := marketplace.NewService(marketplace.Options{
 		Workspace:          webUIWorkspace(s.cfg),
 		AllowRemoteInstall: s.cfg.Tools.WebUIAllowRemotePackageInstall,
 		SSRFWhitelist:      s.cfg.Tools.SSRFWhitelist,
 	})
+	if s.marketplaceSvc.CompareAndSwap(nil, svc) {
+		return svc
+	}
+	return s.marketplaceSvc.Load()
 }
 
 func (s *Server) handleMarketplaceTrending(w http.ResponseWriter, r *http.Request) {

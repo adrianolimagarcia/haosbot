@@ -20,6 +20,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	cronruntime "github.com/adrianolimagarcia/nanobot-go/internal/cron"
 	triggersruntime "github.com/adrianolimagarcia/nanobot-go/internal/triggers"
+	"github.com/adrianolimagarcia/nanobot-go/internal/marketplace"
 	"github.com/adrianolimagarcia/nanobot-go/internal/netpolicy"
 	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
 	"github.com/adrianolimagarcia/nanobot-go/internal/provider"
@@ -47,6 +48,10 @@ type Server struct {
 	sessionStore atomic.Pointer[session.Store]
 	scheduler atomic.Pointer[cronruntime.Service]
 	triggers atomic.Pointer[triggersruntime.Service]
+	// marketplaceSvc is built once per server. The catalogue client owns a
+	// transport with its own connection pool, so rebuilding it per request
+	// would force a fresh TLS handshake against every upstream on every call.
+	marketplaceSvc atomic.Pointer[marketplace.Service]
 	webuiMu sync.Mutex
 
 	// notReady is the process-owned readiness override read by /readyz

@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - feat/parity-mcp-stdio-lifecycle
   pull_request:
     branches: [main]
 

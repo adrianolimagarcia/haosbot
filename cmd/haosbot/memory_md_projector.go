@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -38,7 +39,7 @@ func newMemoryMDProjector(path string, pool *graphStorePool, poll time.Duration)
 
 func (p *memoryMDProjector) run() {
 	defer p.wg.Done()
-	_ = p.syncOnce(p.ctx)
+	p.syncAndLog()
 	ticker := time.NewTicker(p.poll)
 	defer ticker.Stop()
 	for {
@@ -46,8 +47,16 @@ func (p *memoryMDProjector) run() {
 		case <-p.ctx.Done():
 			return
 		case <-ticker.C:
-			_ = p.syncOnce(p.ctx)
+			p.syncAndLog()
 		}
+	}
+}
+
+// syncAndLog surfaces projector failures. Discarding them silently made a
+// projector that never indexes anything indistinguishable from a healthy one.
+func (p *memoryMDProjector) syncAndLog() {
+	if err := p.syncOnce(p.ctx); err != nil && !errors.Is(err, context.Canceled) {
+		slog.Warn("memory.md projector: sync failed", "path", p.path, "error", err)
 	}
 }
 
@@ -79,23 +88,28 @@ func (p *memoryMDProjector) syncOnce(ctx context.Context) error {
 	err = store.DB().QueryRowContext(ctx,
 		"SELECT id FROM documents WHERE source=? AND title=? LIMIT 1",
 		canonicalMemorySource, title).Scan(&existing)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-
-	added, err := store.AddMemory(ctx, micrographrag.MemoryInput{
-		Kind: 1, Source: canonicalMemorySource, Title: title, Content: content,
-	})
-	if err != nil {
+	keepID := existing
+	switch {
+	case err == nil:
+		// Already projected. The sweep below still runs: if a previous pass
+		// added the document and then died (or failed) before deleting the
+		// older copies, returning here would leave those stale copies in the
+		// index permanently, because every later tick short-circuits here too.
+	case errors.Is(err, sql.ErrNoRows):
+		added, addErr := store.AddMemory(ctx, micrographrag.MemoryInput{
+			Kind: 1, Source: canonicalMemorySource, Title: title, Content: content,
+		})
+		if addErr != nil {
+			return addErr
+		}
+		keepID = added.DocumentID
+	default:
 		return err
 	}
 
 	rows, err := store.DB().QueryContext(ctx,
 		"SELECT id FROM documents WHERE source=? AND id<>?",
-		canonicalMemorySource, added.DocumentID)
+		canonicalMemorySource, keepID)
 	if err != nil {
 		return err
 	}

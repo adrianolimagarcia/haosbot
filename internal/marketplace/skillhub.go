@@ -63,7 +63,7 @@ func fetchSkillHubTrending(ctx context.Context, client *http.Client, limit int) 
 		return nil, fmt.Errorf("skillhub decode: %w", err)
 	}
 
-	var items []SkillItem
+	items := make([]SkillItem, 0)
 	for _, row := range payload.Skills {
 		item := convertSkillHubRow(row)
 		if item != nil {
@@ -99,7 +99,7 @@ func searchSkillHub(ctx context.Context, client *http.Client, query string, limi
 		return nil, fmt.Errorf("skillhub decode: %w", err)
 	}
 
-	var items []SkillItem
+	items := make([]SkillItem, 0)
 	for _, row := range payload.Skills {
 		item := convertSkillHubRow(row)
 		if item != nil {

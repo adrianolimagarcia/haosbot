@@ -75,7 +75,7 @@ func fetchCliAppsTrending(ctx context.Context, client *http.Client, limit int) (
 	if err != nil {
 		return nil, err
 	}
-	var items []SkillItem
+	items := make([]SkillItem, 0)
 	for _, cli := range clis {
 		if strings.TrimSpace(cli.Name) == "" {
 			continue
@@ -94,7 +94,7 @@ func searchCliApps(ctx context.Context, client *http.Client, query string, limit
 		return nil, err
 	}
 	q := strings.ToLower(strings.TrimSpace(query))
-	var items []SkillItem
+	items := make([]SkillItem, 0)
 	for _, cli := range clis {
 		name := strings.ToLower(cli.Name)
 		desc := strings.ToLower(cli.Description)

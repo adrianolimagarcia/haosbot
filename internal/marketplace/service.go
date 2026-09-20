@@ -50,7 +50,7 @@ func (s *Service) Trending(ctx context.Context, provider string, limit int) (*Tr
 		p = "all"
 	}
 
-	var items []SkillItem
+	items := make([]SkillItem, 0)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
@@ -122,7 +122,7 @@ func (s *Service) Search(ctx context.Context, query, provider string, limit int)
 		p = "all"
 	}
 
-	var items []SkillItem
+	items := make([]SkillItem, 0)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 

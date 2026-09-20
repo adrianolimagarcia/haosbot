@@ -55,7 +55,7 @@ func fetchSkillsShTrending(ctx context.Context, client *http.Client, limit int) 
 	}
 
 	canInstall := npxAvailable()
-	var items []SkillItem
+	items := make([]SkillItem, 0)
 	seenSources := map[string]bool{}
 	for _, row := range payload.Skills {
 		if seenSources[row.Source] {
@@ -97,7 +97,7 @@ func searchSkillsSh(ctx context.Context, client *http.Client, query string, limi
 	}
 
 	canInstall := npxAvailable()
-	var items []SkillItem
+	items := make([]SkillItem, 0)
 	for _, row := range payload.Skills {
 		item := convertSkillsShRow(row, canInstall)
 		if item != nil {

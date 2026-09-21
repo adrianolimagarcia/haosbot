@@ -1,122 +1,154 @@
 # Spec — A2A (Agent2Agent) em nanobot-go
 
-Status: **PLANEJADO / NÃO INICIADO**. Registrado em 2026-09-16 para não se
-perder. Decisão do usuário: **servidor + cliente**, executado **depois** de
-Memory/Dream + canais.
+Status: **IMPLEMENTADO (binding JSON-RPC, protocolo v1.0)**. Servidor em
+`internal/a2a/`, cliente na tool `a2a_call` (`internal/tools/builtin/a2a_call.go`).
+Registrado em 2026-09-16 como planejamento; implementado e verificado contra as
+ferramentas oficiais em 2026-09-22.
 
 Fontes primárias consultadas:
 
-- Especificação v1.0.0 (main): <https://github.com/a2aproject/A2A/blob/main/docs/specification.md>
-- Especificação v0.3.0: <https://a2a-protocol.org/v0.3.0/specification/>
-- TCK oficial: <https://github.com/a2aproject/a2a-tck>
+- Especificação v1.0.0: <https://github.com/a2aproject/A2A/blob/main/docs/specification.md>
+- Proto oficial: `specification/a2a.proto` no mesmo repositório
+- JSON Schema oficial: <https://a2a-protocol.org/v1.0.0/spec/a2a.json>
+- TCK oficial: <https://github.com/a2aproject/a2a-tck> (@ `263b9cf`)
+- SDK oficial: <https://github.com/a2aproject/a2a-python> (`a2a-sdk` 1.1.5)
 
-Aviso de evidência: o documento v1.0.0 foi lido direto da fonte primária
-(campos `supportedInterfaces`, `ROLE_USER`/`ROLE_AGENT`, `TASK_STATE_*`,
-`protocolVersion: "1.0"`, `/.well-known/agent-card.json` confirmados). Os
-**nomes PascalCase dos métodos JSON-RPC em v1.0.0** (`SendMessage` etc.) vêm de
-fontes secundárias e **precisam ser reconfirmados na fonte primária** antes de
-codificar. Não tratar como verificado.
+**Evidência.** Os nomes PascalCase dos métodos JSON-RPC em v1.0.0
+(`SendMessage`, `GetTask`, `ListTasks`, `CancelTask`, `SendStreamingMessage`,
+`SubscribeToTask`, `Create/Get/List/DeleteTaskPushNotificationConfig`,
+`GetExtendedAgentCard`) estão **confirmados na fonte primária** (linha 2247 da
+spec) e no dispatch do SDK oficial
+(`a2a/server/routes/jsonrpc_dispatcher.py`). O aviso de "não verificado" da
+versão anterior deste documento está resolvido.
 
 ---
 
 ## 1. Veredito de viabilidade
 
 O binding **obrigatório** do A2A é JSON-RPC 2.0 sobre HTTP(S); gRPC e
-HTTP+JSON/REST são **opcionais**. Isso significa que a conformidade obrigatória
-cabe inteiramente na stdlib do Go — `net/http`, `encoding/json`, SSE via
-`http.Flusher`. O zero-dependências do projeto é preservado.
+HTTP+JSON/REST são **opcionais**. A conformidade obrigatória cabe inteiramente na
+stdlib do Go — `net/http`, `encoding/json`, SSE via `http.Flusher`. O
+zero-dependências do projeto foi preservado.
 
 **Fronteira dura:** o binding gRPC exige `google.golang.org/grpc` + protobuf e
-**está fora de escopo**. Declaramos `supportedInterfaces` só com `JSONRPC`.
+**está fora de escopo**. A card declara `supportedInterfaces` só com `JSONRPC`.
 
-## 2. O que já existe no port (OBSERVED)
+## 2. O que foi implementado
+
+### Servidor — `internal/a2a/`
 
 | Peça | Onde | Situação |
 |---|---|---|
-| Ponto de entrada programático | `internal/agent/loop.go:205` `ProcessMessage(ctx, InboundMessage) (*OutboundMessage, error)` | pronto |
-| Cancelamento de turno | `internal/agent/loop.go:377` `cancelActive(key)` | existe, mas **não exportado** |
-| Hook de progresso | `internal/agent/runner.go:80` `Hook` (`OnTextDelta`, `OnReasoningDelta`, `OnToolStart`, `OnToolEnd`) | definido |
-| Streaming do provider | `internal/provider/provider.go:103` `StreamingProvider.ChatStream` | pronto |
-| Leitor SSE | `internal/provider/openai/stream.go` (`sseReader`) | pronto — reusável no cliente A2A |
-| Persistência atômica | `internal/session` (temp + `os.replace`, `.session-files.lock`) | padrão a reusar |
-| Servidor HTTP | — | **não existe nenhum** |
-| Camada de auth | — | **não existe nenhuma** |
+| Modelo de dados v1.0 | `types.go` | `AgentCard`, `AgentInterface`, `Part` (oneof sem `kind`), `Message`, `Task`, `TaskStatus`, `Artifact`, `ListTasksResponse` |
+| Agent Card | `handler.go` `agentCard()` | `supportedInterfaces`, `defaultInputModes`/`defaultOutputModes`, `skills[].tags`; `securitySchemes`/`security` quando há API key |
+| Cache da card | `handleAgentCard` | `Cache-Control`, `ETag`, `Last-Modified`; `If-None-Match` e `If-Modified-Since` → 304 |
+| Dispatch JSON-RPC | `handleJSONRPC` | nomes PascalCase v1.0 + aliases pré-1.0 |
+| `SendMessage` | `handleSendMessage` | resposta `SendMessageResponse{task\|message}`, `artifacts` + `history` |
+| `GetTask` / `ListTasks` / `CancelTask` | handlers dedicados | `historyLength`, paginação por cursor, cancelamento idempotente |
+| Códigos de erro reservados | `types.go` | `-32001`..`-32009` conforme a spec |
+| `A2A-Version` | `handleJSONRPC` | versão não servida → `-32009` |
 
-## 3. Lacunas a fechar (OBSERVED, com file:line)
+Métodos v1.0 não suportados respondem o erro **específico da capability**, não
+`-32601`: streaming e `SubscribeToTask` → `-32004` `UnsupportedOperation`,
+push notifications → `-32003` `PushNotificationNotSupported`. A card declara
+`streaming: false`, `pushNotifications: false`, `extendedAgentCard: false`.
 
-1. **`Loop` não plumba `Hook`.** `RunSpec` tem o campo (`runner.go:103`) mas
-   `loop.go:250-268` monta o spec **sem** `Hook`. Sem isso não há delta
-   streaming em `SendStreamingMessage`. ~20-30 LOC.
-2. **`core.OutboundMessage` não tem `Event`** (`internal/core/types.go:78-86`)
-   vs upstream `bus/events.py:68`. Mesmo bloqueio já reportado pelo
-   reconhecimento de canais.
-3. **`cancelActive` é não exportado** — `CancelTask` precisa de API pública.
-4. **Nenhuma autenticação** — a spec exige que o servidor autentique toda
-   requisição.
+O endpoint responde em `/a2a` **e** `/a2a/`. A barra final não é exigida pela
+spec, mas é o que clientes reais produzem: o TCK oficial monta o cliente HTTP com
+a URL da interface como `base_url`, e o httpx normaliza isso para `<url>/`. O
+`protectedPath` de `internal/api/security.go` cobre as duas formas — sem isso a
+rota extra ficaria acessível sem bearer token.
 
-## 4. Mapeamento (o trabalho de engenharia real)
+### Cliente — `a2a_call`
 
-A2A é um protocolo de **tarefas**; o nanobot é um agente de **chat**. O
-mapeamento é uma decisão de projeto, não um detalhe:
+- `discover`: lê a card, reporta `supportedInterfaces` e skills; aceita card v0.3
+  (campo `url`).
+- `send`: `SendMessage` com `messageId`, `role` e `parts`; envia
+  `A2A-Version: 1.0`; posta na URL anunciada pela card (fallback `<base>/a2a`).
+- Compat v0.3: se o par responde `-32601`, refaz uma vez com `message/send` e o
+  discriminador `kind`.
+
+## 3. Mapeamento (decisão de projeto)
+
+A2A é um protocolo de **tarefas**; o nanobot é um agente de **chat**.
 
 | A2A | nanobot |
 |---|---|
 | Task | um turno de `ProcessMessage` |
-| `contextId` | session key (`<channel>:<chat_id>`) |
-| `submitted` → `working` → `completed`/`failed`/`canceled` | aceitação → run → `StopReason` do runner |
-| `input-required`, `auth-required` | **sem análogo** — o nanobot não pausa mid-turn para HITL. Declarar honestamente na capability; não fingir suporte. |
-| Artifact (`TextPart`) | `res.FinalContent` |
-| Artifact (`FileWithUri`) | arquivos do workspace |
-| `CancelTask` | `Loop.Cancel(key)` (a exportar) |
-| `SendStreamingMessage` | `Hook.OnTextDelta` → `TaskArtifactUpdateEvent` (append) |
+| `contextId` | contexto da task, inferido da task quando a mensagem só traz `taskId` |
+| `TASK_STATE_WORKING` → `COMPLETED`/`FAILED`/`CANCELED` | aceitação → run → resultado |
+| `TASK_STATE_INPUT_REQUIRED`, `AUTH_REQUIRED` | **sem análogo** — o nanobot não pausa mid-turn para HITL. Não são emitidos. |
+| Artifact (`TextPart`) | texto final do turno |
+| `CancelTask` | cancelamento real do turno em execução (`Handler.cancels`) |
 
-## 5. Fronteira de segurança (decisão pendente do usuário)
+## 4. Fronteira de segurança
 
 Um nanobot exposto via A2A é **execução remota de código por design**: ele tem
-tools de shell e de escrita em arquivo. A spec exige autenticar toda requisição,
-mas autenticar ≠ autorizar. Decisão em aberto, **não tomar sozinho**:
+tools de shell e de escrita em arquivo. O que existe hoje:
 
-- o endpoint A2A roda com o registry de tools completo, ou com um registry
-  reduzido?
-- auth por bearer/API-key estático é suficiente, ou é exigido JWT/OAuth2
-  (verificável com `crypto/ecdsa`+`crypto/rsa`, mas manual)?
+- com `api.apiKey` configurado, toda requisição a `/a2a` (e `/a2a/`) exige
+  `Authorization: Bearer <key>`; a card anuncia o esquema em `securitySchemes`;
+- sem `api.apiKey`, o servidor só aceita peer de loopback (`validateBindAddr`).
 
-## 6. Fases propostas
+**Decisão ainda em aberto (do usuário), não tomada sozinho:** o endpoint A2A roda
+com o registry de tools completo, ou com um registry reduzido? Bearer/API-key
+estático é suficiente, ou é exigido JWT/OAuth2?
 
-1. **Núcleo do servidor**: `internal/a2a/` — envelope JSON-RPC 2.0, erros
-   padrão e específicos, dispatch, Agent Card em `/.well-known/agent-card.json`.
-2. **Task store**: persistência + paginação por cursor, reusando o padrão de
-   escrita atômica do `internal/session`.
-3. **Mapeamento**: `SendMessage` (bloqueante e `returnImmediately`),
-   `GetTask`, `CancelTask`, `SubscribeToTask`.
-4. **Streaming**: exportar `Cancel`, plumbar `Hook`, SSE writer.
-5. **Push notifications**: `Create/Get/List/DeleteTaskPushNotificationConfig`
-   + POST para webhook.
-6. **Cliente**: tool `a2a_call` — descoberta de Agent Card, POST JSON-RPC,
-   leitura SSE, mapeamento de `Task`/`Artifact` de volta para o modelo.
-7. **Auth** (após a decisão da §5).
-8. Opcional: binding HTTP+JSON/REST (mesma camada de dados, roteamento novo).
+## 5. O que NÃO está implementado
 
-**INFERENCE (não medido):** servidor núcleo ≈ 1,5–2,5k LOC Go + testes;
-cliente ≈ 400–700 LOC. Estimativa por analogia com o subsistema de memória —
-não é medição.
+- **Streaming** (`SendStreamingMessage`, `SubscribeToTask`) — declarado `false`,
+  responde `-32004`.
+- **Push notifications** — declarado `false`, responde `-32003`.
+- **Extended Agent Card** — declarado `false`, responde `-32004`.
+- **Binding gRPC** e **HTTP+JSON/REST** — fora de escopo; não anunciados.
+- **Assinatura da card (JWS)** e **OAuth2/OIDC** — não implementados.
 
-## 7. Verificação
+## 6. Limitação conhecida
 
-- **TCK oficial** (Python): `./run_tck.py --sut-url http://localhost:9999 --category mandatory`
-  e `--category capabilities`. Exige instalar `a2a-tck` no `.tools/venv` (rede).
-- **a2a-python SDK 1.x** como cliente real para teste de integração ponta-a-ponta
-  (fala v1.0 e v0.3 em modo compat).
-- Testes de unidade por comportamento, incluindo bordas adversariais: JSON-RPC
-  malformado, `id` ausente/null, `params` ausente, método desconhecido
-  (`-32601`), task em estado terminal recebendo mensagem, cancelar task já
-  terminada, cliente SSE que desconecta no meio, webhook que devolve erro.
-- Regra do projeto: **executar a referência antes de "corrigir" o port**.
+Uma falha do provider LLM chega ao A2A como **texto**, não como erro: a camada de
+provider (`internal/provider/openai/stream.go`) converte a falha em
+`content: "Error calling LLM: ..."` com `FinishReason: FinishError`, e o
+`core.OutboundMessage` que o loop devolve não carrega esse finish reason. A task
+é portanto publicada como `TASK_STATE_COMPLETED` com o texto do erro como
+artifact. Um turno que devolve erro pelo caminho normal do loop já vira
+`TASK_STATE_FAILED`; o caso acima é o do provider que engole o erro em conteúdo.
+Corrigir isso é mudar a semântica de erro do provider para todos os canais, não
+um ajuste local do A2A — por isso não foi feito aqui.
+
+## 7. Verificação (executada)
+
+- **TCK oficial** `a2aproject/a2a-tck` @ `263b9cf`, binding JSON-RPC,
+  `--transport jsonrpc`:
+  - antes: 4.7% overall, 5.3% must, 225 erros (a fixture aborta em
+    "Agent card declares no supportedInterfaces");
+  - depois: **65.9% overall, 66.7% must, 42.9% should, 100% may, 0 erros**, com
+    **3 requisitos MUST reprovando**.
+- Os 3 MUST restantes **não são defeitos de protocolo**:
+  - `DM-ART-001` (4 testes) e `DM-MSG-001` conferem os payloads fixos do agente
+    de referência que o próprio TCK embarca (`sut/a2a-python/sut_agent.py`
+    ramifica por prefixo de `messageId` e devolve "Generated text content",
+    "Direct message response", etc.). Um agente de propósito geral que roteia
+    para um LLM real não produz essas strings.
+  - `CORE-SEND-003` declara `expected_error=None` embora o texto do requisito
+    exija `ContentTypeNotSupportedError`; o harness
+    (`tests/compatibility/core_operations/test_requirements.py`) então exige
+    **sucesso**. O agente de referência "passa" devolvendo sucesso e violando o
+    próprio MUST. Nós devolvemos `-32005`, que é o que o requisito pede.
+- Para comparação, o agente de referência do próprio TCK, no mesmo binding,
+  reprova 1 MUST (`STREAM-SUB-003`) e 5 requisitos no total, e é pior em SHOULD
+  (22,2% contra 42,9%) e MAY (75% contra 100%).
+- **SDK oficial `a2a-sdk` 1.1.5**: resolve a card e desserializa a `Task` ponta a
+  ponta; antes falhava com `contextId Field required` e `status Input should be a
+  valid dictionary`.
+- **Cliente oficial → nosso servidor** e **nosso cliente → agente de referência**
+  verificados nos dois sentidos.
+- Suíte local: `go test ./...` verde, `-race -count=3 -shuffle=on` em
+  `internal/a2a` e `internal/api`, `go vet`, `staticcheck`, build com
+  `-tags sqlite_fts5`.
 
 ## 8. Versão do protocolo
 
-Recomendação: implementar **v1.0.0** como forma canônica (recupera `ListTasks`
-no JSON-RPC, que em v0.3.0 era exclusivo de gRPC/REST) e **aceitar os nomes
-v0.3** (`message/send`, `message/stream`, `tasks/get`, `tasks/cancel`) como
-alias de entrada. Custo baixo, interoperabilidade bem maior. A confirmar com a
-fonte primária na fase 1.
+Implementado **v1.0** como forma canônica. Os nomes pré-1.0 (`tasks/send`,
+`message/send`, `tasks/create`, `tasks/get`) continuam aceitos como **alias de
+entrada**, o que a spec permite durante o período de sobreposição; a card
+anuncia apenas `protocolVersion: "1.0"` e `A2A-Version` aceita `1.0` e `0.3`.

@@ -69,6 +69,11 @@ type Handler struct {
 	// was to close the client connection.
 	cancels sync.Map
 
+	// hubs maps a task ID to the fan-out point for its streaming subscribers.
+	// Every published snapshot goes through it, so a stream sees exactly the
+	// states the store holds, in the order they were published.
+	hubs sync.Map
+
 	// trimMu serialises the eviction walks, and nothing else. It is deliberately
 	// NOT the admission path: publishers admit themselves with a CAS on retained
 	// (see publish), so publishing stays parallel and only a publisher that finds
@@ -155,6 +160,7 @@ func (h *Handler) publish(task Task) {
 	// map does not grow on this path either way.
 	if _, loaded := h.tasks.Load(task.ID); loaded {
 		h.tasks.Store(task.ID, &snapshot)
+		h.broadcast(snapshot)
 		h.sweepTasks(time.Now())
 		return
 	}
@@ -181,6 +187,7 @@ func (h *Handler) publish(task Task) {
 		h.retained.Add(-1)
 	}
 
+	h.broadcast(snapshot)
 	h.sweepTasks(time.Now())
 }
 
@@ -281,6 +288,12 @@ func (h *Handler) deleteTask(key any) {
 	if _, loaded := h.tasks.LoadAndDelete(key); loaded {
 		h.retained.Add(-1)
 	}
+	// The hub goes with the task. A stream already open keeps its own channel and
+	// simply stops receiving, which is what a subscriber to an evicted task should
+	// observe; a later subscriber gets TaskNotFound.
+	if id, ok := key.(string); ok {
+		h.hubs.Delete(id)
+	}
 }
 
 // loadTask reads the published snapshot for an ID.
@@ -372,11 +385,10 @@ func (h *Handler) agentCard() AgentCard {
 		}},
 		Version: "1.0.0",
 		Capabilities: AgentCapabilities{
-			// Declared false rather than omitted so that a client asking for
-			// streaming, push notifications or an extended card gets the
-			// capability-specific error the spec requires instead of
-			// MethodNotFound.
-			Streaming:         false,
+			// Declared explicitly rather than omitted so that a client asking for
+			// a capability this agent does not have gets the specific error the
+			// spec requires instead of MethodNotFound.
+			Streaming:         true,
 			PushNotifications: false,
 			ExtendedAgentCard: false,
 		},
@@ -611,13 +623,14 @@ func (h *Handler) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		h.handleListTasks(w, req)
 	case "CancelTask":
 		h.handleCancelTask(w, req)
+	case "SendStreamingMessage":
+		h.handleSendStreamingMessage(r.Context(), w, req)
+	case "SubscribeToTask":
+		h.handleSubscribeToTask(r.Context(), w, req)
 
 	// Capability-gated operations. Each of these is answered with the error the
 	// spec mandates for a capability the card declares as false, so a client can
 	// tell "not supported by this agent" apart from "no such method".
-	case "SendStreamingMessage", "SubscribeToTask":
-		h.writeError(w, req.ID, CodeUnsupportedOperationError, "This agent does not support streaming",
-			[]any{errorInfo("UNSUPPORTED_OPERATION", map[string]string{"capability": "streaming"})})
 	case "CreateTaskPushNotificationConfig", "GetTaskPushNotificationConfig",
 		"ListTaskPushNotificationConfigs", "DeleteTaskPushNotificationConfig":
 		h.writeError(w, req.ID, CodePushNotificationNotSupportedError, "This agent does not support push notifications",
@@ -757,26 +770,62 @@ func (h *Handler) newID(prefix string) string {
 // the bound elapsed, and broke cancellation propagation. The bound is kept, so a
 // peer that stays connected still cannot pin a task open forever.
 func (h *Handler) handleSendMessage(ctx context.Context, w http.ResponseWriter, req JSONRPCRequest) {
-	msg, _, err := h.parseSendParams(req.Params)
-	if err != nil {
-		h.writeError(w, req.ID, CodeInvalidParamsError, "Invalid parameters",
-			[]any{errorInfo("INVALID_PARAMS", map[string]string{"detail": err.Error()})})
+	plan, failure := h.prepareSend(req)
+	if failure != nil {
+		failure.write(w, req.ID)
 		return
 	}
 
+	h.writeResult(w, req.ID, SendMessageResponse{Task: h.runTurn(ctx, plan)})
+}
+
+// sendPlan is a validated SendMessage request with its task and context already
+// resolved. Splitting validation from execution is what lets the streaming
+// handler answer a bad request with a plain JSON-RPC error instead of opening a
+// stream it would immediately have to abandon.
+type sendPlan struct {
+	taskID    string
+	contextID string
+	input     string
+	inbound   Message
+}
+
+// rpcFailure is a prepared JSON-RPC error.
+type rpcFailure struct {
+	code    int
+	message string
+	data    []any
+}
+
+func (f *rpcFailure) write(w http.ResponseWriter, id any) {
+	_ = json.NewEncoder(w).Encode(JSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error:   &JSONRPCError{Code: f.code, Message: f.message, Data: f.data},
+	})
+}
+
+// prepareSend validates a SendMessage request and resolves the task it targets.
+func (h *Handler) prepareSend(req JSONRPCRequest) (sendPlan, *rpcFailure) {
+	msg, _, err := h.parseSendParams(req.Params)
+	if err != nil {
+		return sendPlan{}, &rpcFailure{CodeInvalidParamsError, "Invalid parameters",
+			[]any{errorInfo("INVALID_PARAMS", map[string]string{"detail": err.Error()})}}
+	}
+
 	if msg.HasUnsupportedContent() {
-		h.writeError(w, req.ID, CodeContentTypeNotSupportedError, "Content type not supported",
+		return sendPlan{}, &rpcFailure{CodeContentTypeNotSupportedError, "Content type not supported",
 			[]any{errorInfo("CONTENT_TYPE_NOT_SUPPORTED", map[string]string{
 				"supportedInputModes": MediaTypeText,
-			})})
-		return
+			})}}
 	}
 
 	inputText := strings.TrimSpace(msg.Text())
 	if inputText == "" {
-		h.writeError(w, req.ID, CodeInvalidParamsError, "Invalid parameters",
-			[]any{errorInfo("INVALID_PARAMS", map[string]string{"field": "message.parts", "detail": "at least one text part is required"})})
-		return
+		return sendPlan{}, &rpcFailure{CodeInvalidParamsError, "Invalid parameters",
+			[]any{errorInfo("INVALID_PARAMS", map[string]string{
+				"field": "message.parts", "detail": "at least one text part is required",
+			})}}
 	}
 
 	// Continuing a task the server does not have is an error, not a new task:
@@ -793,27 +842,25 @@ func (h *Handler) handleSendMessage(ctx context.Context, w http.ResponseWriter, 
 	if taskID != "" {
 		existing, ok := h.loadTask(taskID)
 		if !ok {
-			h.taskNotFound(w, req.ID, taskID)
-			return
+			return sendPlan{}, &rpcFailure{CodeTaskNotFoundError, "Task not found",
+				[]any{errorInfo("TASK_NOT_FOUND", map[string]string{"taskId": taskID})}}
 		}
 		if existing.terminal() {
-			h.writeError(w, req.ID, CodeUnsupportedOperationError,
+			return sendPlan{}, &rpcFailure{CodeUnsupportedOperationError,
 				"Operation not supported for a task in a terminal state",
 				[]any{errorInfo("UNSUPPORTED_OPERATION", map[string]string{
 					"taskId": taskID,
 					"state":  existing.Status.State,
-				})})
-			return
+				})}}
 		}
 		if contextID != "" && contextID != existing.ContextID {
-			h.writeError(w, req.ID, CodeInvalidParamsError, "Invalid parameters",
+			return sendPlan{}, &rpcFailure{CodeInvalidParamsError, "Invalid parameters",
 				[]any{errorInfo("INVALID_PARAMS", map[string]string{
 					"field":             "message.contextId",
 					"detail":            "contextId does not match the task it was sent with",
 					"taskId":            taskID,
 					"expectedContextId": existing.ContextID,
-				})})
-			return
+				})}}
 		}
 		// The task already carries a context, so an omitted contextId is inferred
 		// from it rather than minting a second one for the same conversation.
@@ -827,21 +874,31 @@ func (h *Handler) handleSendMessage(ctx context.Context, w http.ResponseWriter, 
 		contextID = h.newID("ctx")
 	}
 
-	// The history is the inbound message exactly as it arrived, so a peer can
-	// read back what it sent.
-	inbound := Message{
-		MessageID: msg.MessageID,
-		ContextID: contextID,
-		TaskID:    taskID,
-		Role:      RoleUser,
-		Parts:     msg.Parts,
-	}
+	return sendPlan{
+		taskID:    taskID,
+		contextID: contextID,
+		input:     inputText,
+		// The history is the inbound message exactly as it arrived, so a peer can
+		// read back what it sent.
+		inbound: Message{
+			MessageID: msg.MessageID,
+			ContextID: contextID,
+			TaskID:    taskID,
+			Role:      RoleUser,
+			Parts:     msg.Parts,
+		},
+	}, nil
+}
 
+// runTurn executes one agent turn and publishes the task states it passes
+// through: WORKING when accepted, then the terminal state. It never writes a
+// response, so the blocking and streaming handlers can share it.
+func (h *Handler) runTurn(ctx context.Context, plan sendPlan) *Task {
 	task := Task{
-		ID:        taskID,
-		ContextID: contextID,
+		ID:        plan.taskID,
+		ContextID: plan.contextID,
 		Status:    taskStatus(TaskStateWorking),
-		History:   []Message{inbound},
+		History:   []Message{plan.inbound},
 	}
 	h.publish(task)
 
@@ -849,9 +906,9 @@ func (h *Handler) handleSendMessage(ctx context.Context, w http.ResponseWriter, 
 	// acts on. taskCtx is derived from the request context so a disconnected peer
 	// still stops the work.
 	taskCtx, cancel := context.WithTimeout(ctx, h.requestTimeout())
-	h.cancels.Store(taskID, cancel)
+	h.cancels.Store(plan.taskID, cancel)
 	defer func() {
-		h.cancels.Delete(taskID)
+		h.cancels.Delete(plan.taskID)
 		cancel()
 	}()
 
@@ -860,10 +917,10 @@ func (h *Handler) handleSendMessage(ctx context.Context, w http.ResponseWriter, 
 		in := core.InboundMessage{
 			Channel:   "a2a",
 			SenderID:  "a2a_peer",
-			ChatID:    contextID,
-			Content:   inputText,
+			ChatID:    plan.contextID,
+			Content:   plan.input,
 			Timestamp: time.Now(),
-			Metadata:  map[string]any{"source": "a2a_protocol", "taskId": taskID},
+			Metadata:  map[string]any{"source": "a2a_protocol", "taskId": plan.taskID},
 		}
 
 		out, runErr := h.loop.ProcessMessage(taskCtx, in)
@@ -871,34 +928,31 @@ func (h *Handler) handleSendMessage(ctx context.Context, w http.ResponseWriter, 
 			// A task canceled while running already carries its final state, and
 			// that state must survive: overwriting it with FAILED would report a
 			// deliberate cancellation as a crash.
-			if current, ok := h.loadTask(taskID); ok && current.terminal() {
-				h.writeResult(w, req.ID, SendMessageResponse{Task: current})
-				return
+			if current, ok := h.loadTask(plan.taskID); ok && current.terminal() {
+				return current
 			}
 			task.Status = taskStatus(TaskStateFailed)
 			task.Status.Message = &Message{
 				MessageID: h.newID("msg"),
-				ContextID: contextID,
-				TaskID:    taskID,
+				ContextID: plan.contextID,
+				TaskID:    plan.taskID,
 				Role:      RoleAgent,
 				Parts:     []Part{NewTextPart(runErr.Error())},
 			}
 			h.publish(task)
-			h.writeResult(w, req.ID, SendMessageResponse{Task: h.snapshotOr(task)})
-			return
+			return h.snapshotOr(task)
 		}
 		if out != nil {
 			finalOutput = out.Content
 		}
 	} else {
-		finalOutput = fmt.Sprintf("Haosbot received: %s (agent loop not attached)", inputText)
+		finalOutput = fmt.Sprintf("Haosbot received: %s (agent loop not attached)", plan.input)
 	}
 
 	// A cancellation that landed between the turn returning and this publish must
 	// still win, otherwise the client that asked to cancel gets a completed task.
-	if current, ok := h.loadTask(taskID); ok && current.terminal() {
-		h.writeResult(w, req.ID, SendMessageResponse{Task: current})
-		return
+	if current, ok := h.loadTask(plan.taskID); ok && current.terminal() {
+		return current
 	}
 
 	task.Status = taskStatus(TaskStateCompleted)
@@ -910,8 +964,8 @@ func (h *Handler) handleSendMessage(ctx context.Context, w http.ResponseWriter, 
 	}}
 	task.History = append(task.History, Message{
 		MessageID: h.newID("msg"),
-		ContextID: contextID,
-		TaskID:    taskID,
+		ContextID: plan.contextID,
+		TaskID:    plan.taskID,
 		Role:      RoleAgent,
 		Parts:     []Part{NewTextPart(finalOutput)},
 	})
@@ -919,7 +973,7 @@ func (h *Handler) handleSendMessage(ctx context.Context, w http.ResponseWriter, 
 
 	// The reply carries the same snapshot that was just published, so the caller
 	// and a concurrent GetTask can never disagree about this task id.
-	h.writeResult(w, req.ID, SendMessageResponse{Task: h.snapshotOr(task)})
+	return h.snapshotOr(task)
 }
 
 // snapshotOr returns the published snapshot for a task, falling back to the
@@ -931,6 +985,25 @@ func (h *Handler) snapshotOr(task Task) *Task {
 	snapshot := task
 	snapshot.updated = time.Now()
 	return &snapshot
+}
+
+// parseTaskID reads the id parameter shared by GetTask, CancelTask and
+// SubscribeToTask.
+func (h *Handler) parseTaskID(req JSONRPCRequest) (string, *rpcFailure) {
+	var params struct {
+		ID string `json:"id"`
+	}
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return "", &rpcFailure{CodeInvalidParamsError, "Invalid parameters",
+				[]any{errorInfo("INVALID_PARAMS", map[string]string{"detail": err.Error()})}}
+		}
+	}
+	if strings.TrimSpace(params.ID) == "" {
+		return "", &rpcFailure{CodeInvalidParamsError, "Invalid parameters",
+			[]any{errorInfo("INVALID_PARAMS", map[string]string{"field": "id", "detail": "id is required"})}}
+	}
+	return params.ID, nil
 }
 
 // ---------------------------------------------------------------------------

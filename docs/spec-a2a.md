@@ -45,13 +45,23 @@ zero-dependências do projeto foi preservado.
 | Dispatch JSON-RPC | `handleJSONRPC` | nomes PascalCase v1.0 + aliases pré-1.0 |
 | `SendMessage` | `handleSendMessage` | resposta `SendMessageResponse{task\|message}`, `artifacts` + `history` |
 | `GetTask` / `ListTasks` / `CancelTask` | handlers dedicados | `historyLength`, paginação por cursor, cancelamento idempotente |
+| Streaming (SSE) | `stream.go` | `SendStreamingMessage` e `SubscribeToTask` em `text/event-stream`; fan-out por task, ordem preservada |
 | Códigos de erro reservados | `types.go` | `-32001`..`-32009` conforme a spec |
 | `A2A-Version` | `handleJSONRPC` | versão não servida → `-32009` |
 
 Métodos v1.0 não suportados respondem o erro **específico da capability**, não
-`-32601`: streaming e `SubscribeToTask` → `-32004` `UnsupportedOperation`,
-push notifications → `-32003` `PushNotificationNotSupported`. A card declara
-`streaming: false`, `pushNotifications: false`, `extendedAgentCard: false`.
+`-32601`: push notifications → `-32003` `PushNotificationNotSupported`,
+`GetExtendedAgentCard` → `-32004` `UnsupportedOperation`. A card declara
+`streaming: true`, `pushNotifications: false`, `extendedAgentCard: false`.
+
+O streaming usa SSE: cada linha `data:` é uma resposta JSON-RPC embrulhando um
+`StreamResponse`. Um turno não expõe deltas intermediários — ele roda até o fim e
+publica o resultado — então o stream carrega os estados que a task realmente
+atravessa: `WORKING` na aceitação e o estado terminal no fim. O `taskHub`
+(`stream.go`) faz o fan-out dos snapshots publicados, então **todas** as streams
+ativas de uma task recebem os mesmos eventos na mesma ordem, e fechar uma não
+afeta as outras. `SubscribeToTask` emite o estado atual como primeiro evento e
+recusa task terminal com `-32004`.
 
 O endpoint responde em `/a2a` **e** `/a2a/`. A barra final não é exigida pela
 spec, mas é o que clientes reais produzem: o TCK oficial monta o cliente HTTP com
@@ -96,8 +106,6 @@ estático é suficiente, ou é exigido JWT/OAuth2?
 
 ## 5. O que NÃO está implementado
 
-- **Streaming** (`SendStreamingMessage`, `SubscribeToTask`) — declarado `false`,
-  responde `-32004`.
 - **Push notifications** — declarado `false`, responde `-32003`.
 - **Extended Agent Card** — declarado `false`, responde `-32004`.
 - **Binding gRPC** e **HTTP+JSON/REST** — fora de escopo; não anunciados.
@@ -121,8 +129,9 @@ um ajuste local do A2A — por isso não foi feito aqui.
   `--transport jsonrpc`:
   - antes: 4.7% overall, 5.3% must, 225 erros (a fixture aborta em
     "Agent card declares no supportedInterfaces");
-  - depois: **65.9% overall, 66.7% must, 42.9% should, 100% may, 0 erros**, com
-    **3 requisitos MUST reprovando**.
+  - depois: **68.1% overall, 69.1% must, 42.9% should, 100% may, 0 erros**, com
+    **3 requisitos MUST reprovando** (56 MUST aprovando, 33 pulados, 22 não
+    automatáveis).
 - Os 3 MUST restantes **não são defeitos de protocolo**:
   - `DM-ART-001` (4 testes) e `DM-MSG-001` conferem os payloads fixos do agente
     de referência que o próprio TCK embarca (`sut/a2a-python/sut_agent.py`
@@ -137,9 +146,10 @@ um ajuste local do A2A — por isso não foi feito aqui.
 - Para comparação, o agente de referência do próprio TCK, no mesmo binding,
   reprova 1 MUST (`STREAM-SUB-003`) e 5 requisitos no total, e é pior em SHOULD
   (22,2% contra 42,9%) e MAY (75% contra 100%).
-- **SDK oficial `a2a-sdk` 1.1.5**: resolve a card e desserializa a `Task` ponta a
-  ponta; antes falhava com `contextId Field required` e `status Input should be a
-  valid dictionary`.
+- **SDK oficial `a2a-sdk` 1.1.5**: resolve a card, desserializa a `Task` ponta a
+  ponta e consome o stream SSE (`streaming=True`, 2 eventos: `WORKING` e
+  `COMPLETED`); antes falhava com `contextId Field required` e `status Input
+  should be a valid dictionary`.
 - **Cliente oficial → nosso servidor** e **nosso cliente → agente de referência**
   verificados nos dois sentidos.
 - Suíte local: `go test ./...` verde, `-race -count=3 -shuffle=on` em

@@ -343,8 +343,6 @@ func TestErrorCodesMatchTheSpec(t *testing.T) {
 		{"missing task", "GetTask", `{"id":"does-not-exist"}`, CodeTaskNotFoundError},
 		{"missing task via legacy alias", "tasks/get", `{"id":"does-not-exist"}`, CodeTaskNotFoundError},
 		{"cancel a completed task", "CancelTask", fmt.Sprintf(`{"id":%q}`, created.ID), CodeTaskNotCancelableError},
-		{"streaming is not a declared capability", "SendStreamingMessage", `{"message":{"messageId":"m","role":"ROLE_USER","parts":[{"text":"x"}]}}`, CodeUnsupportedOperationError},
-		{"subscribe is not a declared capability", "SubscribeToTask", `{"id":"x"}`, CodeUnsupportedOperationError},
 		{"push notifications are not a declared capability", "CreateTaskPushNotificationConfig", `{"id":"x"}`, CodePushNotificationNotSupportedError},
 		{"no extended card is configured", "GetExtendedAgentCard", `{}`, CodeUnsupportedOperationError},
 		{"missing id", "GetTask", `{}`, CodeInvalidParamsError},
@@ -859,5 +857,323 @@ func TestTrailingSlashEndpointMatchesTheCanonicalOne(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("POST /a2a/deeper: status=%d want 404", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Streaming (SendStreamingMessage / SubscribeToTask over SSE)
+// ---------------------------------------------------------------------------
+
+// streamEvents posts a streaming request and returns the decoded SSE payloads
+// along with the response Content-Type.
+func streamEvents(t *testing.T, client *http.Client, baseURL, method, params string) ([]map[string]any, string) {
+	t.Helper()
+
+	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":"s","method":%q,"params":%s}`, method, params)
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/a2a", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("%s: %v", method, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	contentType := resp.Header.Get("Content-Type")
+
+	// A plain JSON body is how an error before the stream opens is reported.
+	if !strings.Contains(contentType, "text/event-stream") {
+		return []map[string]any{{"_plain": string(raw)}}, contentType
+	}
+
+	var events []map[string]any
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" {
+			continue
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+			t.Fatalf("SSE data line is not JSON: %v (%s)", err, payload)
+		}
+		events = append(events, decoded)
+	}
+	return events, contentType
+}
+
+// eventState extracts the task state carried by one stream event.
+func eventState(t *testing.T, event map[string]any) string {
+	t.Helper()
+	result, ok := event["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream event has no result object: %#v", event)
+	}
+	task, ok := result["task"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream event result is not a task: %#v", result)
+	}
+	status, ok := task["status"].(map[string]any)
+	if !ok {
+		t.Fatalf("streamed task has no status object: %#v", task)
+	}
+	state, _ := status["state"].(string)
+	return state
+}
+
+// TestSendStreamingMessageFramesEventsAsSSE pins the transport contract: the
+// response is text/event-stream and every data line is a JSON-RPC response
+// wrapping a StreamResponse.
+func TestSendStreamingMessageFramesEventsAsSSE(t *testing.T) {
+	srv, _ := newTaskServer(t, config.DefaultConfig(), nil)
+
+	events, contentType := streamEvents(t, srv.Client(), srv.URL, "SendStreamingMessage",
+		`{"message":{"messageId":"m","role":"ROLE_USER","parts":[{"text":"stream me"}]}}`)
+
+	if !strings.Contains(contentType, "text/event-stream") {
+		t.Fatalf("Content-Type=%q want text/event-stream", contentType)
+	}
+	if len(events) == 0 {
+		t.Fatal("the stream produced no events")
+	}
+	for _, event := range events {
+		if event["jsonrpc"] != "2.0" {
+			t.Errorf("event jsonrpc=%v want 2.0", event["jsonrpc"])
+		}
+		if _, ok := event["result"]; !ok {
+			t.Errorf("event carries no result: %#v", event)
+		}
+	}
+}
+
+// TestStreamingLifecycleDoesNotRegress pins CORE-STREAM-003 and STREAM-ORDER-001:
+// the stream opens with the Task, states never move backwards, and the last
+// event is terminal.
+func TestStreamingLifecycleDoesNotRegress(t *testing.T) {
+	srv, _ := newTaskServer(t, config.DefaultConfig(), nil)
+
+	events, _ := streamEvents(t, srv.Client(), srv.URL, "SendStreamingMessage",
+		`{"message":{"messageId":"m","role":"ROLE_USER","parts":[{"text":"stream me"}]}}`)
+
+	if len(events) < 2 {
+		t.Fatalf("expected at least the accepted and terminal states, got %d events", len(events))
+	}
+
+	rank := map[string]int{
+		TaskStateSubmitted: 0, TaskStateWorking: 1, TaskStateInputRequired: 1,
+		TaskStateAuthRequired: 1, TaskStateCompleted: 2, TaskStateFailed: 2,
+		TaskStateCanceled: 2, TaskStateRejected: 2,
+	}
+
+	previous := -1
+	var states []string
+	for _, event := range events {
+		state := eventState(t, event)
+		states = append(states, state)
+		order, known := rank[state]
+		if !known {
+			t.Fatalf("stream carried an unknown state %q", state)
+		}
+		if order < previous {
+			t.Fatalf("states regressed: %v", states)
+		}
+		previous = order
+	}
+
+	last := states[len(states)-1]
+	if rank[last] != 2 {
+		t.Fatalf("the stream closed on %q, want a terminal state (states: %v)", last, states)
+	}
+}
+
+// TestSubscribeToTaskStreamsTheCurrentStateFirst pins STREAM-SUB-001: the first
+// event of a subscription is the task's current state.
+func TestSubscribeToTaskStreamsTheCurrentStateFirst(t *testing.T) {
+	prov := newGateProvider()
+	srv, h := newTaskServer(t, config.DefaultConfig(), newTestLoop(t, prov))
+	client := srv.Client()
+
+	id, response := beginTask(t, h, client, srv.URL, prov)
+
+	// The subscription is opened while the turn is still running, so the stream
+	// must lead with WORKING and then close when the task finishes.
+	type outcome struct {
+		events []map[string]any
+		ctype  string
+	}
+	got := make(chan outcome, 1)
+	go func() {
+		events, ctype := streamEvents(t, client, srv.URL, "SubscribeToTask", fmt.Sprintf(`{"id":%q}`, id))
+		got <- outcome{events, ctype}
+	}()
+
+	// Give the subscriber time to register before the turn is released.
+	time.Sleep(250 * time.Millisecond)
+	prov.releaseAll()
+	<-response
+
+	var result outcome
+	select {
+	case result = <-got:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the subscription never closed")
+	}
+
+	if !strings.Contains(result.ctype, "text/event-stream") {
+		t.Fatalf("Content-Type=%q want text/event-stream", result.ctype)
+	}
+	if len(result.events) == 0 {
+		t.Fatal("the subscription produced no events")
+	}
+	if state := eventState(t, result.events[0]); state != TaskStateWorking {
+		t.Errorf("the first subscription event is %q, want the current state %q", state, TaskStateWorking)
+	}
+	if state := eventState(t, result.events[len(result.events)-1]); state != TaskStateCompleted {
+		t.Errorf("the subscription closed on %q, want a terminal state", state)
+	}
+}
+
+// TestSubscribeToTaskRejectsATerminalTask pins STREAM-SUB-003: subscribing to a
+// task that already finished is UnsupportedOperationError, not an empty stream.
+func TestSubscribeToTaskRejectsATerminalTask(t *testing.T) {
+	srv, _ := newTaskServer(t, config.DefaultConfig(), nil)
+	client := srv.Client()
+
+	created := sendMessage(t, client, srv.URL, "seed")
+
+	events, contentType := streamEvents(t, client, srv.URL, "SubscribeToTask", fmt.Sprintf(`{"id":%q}`, created.ID))
+	if strings.Contains(contentType, "text/event-stream") {
+		t.Fatalf("subscribing to a terminal task opened a stream: %#v", events)
+	}
+
+	body, _ := events[0]["_plain"].(string)
+	var envelope struct {
+		Error *JSONRPCError `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatalf("decode error response: %v (%s)", err, body)
+	}
+	if envelope.Error == nil {
+		t.Fatalf("subscribing to a terminal task succeeded: %s", body)
+	}
+	if envelope.Error.Code != CodeUnsupportedOperationError {
+		t.Errorf("code=%d want %d", envelope.Error.Code, CodeUnsupportedOperationError)
+	}
+}
+
+// TestSubscribeToTaskUnknownTaskIsNotFound pins STREAM-SUB-004.
+func TestSubscribeToTaskUnknownTaskIsNotFound(t *testing.T) {
+	srv, _ := newTaskServer(t, config.DefaultConfig(), nil)
+
+	events, contentType := streamEvents(t, srv.Client(), srv.URL, "SubscribeToTask", `{"id":"ghost"}`)
+	if strings.Contains(contentType, "text/event-stream") {
+		t.Fatalf("subscribing to an unknown task opened a stream: %#v", events)
+	}
+
+	body, _ := events[0]["_plain"].(string)
+	var envelope struct {
+		Error *JSONRPCError `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatalf("decode error response: %v (%s)", err, body)
+	}
+	if envelope.Error == nil || envelope.Error.Code != CodeTaskNotFoundError {
+		t.Fatalf("subscribing to an unknown task: %s", body)
+	}
+}
+
+// TestStreamingRejectsABadRequestBeforeOpeningTheStream keeps a validation error
+// readable: a client that sent a bad message must get a JSON-RPC error, not a
+// stream it has to parse to discover the same thing.
+func TestStreamingRejectsABadRequestBeforeOpeningTheStream(t *testing.T) {
+	srv, _ := newTaskServer(t, config.DefaultConfig(), nil)
+
+	// Valid JSON, invalid params: no text part to run a turn on.
+	events, contentType := streamEvents(t, srv.Client(), srv.URL, "SendStreamingMessage",
+		`{"message":{"messageId":"m","role":"ROLE_USER","parts":[]}}`)
+	if strings.Contains(contentType, "text/event-stream") {
+		t.Fatalf("a malformed request opened a stream: %#v", events)
+	}
+
+	body, _ := events[0]["_plain"].(string)
+	var envelope struct {
+		Error *JSONRPCError `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatalf("decode error response: %v (%s)", err, body)
+	}
+	if envelope.Error == nil || envelope.Error.Code != CodeInvalidParamsError {
+		t.Fatalf("malformed streaming request: %s", body)
+	}
+}
+
+// TestClosingOneStreamDoesNotAffectAnother pins STREAM-ORDER-002/003/004: every
+// active stream sees the same events in the same order, and one subscriber
+// giving up does not disturb the rest.
+func TestClosingOneStreamDoesNotAffectAnother(t *testing.T) {
+	prov := newGateProvider()
+	srv, h := newTaskServer(t, config.DefaultConfig(), newTestLoop(t, prov))
+	client := srv.Client()
+
+	id, response := beginTask(t, h, client, srv.URL, prov)
+
+	type outcome struct {
+		events []map[string]any
+	}
+	results := make(chan outcome, 2)
+
+	// One subscriber that abandons the stream immediately, one that stays.
+	go func() {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/a2a",
+			strings.NewReader(fmt.Sprintf(`{"jsonrpc":"2.0","id":"a","method":"SubscribeToTask","params":{"id":%q}}`, id)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
+		if resp, err := client.Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	go func() {
+		events, _ := streamEvents(t, client, srv.URL, "SubscribeToTask", fmt.Sprintf(`{"id":%q}`, id))
+		results <- outcome{events}
+	}()
+
+	time.Sleep(400 * time.Millisecond)
+	prov.releaseAll()
+	<-response
+
+	var stayed outcome
+	select {
+	case stayed = <-results:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the surviving subscription never closed")
+	}
+
+	if len(stayed.events) < 2 {
+		t.Fatalf("the surviving stream saw %d events, want the accepted and terminal states", len(stayed.events))
+	}
+	if state := eventState(t, stayed.events[len(stayed.events)-1]); state != TaskStateCompleted {
+		t.Errorf("the surviving stream closed on %q, want %q", state, TaskStateCompleted)
+	}
+}
+
+// TestStreamingCapabilityIsAdvertised pins that the card and the endpoint agree:
+// declaring streaming false while serving it would make a conformant client skip
+// a capability that is there.
+func TestStreamingCapabilityIsAdvertised(t *testing.T) {
+	card := fetchAgentCard(t, config.DefaultConfig())
+	if !card.Capabilities.Streaming {
+		t.Error("the card declares streaming false while SendStreamingMessage is served")
 	}
 }

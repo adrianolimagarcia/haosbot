@@ -42,10 +42,16 @@ func TestRecoveryRequeuesClaimedDeliveryExactlyOnce(t *testing.T) {
 	restarted := NewService(root, s.executor)
 	if err := restarted.Start(); err != nil { t.Fatal(err) }
 	t.Cleanup(func(){ ctx,cancel:=context.WithTimeout(context.Background(),time.Second); defer cancel(); _=restarted.Close(ctx) })
-	waitUntil(t, time.Second, func() bool { return calls.Load() == 1 })
-	time.Sleep(30 * time.Millisecond)
+	// Wait for the DURABLE record, not for the executor call. The service runs the
+	// executor first and only then writes runs/<id>.json, so waiting on the call
+	// count and then sleeping a fixed 30ms races the write: under load the file is
+	// still missing when the assertion runs. Polling the file is the signal that
+	// the delivery actually finished.
+	record := filepath.Join(restarted.runs, d.ID+".json")
+	waitUntil(t, 2*time.Second, func() bool { _, err := os.Stat(record); return err == nil })
+	// Give a duplicate delivery time to show up before asserting exactly-once.
+	time.Sleep(50 * time.Millisecond)
 	if calls.Load() != 1 { t.Fatalf("delivery %s executed %d times", d.ID, calls.Load()) }
-	if _, err := os.Stat(filepath.Join(restarted.runs, d.ID+".json")); err != nil { t.Fatalf("missing durable run record: %v", err) }
 }
 
 func TestRetryPreservesDeliveryIdentityAndEventuallySucceeds(t *testing.T) {

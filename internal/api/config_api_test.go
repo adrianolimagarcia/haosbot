@@ -140,3 +140,46 @@ func TestRedactedConfigRemovesDynamicHeaderSecrets(t *testing.T) {
 		t.Fatal("contextWindowTokens was incorrectly classified as a secret")
 	}
 }
+
+// TestSaveConfigPatchPreservesWebUIAuth pins the property that makes the switch
+// usable: it is read from the config file at startup and written back by every
+// later save. /api/config rebuilds the file by marshalling the LOADED config and
+// merging the patch, so a field that did not round-trip would silently revert to
+// "token required" the first time the operator changed an unrelated setting in
+// the WebUI — which is exactly the kind of quiet regression that is hard to
+// attribute afterwards.
+func TestSaveConfigPatchPreservesWebUIAuth(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  *bool
+	}{
+		{"disabled", boolPtr(false)},
+		{"enabled", boolPtr(true)},
+		{"unset", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.API.WebUIAuth = tc.set
+
+			target := filepath.Join(t.TempDir(), "config.json")
+			if err := saveConfigPatch(cfg, target, map[string]any{
+				"agents": map[string]any{"defaults": map[string]any{"model": "new-model"}},
+			}); err != nil {
+				t.Fatalf("saveConfigPatch: %v", err)
+			}
+
+			got, err := config.Load(target)
+			if err != nil {
+				t.Fatalf("reload patched config: %v", err)
+			}
+			switch {
+			case tc.set == nil && got.API.WebUIAuth != nil:
+				t.Fatalf("api.webuiAuth = %v after a save, want it to stay unset", *got.API.WebUIAuth)
+			case tc.set != nil && got.API.WebUIAuth == nil:
+				t.Fatalf("api.webuiAuth was dropped by a save, want %v", *tc.set)
+			case tc.set != nil && *got.API.WebUIAuth != *tc.set:
+				t.Fatalf("api.webuiAuth = %v after a save, want %v", *got.API.WebUIAuth, *tc.set)
+			}
+		})
+	}
+}

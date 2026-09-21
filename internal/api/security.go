@@ -24,9 +24,14 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if !s.authorizedRequest(r) {
-			writeUnauthorized(w)
-			return
+		// The browser shell's own routes can be exempted by configuration. The
+		// body limit below still applies: turning the token off must not also
+		// turn off the request size cap.
+		if !(s.webUIAuthDisabled() && webUIPath(r.URL.Path)) {
+			if !s.authorizedRequest(r) {
+				writeUnauthorized(w)
+				return
+			}
 		}
 
 		if r.Body != nil {
@@ -34,6 +39,30 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// webUIPath reports whether a path belongs to the browser shell rather than to
+// one of the machine-facing APIs.
+//
+// The split is deliberate and is the whole point of the setting: /a2a and /v1/
+// are called by peers and programs and keep requiring the token, while /api/ is
+// what the page itself calls. Exempting the browser shell must not quietly
+// exempt the A2A endpoint or the OpenAI-compatible API too.
+func webUIPath(path string) bool {
+	return strings.HasPrefix(path, "/api/")
+}
+
+// webUIAuthDisabled reports whether the operator turned the browser shell's
+// token requirement off.
+//
+// The zero value of the setting is the SAFE one: an unset key, a nil config or a
+// nil server all mean "the token is still required", so no code path can end up
+// serving /api/ unauthenticated by omission.
+func (s *Server) webUIAuthDisabled() bool {
+	if s == nil || s.cfg == nil || s.cfg.API.WebUIAuth == nil {
+		return false
+	}
+	return !*s.cfg.API.WebUIAuth
 }
 
 func protectedPath(path string) bool {

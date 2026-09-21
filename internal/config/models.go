@@ -750,6 +750,7 @@ var apiFields = []fieldDef{
 	{name: "api_key"},
 	// Port-only extension; the reference ignores unknown keys inside `api`.
 	{name: "public_base_url"},
+	{name: "webui_auth"},
 }
 
 func decodeAPI(c *collector, o *jmap) ApiConfig {
@@ -759,6 +760,7 @@ func decodeAPI(c *collector, o *jmap) ApiConfig {
 	out.Timeout = pyjson.Float(c.readFloat(o, apiFields[2], float64(out.Timeout)))
 	out.APIKey = c.readString(o, apiFields[3], out.APIKey)
 	out.PublicBaseURL = readPublicBaseURL(c, o, apiFields[4])
+	out.WebUIAuth = c.readOptBool(o, apiFields[5], nil)
 
 	// ApiConfig.wildcard_host_requires_auth (schema.py:341-350).
 	if len(c.issues) == 0 {

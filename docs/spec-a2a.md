@@ -100,6 +100,16 @@ tools de shell e de escrita em arquivo. O que existe hoje:
   `Authorization: Bearer <key>`; a card anuncia o esquema em `securitySchemes`;
 - sem `api.apiKey`, o servidor só aceita peer de loopback (`validateBindAddr`).
 
+O switch `api.webuiAuth` (default `true`, ou seja, **exigir token**) isenta
+apenas as rotas que o próprio navegador chama, sob `/api/`. Ele **não** toca
+`/a2a`, `/a2a/` nem `/v1/`, que continuam exigindo o token — isentar o shell do
+navegador não pode isentar por tabela o endpoint A2A nem a API
+OpenAI-compatible. É um downgrade sério e deliberado: `/api/agent/turn` executa
+shell e escreve arquivo no host, então com `webuiAuth: false` e um listener
+não-loopback, quem alcança a porta tem esse acesso. O `validateBindAddr`
+continua recusando listener não-loopback sem `api.apiKey` alguma, como último
+freio. O limite de corpo de 1 MiB continua valendo nas rotas isentas.
+
 **Decisão ainda em aberto (do usuário), não tomada sozinho:** o endpoint A2A roda
 com o registry de tools completo, ou com um registry reduzido? Bearer/API-key
 estático é suficiente, ou é exigido JWT/OAuth2?

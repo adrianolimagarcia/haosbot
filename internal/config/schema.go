@@ -375,7 +375,8 @@ func (p ProvidersConfig) MarshalJSON() ([]byte, error) {
 // api / gateway
 // ---------------------------------------------------------------------------
 
-// ApiConfig mirrors schema.py:333-350, plus one port-only public base URL.
+// ApiConfig mirrors schema.py:333-350, plus two port-only settings:
+// PublicBaseURL and WebUIAuth.
 //
 // PublicBaseURL is a DELIBERATE DIVERGENCE, for the same reason as the gateway
 // queue limits below: the reference has no A2A endpoint, so it has nothing to
@@ -424,6 +425,28 @@ type ApiConfig struct {
 	// without a query string or a fragment — appending "/a2a" to either would
 	// not produce the URL the operator meant.
 	PublicBaseURL string `json:"publicBaseUrl"`
+
+	// WebUIAuth controls whether the browser shell's own routes under /api/
+	// require the bearer token.
+	//
+	// This is a DELIBERATE DIVERGENCE, though for a different reason than
+	// PublicBaseURL: the reference does not model WebUI authentication at all,
+	// so there is nothing to mirror. It is readable by the reference for the
+	// same mechanical reason, an unknown key inside `api` being ignored
+	// (ApiConfig descends from Base, whose pydantic default is extra="ignore").
+	//
+	// nil means "not configured", which is the default and keeps the token
+	// requirement. A pointer rather than a bool so that the ZERO VALUE of
+	// ApiConfig is the safe one: a Server built from a partially populated
+	// config can never serve /api/ unauthenticated by accident.
+	//
+	// Turning this off does NOT touch /a2a or /v1/, which keep requiring the
+	// token. It is still a serious downgrade, because the browser shell's routes
+	// run the agent: /api/agent/turn executes shell commands and writes files on
+	// the host. With a non-loopback listener, "no token on /api/" means anyone
+	// who can reach the port has that access, so validateBindAddr keeps refusing
+	// a non-loopback listener with no api.apiKey at all.
+	WebUIAuth *bool `json:"webuiAuth,omitempty"`
 }
 
 // GatewayConfig mirrors schema.py:353-359, plus two port-only queue limits.

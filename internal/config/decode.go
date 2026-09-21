@@ -343,6 +343,25 @@ func (c *collector) readOptString(o *jmap, f fieldDef, def *string) *string {
 	return &s
 }
 
+// readOptBool reads a tri-state boolean. The pointer distinguishes "absent or
+// null" from an explicit false, which is what a setting whose SAFE value is true
+// needs: an unset key must not be able to read as "disabled".
+func (c *collector) readOptBool(o *jmap, f fieldDef, def *bool) *bool {
+	v, key, ok := f.get(o)
+	if !ok {
+		return def
+	}
+	if isJSONNull(v) {
+		return nil
+	}
+	b, ok2, code, msg := asBool(v)
+	if !ok2 {
+		c.add(c.at(o, key), code, msg)
+		return def
+	}
+	return &b
+}
+
 func (c *collector) readBool(o *jmap, f fieldDef, def bool) bool {
 	v, key, ok := f.get(o)
 	if !ok {

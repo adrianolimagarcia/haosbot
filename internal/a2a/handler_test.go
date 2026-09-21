@@ -338,8 +338,8 @@ func TestAgentCardAdvertisesConfiguredPort(t *testing.T) {
 	cfg.API.Port = 9123
 
 	card := fetchAgentCard(t, cfg)
-	if want := "http://127.0.0.1:9123/a2a"; card.URL != want {
-		t.Fatalf("agent card url=%q want %q", card.URL, want)
+	if want := "http://127.0.0.1:9123/a2a"; cardURL(card) != want {
+		t.Fatalf("agent card url=%q want %q", cardURL(card), want)
 	}
 }
 
@@ -353,35 +353,100 @@ func TestAgentCardPortFallbackMatchesLoaderDefault(t *testing.T) {
 
 	card := fetchAgentCard(t, cfg)
 	want := fmt.Sprintf("http://127.0.0.1:%d/a2a", config.DefaultConfig().API.Port)
-	if card.URL != want {
-		t.Fatalf("agent card url=%q want %q (the fallback must match the loader's default api.port)", card.URL, want)
+	if cardURL(card) != want {
+		t.Fatalf("agent card url=%q want %q (the fallback must match the loader's default api.port)", cardURL(card), want)
 	}
 }
 
-// preFixCardBody is the agent card body produced by the gateway binary built
-// from the commit BEFORE api.publicBaseUrl existed, bound to 127.0.0.1:41877.
-// It was captured by running the real binary and is reproduced here byte for
-// byte — including the trailing newline json.Encoder appends — so the
-// no-regression half of this feature is asserted against observed output rather
-// than against a re-derivation of it.
-const preFixCardBody = `{"name":"haosbot","description":"Autonomous lightweight infrastructure, shell execution and Python/SQLite agent powered by haosbot","url":"http://127.0.0.1:41877/a2a","version":"1.0.0","capabilities":{"streaming":false,"pushNotifications":false},"skills":[{"id":"exec","name":"Terminal Command Execution","description":"Execute shell commands, monitor system metrics, systemd and disk usage"},{"id":"python_exec","name":"Python SQLite Runner","description":"Execute isolated Python scripts with SQLite, JSON and networking support"},{"id":"file_ops","name":"Workspace File Operations","description":"Read, write and edit files safely inside the agent workspace"}]}` + "\n"
-
-// TestAgentCardUnsetIsByteIdenticalToPreFixOutput is the no-regression test for
-// the new key: with api.publicBaseUrl unset the card must be byte-for-byte what
-// the pre-fix binary emitted, so adding the key cannot quietly change the
-// existing effective-bind-address behaviour.
-func TestAgentCardUnsetIsByteIdenticalToPreFixOutput(t *testing.T) {
+// TestAgentCardIsConformantWithA2Av1 pins the card fields A2A 1.0 makes
+// mandatory. The previous card carried the v0.3 `url` field, omitted
+// `supportedInterfaces` (which makes the official TCK abort before it issues a
+// single request, because it cannot tell which transports to test), omitted both
+// default mode arrays, and omitted `tags` on every skill — all of which the
+// official JSON Schema and the TCK reject.
+func TestAgentCardIsConformantWithA2Av1(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.API.Host = "127.0.0.1"
 	cfg.API.Port = 41877
-	if cfg.API.PublicBaseURL != "" {
-		t.Fatalf("precondition: DefaultConfig().API.PublicBaseURL = %q, want empty", cfg.API.PublicBaseURL)
+
+	card := fetchAgentCard(t, cfg)
+
+	if len(card.SupportedInterface) == 0 {
+		t.Fatal("supportedInterfaces is REQUIRED and must not be empty")
+	}
+	iface := card.SupportedInterface[0]
+	if want := "http://127.0.0.1:41877/a2a"; iface.URL != want {
+		t.Errorf("interface url=%q want %q", iface.URL, want)
+	}
+	if iface.ProtocolBinding != "JSONRPC" {
+		t.Errorf("protocolBinding=%q want JSONRPC", iface.ProtocolBinding)
+	}
+	if iface.ProtocolVersion != ProtocolVersion {
+		t.Errorf("protocolVersion=%q want %q", iface.ProtocolVersion, ProtocolVersion)
+	}
+	if len(card.DefaultInputModes) == 0 || len(card.DefaultOutputModes) == 0 {
+		t.Error("defaultInputModes and defaultOutputModes are REQUIRED and must not be empty")
+	}
+	if len(card.Skills) == 0 {
+		t.Fatal("skills is REQUIRED and must not be empty")
+	}
+	for _, skill := range card.Skills {
+		if skill.ID == "" || skill.Name == "" || skill.Description == "" {
+			t.Errorf("skill %+v is missing a required field", skill)
+		}
+		if len(skill.Tags) == 0 {
+			t.Errorf("skill %q has no tags: tags is REQUIRED on every AgentSkill", skill.ID)
+		}
 	}
 
-	got := fetchAgentCardRaw(t, cfg)
-	if string(got) != preFixCardBody {
-		t.Errorf("agent card body changed with api.publicBaseUrl unset.\n got: %s\nwant: %s", got, preFixCardBody)
+	// The v1.0 card has no top-level url. Emitting one is not harmless: the
+	// official JSON Schema sets additionalProperties:false, so the whole card
+	// fails validation.
+	raw := fetchAgentCardRaw(t, cfg)
+	var asMap map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &asMap); err != nil {
+		t.Fatalf("decode card: %v", err)
 	}
+	if _, ok := asMap["url"]; ok {
+		t.Error("the card still carries the legacy top-level url field, which v1.0 removed")
+	}
+}
+
+// TestAgentCardDeclaresBearerSecurityWhenAPIKeyIsSet pins the auth advertisement.
+// The gateway protects /a2a with a bearer token whenever api.apiKey is set; a
+// card that omits securitySchemes tells a conformant client the opposite, and
+// the client then gets an unexplained 401.
+func TestAgentCardDeclaresBearerSecurityWhenAPIKeyIsSet(t *testing.T) {
+	t.Run("api key set", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.API.APIKey = "secret-token"
+
+		card := fetchAgentCard(t, cfg)
+		scheme, ok := card.SecuritySchemes[securitySchemeName].(map[string]any)
+		if !ok {
+			t.Fatalf("securitySchemes[%q] missing or not an object: %#v", securitySchemeName, card.SecuritySchemes)
+		}
+		http, ok := scheme["httpAuthSecurityScheme"].(map[string]any)
+		if !ok {
+			t.Fatalf("securitySchemes[%q] is not an httpAuthSecurityScheme: %#v", securitySchemeName, scheme)
+		}
+		if http["scheme"] != "Bearer" {
+			t.Errorf("scheme=%v want Bearer", http["scheme"])
+		}
+		if len(card.Security) == 0 {
+			t.Error("security is required alongside securitySchemes so a client knows the scheme applies")
+		}
+	})
+
+	t.Run("no api key", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.API.APIKey = ""
+
+		card := fetchAgentCard(t, cfg)
+		if len(card.SecuritySchemes) != 0 {
+			t.Errorf("securitySchemes=%#v want none when no api key is configured", card.SecuritySchemes)
+		}
+	})
 }
 
 // TestAgentCardPublicBaseURLJoining pins the joining rule for the shapes an
@@ -406,8 +471,8 @@ func TestAgentCardPublicBaseURLJoining(t *testing.T) {
 			cfg.API.PublicBaseURL = tc.base
 
 			card := fetchAgentCard(t, cfg)
-			if card.URL != tc.want {
-				t.Errorf("api.publicBaseUrl=%q: card url=%q want %q", tc.base, card.URL, tc.want)
+			if cardURL(card) != tc.want {
+				t.Errorf("api.publicBaseUrl=%q: card url=%q want %q", tc.base, cardURL(card), tc.want)
 			}
 		})
 	}
@@ -424,8 +489,8 @@ func TestAgentCardPublicBaseURLWinsOverWildcardHost(t *testing.T) {
 	cfg.API.PublicBaseURL = "https://example.com"
 
 	card := fetchAgentCard(t, cfg)
-	if want := "https://example.com/a2a"; card.URL != want {
-		t.Errorf("card url=%q want %q", card.URL, want)
+	if want := "https://example.com/a2a"; cardURL(card) != want {
+		t.Errorf("card url=%q want %q", cardURL(card), want)
 	}
 }
 
@@ -450,8 +515,8 @@ func TestAgentCardPublicBaseURLAndEffectiveBindAddressDoNotFight(t *testing.T) {
 		cfg.API.Port = 8900 // configured, and overridden below
 		applyEffectiveBind(cfg, "127.0.0.1", 41877)
 
-		if card := fetchAgentCard(t, cfg); card.URL != "http://127.0.0.1:41877/a2a" {
-			t.Errorf("card url=%q want http://127.0.0.1:41877/a2a — the effective-bind fix must still hold", card.URL)
+		if card := fetchAgentCard(t, cfg); cardURL(card) != "http://127.0.0.1:41877/a2a" {
+			t.Errorf("card url=%q want http://127.0.0.1:41877/a2a — the effective-bind fix must still hold", cardURL(card))
 		}
 	})
 
@@ -462,8 +527,8 @@ func TestAgentCardPublicBaseURLAndEffectiveBindAddressDoNotFight(t *testing.T) {
 		cfg.API.PublicBaseURL = "https://example.com/agent"
 		applyEffectiveBind(cfg, "127.0.0.1", 41877)
 
-		if card := fetchAgentCard(t, cfg); card.URL != "https://example.com/agent/a2a" {
-			t.Errorf("card url=%q want https://example.com/agent/a2a", card.URL)
+		if card := fetchAgentCard(t, cfg); cardURL(card) != "https://example.com/agent/a2a" {
+			t.Errorf("card url=%q want https://example.com/agent/a2a", cardURL(card))
 		}
 		// The write-back must still be visible in the config: the listener and
 		// every other cfg.API consumer read these two fields.
@@ -524,6 +589,16 @@ func currentTaskIDs(h *Handler) map[string]bool {
 		return true
 	})
 	return ids
+}
+
+// cardURL reads the advertised endpoint out of the v1.0 card shape. A2A 1.0
+// replaced the single top-level `url` with an ordered supportedInterfaces list,
+// so every URL assertion goes through the preferred (first) interface.
+func cardURL(card AgentCard) string {
+	if len(card.SupportedInterface) == 0 {
+		return ""
+	}
+	return card.SupportedInterface[0].URL
 }
 
 func publishedTask(h *Handler, id string) *Task {
@@ -653,8 +728,8 @@ func TestPublishedTaskIsNeverMutatedInPlace(t *testing.T) {
 	if working == nil {
 		t.Fatal("the in-flight task was not published")
 	}
-	if working.Status != "working" {
-		t.Fatalf("published task status=%q want \"working\"", working.Status)
+	if working.Status.State != TaskStateWorking {
+		t.Fatalf("published task status=%q want %q", working.Status.State, TaskStateWorking)
 	}
 
 	prov.releaseAll()
@@ -662,9 +737,9 @@ func TestPublishedTaskIsNeverMutatedInPlace(t *testing.T) {
 		t.Fatal("tasks/send did not answer")
 	}
 
-	if working.Status != "working" || working.Output != "" {
-		t.Fatalf("a published snapshot was mutated in place: status=%q output=%q",
-			working.Status, working.Output)
+	if working.Status.State != TaskStateWorking || len(working.Artifacts) != 0 {
+		t.Fatalf("a published snapshot was mutated in place: status=%q artifacts=%d",
+			working.Status.State, len(working.Artifacts))
 	}
 
 	completed := publishedTask(h, id)
@@ -674,9 +749,9 @@ func TestPublishedTaskIsNeverMutatedInPlace(t *testing.T) {
 	if completed == working {
 		t.Fatal("the completion was written into the published snapshot instead of a new one")
 	}
-	if completed.Status != "completed" || completed.Output == "" {
-		t.Fatalf("stored task status=%q output=%q want a completed task with output",
-			completed.Status, completed.Output)
+	if completed.Status.State != TaskStateCompleted || len(completed.Artifacts) == 0 {
+		t.Fatalf("stored task status=%q artifacts=%d want a completed task with output",
+			completed.Status.State, len(completed.Artifacts))
 	}
 }
 
@@ -694,16 +769,16 @@ func TestTaskStoreIsBounded(t *testing.T) {
 		body := postJSON(t, client, srv.URL+"/a2a", taskSendBody)
 		var parsed struct {
 			Result struct {
-				ID string `json:"id"`
+				Task *Task `json:"task"`
 			} `json:"result"`
 		}
 		if err := json.Unmarshal(body, &parsed); err != nil {
 			t.Fatalf("decode tasks/send response %s: %v", body, err)
 		}
-		if parsed.Result.ID == "" {
-			t.Fatalf("tasks/send answered without a task id: %s", body)
+		if parsed.Result.Task == nil || parsed.Result.Task.ID == "" {
+			t.Fatalf("tasks/send answered without a task: %s", body)
 		}
-		lastID = parsed.Result.ID
+		lastID = parsed.Result.Task.ID
 	}
 
 	retained := len(currentTaskIDs(h))
@@ -727,8 +802,8 @@ func TestTaskStoreIsBounded(t *testing.T) {
 	if parsed.Result == nil {
 		t.Fatalf("the most recently submitted task was evicted: %s", body)
 	}
-	if parsed.Result.Status != "completed" {
-		t.Fatalf("retained task status=%q want \"completed\"", parsed.Result.Status)
+	if parsed.Result.Status.State != TaskStateCompleted {
+		t.Fatalf("retained task status=%q want %q", parsed.Result.Status.State, TaskStateCompleted)
 	}
 }
 
@@ -792,12 +867,8 @@ func TestTaskStoreNeverExceedsCapDuringBurst(t *testing.T) {
 			<-start
 			for i := 0; i < perPublisher; i++ {
 				h.publish(Task{
-					ID:        fmt.Sprintf("burst-%d-%d", p, i),
-					Status:    "completed",
-					Input:     "burst",
-					Output:    "burst",
-					CreatedAt: time.Now(),
-					UpdatedAt: time.Now(),
+					ID:     fmt.Sprintf("burst-%d-%d", p, i),
+					Status: taskStatus(TaskStateCompleted),
 				})
 			}
 		}(p)
@@ -844,14 +915,14 @@ func TestTaskCapEvictsTerminalTasksBeforeRunningOnes(t *testing.T) {
 
 	// Seed the store at its cap directly: the OLDEST entry is the running one,
 	// so a plain oldest-first policy would evict exactly the wrong task.
-	h.tasks.Store("running", &Task{ID: "running", Status: "working", UpdatedAt: now.Add(-time.Hour)})
+	h.tasks.Store("running", &Task{ID: "running", Status: TaskStatus{State: TaskStateWorking}, updated: now.Add(-time.Hour)})
 	for i := 0; i < maxRetainedTasks-1; i++ {
 		id := fmt.Sprintf("done-%d", i)
-		h.tasks.Store(id, &Task{ID: id, Status: "completed", UpdatedAt: now})
+		h.tasks.Store(id, &Task{ID: id, Status: TaskStatus{State: TaskStateCompleted}, updated: now})
 	}
 	h.retained.Store(maxRetainedTasks)
 
-	h.publish(Task{ID: "fresh", Status: "working", CreatedAt: now, UpdatedAt: now})
+	h.publish(Task{ID: "fresh", Status: TaskStatus{State: TaskStateWorking}})
 
 	if _, ok := h.tasks.Load("running"); !ok {
 		t.Fatal("the trim evicted an in-flight task while terminal tasks were available to evict")
@@ -873,11 +944,11 @@ func TestTaskCapHoldsWhenEveryTaskIsRunning(t *testing.T) {
 
 	for i := 0; i < maxRetainedTasks; i++ {
 		id := fmt.Sprintf("running-%d", i)
-		h.tasks.Store(id, &Task{ID: id, Status: "working", CreatedAt: now, UpdatedAt: now})
+		h.tasks.Store(id, &Task{ID: id, Status: TaskStatus{State: TaskStateWorking}, updated: now})
 	}
 	h.retained.Store(maxRetainedTasks)
 
-	h.publish(Task{ID: "fresh", Status: "working", CreatedAt: now, UpdatedAt: now})
+	h.publish(Task{ID: "fresh", Status: TaskStatus{State: TaskStateWorking}})
 
 	if got := h.retained.Load(); got > maxRetainedTasks {
 		t.Fatalf("retained count is %d, want at most %d even when nothing is terminal", got, maxRetainedTasks)
@@ -894,9 +965,9 @@ func TestTaskStoreSweepsExpiredTerminalTasks(t *testing.T) {
 	h := NewHandler(config.DefaultConfig(), nil)
 	now := time.Now()
 
-	h.tasks.Store("old-completed", &Task{ID: "old-completed", Status: "completed", UpdatedAt: now.Add(-2 * taskRetentionTTL)})
-	h.tasks.Store("fresh-completed", &Task{ID: "fresh-completed", Status: "completed", UpdatedAt: now})
-	h.tasks.Store("old-working", &Task{ID: "old-working", Status: "working", UpdatedAt: now.Add(-2 * taskRetentionTTL)})
+	h.tasks.Store("old-completed", &Task{ID: "old-completed", Status: TaskStatus{State: TaskStateCompleted}, updated: now.Add(-2 * taskRetentionTTL)})
+	h.tasks.Store("fresh-completed", &Task{ID: "fresh-completed", Status: TaskStatus{State: TaskStateCompleted}, updated: now})
+	h.tasks.Store("old-working", &Task{ID: "old-working", Status: TaskStatus{State: TaskStateWorking}, updated: now.Add(-2 * taskRetentionTTL)})
 	h.retained.Store(3)
 	h.lastSweepNanos.Store(0) // force the next sweep instead of waiting out taskSweepInterval
 

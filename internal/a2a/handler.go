@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,67 +17,15 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
 )
 
-// AgentCard mirrors the A2A discovery card served at /.well-known/agent-card.json
-type AgentCard struct {
-	Name         string            `json:"name"`
-	Description  string            `json:"description"`
-	URL          string            `json:"url"`
-	Version      string            `json:"version"`
-	Capabilities AgentCapabilities `json:"capabilities"`
-	Skills       []AgentSkill      `json:"skills"`
-}
-
-type AgentCapabilities struct {
-	Streaming         bool `json:"streaming"`
-	PushNotifications bool `json:"pushNotifications"`
-}
-
-type AgentSkill struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-}
-
-// JSONRPCRequest represents an incoming JSON-RPC 2.0 message
-type JSONRPCRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      any             `json:"id"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params"`
-}
-
-// JSONRPCResponse represents an outgoing JSON-RPC 2.0 message
-type JSONRPCResponse struct {
-	JSONRPC string        `json:"jsonrpc"`
-	ID      any           `json:"id"`
-	Result  any           `json:"result,omitempty"`
-	Error   *JSONRPCError `json:"error,omitempty"`
-}
-
-type JSONRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-// Task represents an A2A Task object
-type Task struct {
-	ID        string    `json:"id"`
-	Status    string    `json:"status"` // "submitted", "working", "completed", "failed"
-	Input     string    `json:"input"`
-	Output    string    `json:"output,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
-}
-
 // Task retention policy.
 //
 // A2A tasks are transient: a peer submits one, reads the reply, and may poll
-// tasks/get for a short while afterwards. Nothing ever removed an entry, so the
+// GetTask for a short while afterwards. Nothing ever removed an entry, so the
 // store grew without bound — one entry per task, each holding the full input and
 // output text, kept for the life of the process. The policy below bounds it:
 //
-//   - a terminal task (completed/failed) is retained for taskRetentionTTL and
-//     then swept;
+//   - a terminal task (completed/failed/canceled/rejected) is retained for
+//     taskRetentionTTL and then swept;
 //   - the store is HARD bounded at maxRetainedTasks, so a burst that arrives
 //     faster than the TTL can expire is bounded oldest-first even before any TTL
 //     elapses. Admission is decided before the insert (see publish), so the
@@ -102,11 +51,23 @@ const (
 	taskTrimTarget = maxRetainedTasks * 7 / 8
 )
 
+// ListTasks pagination bounds (proto ListTasksRequest): the default page is 50
+// tasks and the service may not return more than 100.
+const (
+	defaultListPageSize = 50
+	maxListPageSize     = 100
+)
+
 // Handler coordinates A2A endpoints and task execution
 type Handler struct {
 	cfg   *config.Config
 	loop  *agent.Loop
 	tasks sync.Map
+
+	// cancels maps a task ID to the CancelFunc of the turn currently executing
+	// it, which is what CancelTask needs: without it the only way to stop a task
+	// was to close the client connection.
+	cancels sync.Map
 
 	// trimMu serialises the eviction walks, and nothing else. It is deliberately
 	// NOT the admission path: publishers admit themselves with a CAS on retained
@@ -120,6 +81,12 @@ type Handler struct {
 	// benchmark varied 3.5-7.0 us/op between runs), so no claim is made about
 	// concurrent throughput either way.
 	trimMu sync.Mutex
+
+	// startedAt is when this handler was constructed. The agent card is a pure
+	// function of the configuration, which is loaded once at startup and never
+	// changes while the process runs, so the handler's own construction time is
+	// the honest Last-Modified for the card.
+	startedAt time.Time
 
 	// retained counts the live entries in tasks, and lastSweepNanos records the
 	// last TTL pass. Both exist because sync.Map has no length and the cap has
@@ -137,6 +104,9 @@ type Handler struct {
 	// under concurrent publishes; it is exact when nothing is publishing.
 	retained       atomic.Int64
 	lastSweepNanos atomic.Int64
+
+	// taskSeq is the source of task and context identifiers.
+	taskSeq atomic.Int64
 }
 
 // defaultAPIPort is the loader's own default for api.port
@@ -148,20 +118,16 @@ var defaultAPIPort = sync.OnceValue(func() int { return config.DefaultConfig().A
 
 func NewHandler(cfg *config.Config, loop *agent.Loop) *Handler {
 	return &Handler{
-		cfg:  cfg,
-		loop: loop,
+		cfg:       cfg,
+		loop:      loop,
+		startedAt: time.Now(),
 	}
-}
-
-// terminal reports whether a task reached a final state.
-func (t Task) terminal() bool {
-	return t.Status == "completed" || t.Status == "failed"
 }
 
 // publish stores an immutable snapshot of task and keeps the store bounded.
 //
 // Snapshots are copies: once published, a *Task is never mutated again. That is
-// what lets handleTaskGet serialise a task without a lock and without ever
+// what lets handleGetTask serialise a task without a lock and without ever
 // observing a half-written one (a completed status carrying the previous empty
 // output, or a working status with a stale updatedAt).
 //
@@ -180,6 +146,7 @@ func (t Task) terminal() bool {
 // took, so the count stays exact.
 func (h *Handler) publish(task Task) {
 	snapshot := task
+	snapshot.updated = time.Now()
 
 	// Re-publishing a retained task (the completion of a working task) replaces
 	// an entry and must not be charged for a new slot. This is only an
@@ -239,7 +206,7 @@ func (h *Handler) evictExpiredTasks(now time.Time) {
 		if !ok {
 			return true
 		}
-		if task.terminal() && now.Sub(task.UpdatedAt) > taskRetentionTTL {
+		if task.terminal() && now.Sub(task.updated) > taskRetentionTTL {
 			h.deleteTask(key)
 		}
 		return true
@@ -282,7 +249,7 @@ func (h *Handler) trim() {
 		if !ok {
 			return true
 		}
-		candidates = append(candidates, candidate{key: key, updated: task.UpdatedAt, terminal: task.terminal()})
+		candidates = append(candidates, candidate{key: key, updated: task.updated, terminal: task.terminal()})
 		return true
 	})
 
@@ -316,13 +283,32 @@ func (h *Handler) deleteTask(key any) {
 	}
 }
 
-// RegisterRoutes registers the A2A protocol routes on the provided mux
+// loadTask reads the published snapshot for an ID.
+func (h *Handler) loadTask(id string) (*Task, bool) {
+	val, ok := h.tasks.Load(id)
+	if !ok {
+		return nil, false
+	}
+	task, ok := val.(*Task)
+	return task, ok
+}
+
+// RegisterRoutes registers the A2A protocol routes on the provided mux.
+//
+// The JSON-RPC endpoint answers on both /a2a and /a2a/. The trailing-slash form
+// is not something the spec mandates, but it is what real clients produce: the
+// official TCK builds its HTTP client with the advertised interface URL as
+// base_url, and httpx normalises that to "<url>/", so every request lands on
+// /a2a/. Rejecting it makes this agent unreachable for the official conformance
+// suite. Anything deeper than /a2a/ is refused, so the extra registration does
+// not turn into a wildcard route.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// A. Discovery Endpoint
 	mux.HandleFunc("/.well-known/agent-card.json", h.handleAgentCard)
 
 	// B. JSON-RPC 2.0 Task Endpoint
 	mux.HandleFunc("/a2a", h.handleJSONRPC)
+	mux.HandleFunc("/a2a/", h.handleJSONRPC)
 }
 
 // agentCardURL builds the address the card tells peers to use for this agent's
@@ -361,75 +347,316 @@ func (h *Handler) agentCardURL() string {
 	return fmt.Sprintf("http://%s:%d/a2a", host, port)
 }
 
-func (h *Handler) handleAgentCard(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+// securitySchemeName is the key under which the bearer scheme is declared. It is
+// referenced from AgentCard.security, which is what tells a client that a
+// credential is required and how to present it.
+const securitySchemeName = "bearerAuth"
 
+// agentCard builds the discovery document.
+//
+// A2A 1.0 dropped the single top-level `url` in favour of the ordered
+// `supportedInterfaces` list, made `defaultInputModes`/`defaultOutputModes`
+// REQUIRED, and made `tags` REQUIRED on every skill. The card also has to
+// declare the security scheme: the gateway protects /a2a with a bearer token
+// whenever api.apiKey is set, and a card that omits securitySchemes tells a
+// client the opposite, which is how an authenticated deployment becomes
+// unreachable for a conformant client.
+func (h *Handler) agentCard() AgentCard {
 	card := AgentCard{
 		Name:        "haosbot",
 		Description: "Autonomous lightweight infrastructure, shell execution and Python/SQLite agent powered by haosbot",
-		URL:         h.agentCardURL(),
-		Version:     "1.0.0",
+		SupportedInterface: []AgentInterface{{
+			URL:             h.agentCardURL(),
+			ProtocolBinding: "JSONRPC",
+			ProtocolVersion: ProtocolVersion,
+		}},
+		Version: "1.0.0",
 		Capabilities: AgentCapabilities{
+			// Declared false rather than omitted so that a client asking for
+			// streaming, push notifications or an extended card gets the
+			// capability-specific error the spec requires instead of
+			// MethodNotFound.
 			Streaming:         false,
 			PushNotifications: false,
+			ExtendedAgentCard: false,
 		},
+		DefaultInputModes:  []string{MediaTypeText},
+		DefaultOutputModes: []string{MediaTypeText},
 		Skills: []AgentSkill{
 			{
 				ID:          "exec",
 				Name:        "Terminal Command Execution",
 				Description: "Execute shell commands, monitor system metrics, systemd and disk usage",
+				Tags:        []string{"shell", "system", "diagnostics"},
 			},
 			{
 				ID:          "python_exec",
 				Name:        "Python SQLite Runner",
 				Description: "Execute isolated Python scripts with SQLite, JSON and networking support",
+				Tags:        []string{"python", "sqlite", "data"},
 			},
 			{
 				ID:          "file_ops",
 				Name:        "Workspace File Operations",
 				Description: "Read, write and edit files safely inside the agent workspace",
+				Tags:        []string{"files", "workspace", "editing"},
 			},
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(card)
+	if h.cfg != nil && h.cfg.API.APIKey != "" {
+		card.SecuritySchemes = map[string]any{
+			securitySchemeName: map[string]any{
+				"httpAuthSecurityScheme": map[string]any{
+					"scheme":      "Bearer",
+					"description": "Static bearer token from api.apiKey; send it as 'Authorization: Bearer <token>'.",
+				},
+			},
+		}
+		card.Security = []map[string]any{
+			{"schemes": map[string]any{securitySchemeName: map[string]any{"list": []string{}}}},
+		}
+	}
+
+	return card
 }
 
-func (h *Handler) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+func (h *Handler) handleAgentCard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var req JSONRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(JSONRPCResponse{
-			JSONRPC: "2.0",
-			Error:   &JSONRPCError{Code: -32700, Message: "Parse error"},
-		})
+	body, err := json.Marshal(h.agentCard())
+	if err != nil {
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// The card is stable for the life of the process, so it is cacheable. The
+	// spec lists these as SHOULD/MAY; without them every client re-fetches the
+	// card before every call.
+	etag := cardETag(body)
+	lastModified := h.cardLastModified()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Last-Modified", lastModified.UTC().Format(http.TimeFormat))
+
+	// Both validators are honoured, so a client that revalidates gets a bodyless
+	// 304 instead of the card. If-None-Match is checked first because it is the
+	// stronger validator: Last-Modified has one-second resolution and cannot tell
+	// two cards apart within the same second.
+	if matchesETag(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
+		if since, err := http.ParseTime(ims); err == nil && !lastModified.Truncate(time.Second).After(since) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = w.Write(body)
+}
+
+// cardLastModified reports when the advertised card last changed. A zero
+// startedAt (a Handler built as a struct literal rather than by NewHandler) is
+// reported as now, which keeps the header present without ever claiming the card
+// is older than it is.
+func (h *Handler) cardLastModified() time.Time {
+	if h.startedAt.IsZero() {
+		return time.Now()
+	}
+	return h.startedAt
+}
+
+// matchesETag reports whether an If-None-Match header covers etag. It handles
+// the wildcard and the comma-separated list forms, and tolerates the weak
+// prefix, since a client may send back any of them.
+func matchesETag(header, etag string) bool {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return false
+	}
+	if header == "*" {
+		return true
+	}
+	for _, candidate := range strings.Split(header, ",") {
+		candidate = strings.TrimSpace(candidate)
+		candidate = strings.TrimPrefix(candidate, "W/")
+		if candidate == etag {
+			return true
+		}
+	}
+	return false
+}
+
+// cardETag is a strong validator over the exact card bytes.
+func cardETag(body []byte) string {
+	return `"` + strconv.FormatUint(uint64(len(body)), 16) + "-" + strconv.FormatUint(fnv1a(body), 16) + `"`
+}
+
+// fnv1a is the 64-bit FNV-1a hash, inlined so the card endpoint does not pull
+// hash/fnv into the request path for one call.
+func fnv1a(b []byte) uint64 {
+	const (
+		offset = 14695981039346656037
+		prime  = 1099511628211
+	)
+	h := uint64(offset)
+	for _, c := range b {
+		h ^= uint64(c)
+		h *= prime
+	}
+	return h
+}
+
+// ---------------------------------------------------------------------------
+// JSON-RPC dispatch
+// ---------------------------------------------------------------------------
+
+// supportedVersions are the A2A-Version values (Major.Minor) this interface
+// accepts. 1.0 is what the card advertises; 0.3 is accepted because the legacy
+// method aliases below let a pre-1.0 client keep working during the overlap
+// period the spec describes.
+var supportedVersions = map[string]bool{"1.0": true, "0.3": true}
+
+// methodAliases maps the legacy dotted method names (v0.3 and the pre-0.3 names
+// this handler used to expose) onto their v1.0 PascalCase equivalents. A2A 1.0
+// names every method after its gRPC service method, so `tasks/get` is not a
+// valid v1.0 method at all.
+var methodAliases = map[string]string{
+	"message/send": "SendMessage",
+	"tasks/send":   "SendMessage",
+	"tasks/create": "SendMessage",
+
+	"tasks/get": "GetTask",
+
+	"message/stream":    "SendStreamingMessage",
+	"tasks/resubscribe": "SubscribeToTask",
+
+	"tasks/cancel": "CancelTask",
+
+	"tasks/list": "ListTasks",
+
+	"tasks/pushNotificationConfig/set":    "CreateTaskPushNotificationConfig",
+	"tasks/pushNotificationConfig/get":    "GetTaskPushNotificationConfig",
+	"tasks/pushNotificationConfig/list":   "ListTaskPushNotificationConfigs",
+	"tasks/pushNotificationConfig/delete": "DeleteTaskPushNotificationConfig",
+
+	"agent/getAuthenticatedExtendedCard": "GetExtendedAgentCard",
+}
+
+func (h *Handler) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
+	// /a2a/ is registered as a subtree so the trailing-slash form works; only the
+	// endpoint itself is a valid target.
+	if path := r.URL.Path; path != "/a2a" && path != "/a2a/" {
+		http.NotFound(w, r)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 
-	switch req.Method {
-	case "tasks/send", "tasks/create", "SendMessage", "message/send":
-		h.handleTaskSend(r.Context(), w, req)
-	case "tasks/get":
-		h.handleTaskGet(w, req)
-	default:
-		_ = json.NewEncoder(w).Encode(JSONRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Error:   &JSONRPCError{Code: -32601, Message: fmt.Sprintf("Method not found: %s", req.Method)},
-		})
+	var req JSONRPCRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// The id is unknown when the body is unparseable, so the response carries
+		// a null id, which is what JSON-RPC 2.0 prescribes for a parse error.
+		h.writeError(w, nil, CodeJSONParseError, "Invalid JSON payload", nil)
+		return
 	}
+
+	if req.JSONRPC != "" && req.JSONRPC != "2.0" {
+		h.writeError(w, req.ID, CodeInvalidRequestError, "Request payload validation error",
+			[]any{errorInfo("INVALID_REQUEST", map[string]string{"jsonrpc": req.JSONRPC})})
+		return
+	}
+
+	// A2A-Version is a service parameter carried in a header (spec 3.6, 14.2.1).
+	// A version this interface does not serve must be refused, not processed with
+	// the wrong semantics.
+	if version := strings.TrimSpace(r.Header.Get("A2A-Version")); version != "" && !supportedVersions[version] {
+		h.writeError(w, req.ID, CodeVersionNotSupportedError, "Version not supported",
+			[]any{errorInfo("VERSION_NOT_SUPPORTED", map[string]string{
+				"requestedVersion": version,
+				"supportedVersion": ProtocolVersion,
+			})})
+		return
+	}
+
+	method := req.Method
+	if canonical, ok := methodAliases[method]; ok {
+		method = canonical
+	}
+
+	switch method {
+	case "SendMessage":
+		h.handleSendMessage(r.Context(), w, req)
+	case "GetTask":
+		h.handleGetTask(w, req)
+	case "ListTasks":
+		h.handleListTasks(w, req)
+	case "CancelTask":
+		h.handleCancelTask(w, req)
+
+	// Capability-gated operations. Each of these is answered with the error the
+	// spec mandates for a capability the card declares as false, so a client can
+	// tell "not supported by this agent" apart from "no such method".
+	case "SendStreamingMessage", "SubscribeToTask":
+		h.writeError(w, req.ID, CodeUnsupportedOperationError, "This agent does not support streaming",
+			[]any{errorInfo("UNSUPPORTED_OPERATION", map[string]string{"capability": "streaming"})})
+	case "CreateTaskPushNotificationConfig", "GetTaskPushNotificationConfig",
+		"ListTaskPushNotificationConfigs", "DeleteTaskPushNotificationConfig":
+		h.writeError(w, req.ID, CodePushNotificationNotSupportedError, "This agent does not support push notifications",
+			[]any{errorInfo("PUSH_NOTIFICATION_NOT_SUPPORTED", map[string]string{"capability": "pushNotifications"})})
+	case "GetExtendedAgentCard":
+		h.writeError(w, req.ID, CodeUnsupportedOperationError, "This agent has no extended agent card",
+			[]any{errorInfo("UNSUPPORTED_OPERATION", map[string]string{"capability": "extendedAgentCard"})})
+
+	default:
+		h.writeError(w, req.ID, CodeMethodNotFoundError, "Method not found",
+			[]any{errorInfo("METHOD_NOT_FOUND", map[string]string{"method": req.Method})})
+	}
+}
+
+// writeJSON encodes a response, ignoring the write error: the connection is
+// already gone if the encode fails, and there is nothing useful to do about it.
+func (h *Handler) writeJSON(w http.ResponseWriter, resp JSONRPCResponse) {
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (h *Handler) writeResult(w http.ResponseWriter, id any, result any) {
+	h.writeJSON(w, JSONRPCResponse{JSONRPC: "2.0", ID: id, Result: result})
+}
+
+func (h *Handler) writeError(w http.ResponseWriter, id any, code int, message string, data []any) {
+	h.writeJSON(w, JSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error:   &JSONRPCError{Code: code, Message: message, Data: data},
+	})
+}
+
+// taskNotFound answers with the code the spec reserves for a missing task
+// (-32001). The pre-1.0 handler used -32004, which the spec defines as
+// UnsupportedOperationError, so a client could not tell a missing task from an
+// unsupported one.
+func (h *Handler) taskNotFound(w http.ResponseWriter, id any, taskID string) {
+	h.writeError(w, id, CodeTaskNotFoundError, "Task not found",
+		[]any{errorInfo("TASK_NOT_FOUND", map[string]string{"taskId": taskID})})
 }
 
 // requestTimeout is the upper bound applied to one A2A task.
@@ -446,88 +673,218 @@ func (h *Handler) requestTimeout() time.Duration {
 	return time.Duration(float64(h.cfg.API.Timeout) * float64(time.Second))
 }
 
-// handleTaskSend runs one task. ctx is the INCOMING REQUEST's context: deriving
-// the task from context.Background() meant a client that disconnected (or a
-// proxy that timed out) left the agent calling the model and holding its
-// concurrency slot until the bound elapsed, and broke cancellation
-// propagation. The bound is kept, so a peer that stays connected still cannot
-// pin a task open forever.
-func (h *Handler) handleTaskSend(ctx context.Context, w http.ResponseWriter, req JSONRPCRequest) {
-	var params struct {
+// ---------------------------------------------------------------------------
+// SendMessage
+// ---------------------------------------------------------------------------
+
+// parseSendParams accepts both the v1.0 SendMessageRequest and the shapes the
+// pre-1.0 handler exposed ({"message":{"text":...}} and {"input":...}).
+//
+// A2A 1.0 permits a server to accept the legacy request form during the overlap
+// period, and the legacy form carries no messageId/role, so those are synthesised
+// rather than rejected: refusing them would break existing callers for no
+// protocol benefit. Responses are always emitted in the current form.
+func (h *Handler) parseSendParams(raw json.RawMessage) (Message, *SendMessageConfiguration, error) {
+	if len(raw) == 0 {
+		return Message{}, nil, fmt.Errorf("params is required")
+	}
+
+	var wire struct {
+		Tenant  string `json:"tenant"`
 		Message struct {
-			Text  string `json:"text"`
-			Parts []struct {
-				Text string `json:"text"`
-			} `json:"parts"`
+			MessageID string `json:"messageId"`
+			ContextID string `json:"contextId"`
+			TaskID    string `json:"taskId"`
+			Role      string `json:"role"`
+			Parts     []Part `json:"parts"`
+			Text      string `json:"text"`
 		} `json:"message"`
-		Input string `json:"input"`
+		Configuration *SendMessageConfiguration `json:"configuration"`
+		Input         string                    `json:"input"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return Message{}, nil, fmt.Errorf("params is not a valid SendMessageRequest: %w", err)
 	}
 
-	if len(req.Params) > 0 {
-		_ = json.Unmarshal(req.Params, &params)
+	msg := Message{
+		MessageID: wire.Message.MessageID,
+		ContextID: wire.Message.ContextID,
+		TaskID:    wire.Message.TaskID,
+		Role:      wire.Message.Role,
+		Parts:     wire.Message.Parts,
 	}
 
-	inputText := strings.TrimSpace(params.Message.Text)
-	if inputText == "" && len(params.Message.Parts) > 0 {
-		var partsTexts []string
-		for _, p := range params.Message.Parts {
-			if strings.TrimSpace(p.Text) != "" {
-				partsTexts = append(partsTexts, strings.TrimSpace(p.Text))
-			}
+	// Legacy {"message":{"text":"..."}} / {"input":"..."} forms.
+	if len(msg.Parts) == 0 {
+		text := strings.TrimSpace(wire.Message.Text)
+		if text == "" {
+			text = strings.TrimSpace(wire.Input)
 		}
-		inputText = strings.Join(partsTexts, "\n")
-	}
-	if inputText == "" {
-		inputText = strings.TrimSpace(params.Input)
+		if text != "" {
+			msg.Parts = []Part{NewTextPart(text)}
+		}
 	}
 
-	if inputText == "" {
-		_ = json.NewEncoder(w).Encode(JSONRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Error:   &JSONRPCError{Code: -32602, Message: "Invalid params: input or message.text is required"},
-		})
+	if len(msg.Parts) == 0 {
+		return Message{}, nil, fmt.Errorf("message.parts must contain at least one part")
+	}
+	if strings.TrimSpace(msg.MessageID) == "" {
+		msg.MessageID = h.newID("msg")
+	}
+	if strings.TrimSpace(msg.Role) == "" {
+		msg.Role = RoleUser
+	}
+	if msg.Role != RoleUser && msg.Role != RoleAgent {
+		return Message{}, nil, fmt.Errorf("message.role must be %s or %s", RoleUser, RoleAgent)
+	}
+
+	return msg, wire.Configuration, nil
+}
+
+// newID mints an identifier. The spec only requires uniqueness, not a particular
+// format, so a nanosecond stamp plus a process-local counter is enough and avoids
+// pulling in a UUID dependency.
+func (h *Handler) newID(prefix string) string {
+	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().UnixNano(), h.taskSeq.Add(1))
+}
+
+// handleSendMessage runs one task to a terminal state and answers with a
+// SendMessageResponse.
+//
+// ctx is the INCOMING REQUEST's context: deriving the task from
+// context.Background() meant a client that disconnected (or a proxy that timed
+// out) left the agent calling the model and holding its concurrency slot until
+// the bound elapsed, and broke cancellation propagation. The bound is kept, so a
+// peer that stays connected still cannot pin a task open forever.
+func (h *Handler) handleSendMessage(ctx context.Context, w http.ResponseWriter, req JSONRPCRequest) {
+	msg, _, err := h.parseSendParams(req.Params)
+	if err != nil {
+		h.writeError(w, req.ID, CodeInvalidParamsError, "Invalid parameters",
+			[]any{errorInfo("INVALID_PARAMS", map[string]string{"detail": err.Error()})})
 		return
 	}
 
-	taskID := fmt.Sprintf("task-%d", time.Now().UnixNano())
-	// task is a local value: every state transition publishes a fresh snapshot,
-	// so the copy a reader holds is never written to again.
+	if msg.HasUnsupportedContent() {
+		h.writeError(w, req.ID, CodeContentTypeNotSupportedError, "Content type not supported",
+			[]any{errorInfo("CONTENT_TYPE_NOT_SUPPORTED", map[string]string{
+				"supportedInputModes": MediaTypeText,
+			})})
+		return
+	}
+
+	inputText := strings.TrimSpace(msg.Text())
+	if inputText == "" {
+		h.writeError(w, req.ID, CodeInvalidParamsError, "Invalid parameters",
+			[]any{errorInfo("INVALID_PARAMS", map[string]string{"field": "message.parts", "detail": "at least one text part is required"})})
+		return
+	}
+
+	// Continuing a task the server does not have is an error, not a new task:
+	// silently creating one would make a client's follow-up look successful while
+	// its context was dropped.
+	//
+	// The same guard applies to a task that already finished (a terminal task
+	// cannot be resumed — the spec reserves UnsupportedOperationError for that)
+	// and to a contextId that contradicts the task it is sent with, which would
+	// otherwise silently file the turn under a context the task never belonged
+	// to.
+	taskID := msg.TaskID
+	contextID := msg.ContextID
+	if taskID != "" {
+		existing, ok := h.loadTask(taskID)
+		if !ok {
+			h.taskNotFound(w, req.ID, taskID)
+			return
+		}
+		if existing.terminal() {
+			h.writeError(w, req.ID, CodeUnsupportedOperationError,
+				"Operation not supported for a task in a terminal state",
+				[]any{errorInfo("UNSUPPORTED_OPERATION", map[string]string{
+					"taskId": taskID,
+					"state":  existing.Status.State,
+				})})
+			return
+		}
+		if contextID != "" && contextID != existing.ContextID {
+			h.writeError(w, req.ID, CodeInvalidParamsError, "Invalid parameters",
+				[]any{errorInfo("INVALID_PARAMS", map[string]string{
+					"field":             "message.contextId",
+					"detail":            "contextId does not match the task it was sent with",
+					"taskId":            taskID,
+					"expectedContextId": existing.ContextID,
+				})})
+			return
+		}
+		// The task already carries a context, so an omitted contextId is inferred
+		// from it rather than minting a second one for the same conversation.
+		contextID = existing.ContextID
+	}
+
+	if taskID == "" {
+		taskID = h.newID("task")
+	}
+	if contextID == "" {
+		contextID = h.newID("ctx")
+	}
+
+	// The history is the inbound message exactly as it arrived, so a peer can
+	// read back what it sent.
+	inbound := Message{
+		MessageID: msg.MessageID,
+		ContextID: contextID,
+		TaskID:    taskID,
+		Role:      RoleUser,
+		Parts:     msg.Parts,
+	}
+
 	task := Task{
 		ID:        taskID,
-		Status:    "working",
-		Input:     inputText,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		ContextID: contextID,
+		Status:    taskStatus(TaskStateWorking),
+		History:   []Message{inbound},
 	}
 	h.publish(task)
 
-	// Execute via Agent Loop if available
+	// The turn is cancellable from outside while it runs, which is what CancelTask
+	// acts on. taskCtx is derived from the request context so a disconnected peer
+	// still stops the work.
+	taskCtx, cancel := context.WithTimeout(ctx, h.requestTimeout())
+	h.cancels.Store(taskID, cancel)
+	defer func() {
+		h.cancels.Delete(taskID)
+		cancel()
+	}()
+
 	var finalOutput string
 	if h.loop != nil {
-		inbound := core.InboundMessage{
+		in := core.InboundMessage{
 			Channel:   "a2a",
 			SenderID:  "a2a_peer",
-			ChatID:    taskID,
+			ChatID:    contextID,
 			Content:   inputText,
 			Timestamp: time.Now(),
-			Metadata:  map[string]any{"source": "a2a_protocol"},
+			Metadata:  map[string]any{"source": "a2a_protocol", "taskId": taskID},
 		}
 
-		ctx, cancel := context.WithTimeout(ctx, h.requestTimeout())
-		defer cancel()
-
-		out, err := h.loop.ProcessMessage(ctx, inbound)
-		if err != nil {
-			task.Status = "failed"
-			task.Output = err.Error()
-			task.UpdatedAt = time.Now()
+		out, runErr := h.loop.ProcessMessage(taskCtx, in)
+		if runErr != nil {
+			// A task canceled while running already carries its final state, and
+			// that state must survive: overwriting it with FAILED would report a
+			// deliberate cancellation as a crash.
+			if current, ok := h.loadTask(taskID); ok && current.terminal() {
+				h.writeResult(w, req.ID, SendMessageResponse{Task: current})
+				return
+			}
+			task.Status = taskStatus(TaskStateFailed)
+			task.Status.Message = &Message{
+				MessageID: h.newID("msg"),
+				ContextID: contextID,
+				TaskID:    taskID,
+				Role:      RoleAgent,
+				Parts:     []Part{NewTextPart(runErr.Error())},
+			}
 			h.publish(task)
-			_ = json.NewEncoder(w).Encode(JSONRPCResponse{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Error:   &JSONRPCError{Code: -32000, Message: err.Error()},
-			})
+			h.writeResult(w, req.ID, SendMessageResponse{Task: h.snapshotOr(task)})
 			return
 		}
 		if out != nil {
@@ -537,50 +894,272 @@ func (h *Handler) handleTaskSend(ctx context.Context, w http.ResponseWriter, req
 		finalOutput = fmt.Sprintf("Haosbot received: %s (agent loop not attached)", inputText)
 	}
 
-	task.Status = "completed"
-	task.Output = finalOutput
-	task.UpdatedAt = time.Now()
+	// A cancellation that landed between the turn returning and this publish must
+	// still win, otherwise the client that asked to cancel gets a completed task.
+	if current, ok := h.loadTask(taskID); ok && current.terminal() {
+		h.writeResult(w, req.ID, SendMessageResponse{Task: current})
+		return
+	}
+
+	task.Status = taskStatus(TaskStateCompleted)
+	task.Artifacts = []Artifact{{
+		ArtifactID:  h.newID("artifact"),
+		Name:        "response",
+		Description: "Agent response text",
+		Parts:       []Part{NewTextPart(finalOutput)},
+	}}
+	task.History = append(task.History, Message{
+		MessageID: h.newID("msg"),
+		ContextID: contextID,
+		TaskID:    taskID,
+		Role:      RoleAgent,
+		Parts:     []Part{NewTextPart(finalOutput)},
+	})
 	h.publish(task)
 
 	// The reply carries the same snapshot that was just published, so the caller
-	// and a concurrent tasks/get can never disagree about this task id.
-	_ = json.NewEncoder(w).Encode(JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      req.ID,
-		Result:  task,
+	// and a concurrent GetTask can never disagree about this task id.
+	h.writeResult(w, req.ID, SendMessageResponse{Task: h.snapshotOr(task)})
+}
+
+// snapshotOr returns the published snapshot for a task, falling back to the
+// local value when the entry was evicted between publish and read.
+func (h *Handler) snapshotOr(task Task) *Task {
+	if current, ok := h.loadTask(task.ID); ok {
+		return current
+	}
+	snapshot := task
+	snapshot.updated = time.Now()
+	return &snapshot
+}
+
+// ---------------------------------------------------------------------------
+// GetTask
+// ---------------------------------------------------------------------------
+
+func (h *Handler) handleGetTask(w http.ResponseWriter, req JSONRPCRequest) {
+	var params struct {
+		ID            string `json:"id"`
+		HistoryLength *int   `json:"historyLength"`
+	}
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			h.writeError(w, req.ID, CodeInvalidParamsError, "Invalid parameters",
+				[]any{errorInfo("INVALID_PARAMS", map[string]string{"detail": err.Error()})})
+			return
+		}
+	}
+
+	if strings.TrimSpace(params.ID) == "" {
+		h.writeError(w, req.ID, CodeInvalidParamsError, "Invalid parameters",
+			[]any{errorInfo("INVALID_PARAMS", map[string]string{"field": "id", "detail": "id is required"})})
+		return
+	}
+
+	task, ok := h.loadTask(params.ID)
+	if !ok {
+		h.taskNotFound(w, req.ID, params.ID)
+		return
+	}
+
+	h.writeResult(w, req.ID, taskWithHistoryLength(task, params.HistoryLength))
+}
+
+// taskWithHistoryLength applies the GetTask historyLength parameter: unset means
+// no limit, zero means no history, and any other value caps the most recent
+// messages returned (proto GetTaskRequest.history_length).
+func taskWithHistoryLength(task *Task, historyLength *int) *Task {
+	if historyLength == nil {
+		return task
+	}
+	out := *task
+	n := *historyLength
+	switch {
+	case n <= 0:
+		out.History = nil
+	case n < len(out.History):
+		out.History = out.History[len(out.History)-n:]
+	}
+	return &out
+}
+
+// ---------------------------------------------------------------------------
+// ListTasks
+// ---------------------------------------------------------------------------
+
+func (h *Handler) handleListTasks(w http.ResponseWriter, req JSONRPCRequest) {
+	var params struct {
+		ContextID            string `json:"contextId"`
+		Status               string `json:"status"`
+		PageSize             *int   `json:"pageSize"`
+		PageToken            string `json:"pageToken"`
+		HistoryLength        *int   `json:"historyLength"`
+		IncludeArtifacts     *bool  `json:"includeArtifacts"`
+		StatusTimestampAfter string `json:"statusTimestampAfter"`
+	}
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			h.writeError(w, req.ID, CodeInvalidParamsError, "Invalid parameters",
+				[]any{errorInfo("INVALID_PARAMS", map[string]string{"detail": err.Error()})})
+			return
+		}
+	}
+
+	pageSize := defaultListPageSize
+	if params.PageSize != nil {
+		pageSize = *params.PageSize
+		if pageSize < 1 {
+			h.writeError(w, req.ID, CodeInvalidParamsError, "Invalid parameters",
+				[]any{errorInfo("INVALID_PARAMS", map[string]string{"field": "pageSize", "detail": "pageSize must be at least 1"})})
+			return
+		}
+		if pageSize > maxListPageSize {
+			pageSize = maxListPageSize
+		}
+	}
+
+	offset := 0
+	if params.PageToken != "" {
+		parsed, err := strconv.Atoi(params.PageToken)
+		if err != nil || parsed < 0 {
+			h.writeError(w, req.ID, CodeInvalidParamsError, "Invalid parameters",
+				[]any{errorInfo("INVALID_PARAMS", map[string]string{"field": "pageToken", "detail": "pageToken is not a token issued by this agent"})})
+			return
+		}
+		offset = parsed
+	}
+
+	includeArtifacts := params.IncludeArtifacts != nil && *params.IncludeArtifacts
+
+	// Deterministic order: the store is a map, so listing without sorting would
+	// hand out a different page order on every call and make pageToken meaningless.
+	all := make([]*Task, 0, 64)
+	h.tasks.Range(func(_, value any) bool {
+		task, ok := value.(*Task)
+		if !ok {
+			return true
+		}
+		if params.ContextID != "" && task.ContextID != params.ContextID {
+			return true
+		}
+		if params.Status != "" && task.Status.State != params.Status {
+			return true
+		}
+		if params.StatusTimestampAfter != "" {
+			after, err := time.Parse(time.RFC3339, params.StatusTimestampAfter)
+			if err == nil {
+				ts, err := time.Parse(time.RFC3339Nano, task.Status.Timestamp)
+				if err == nil && ts.Before(after) {
+					return true
+				}
+			}
+		}
+		all = append(all, task)
+		return true
+	})
+
+	slices.SortFunc(all, func(a, b *Task) int {
+		if a.updated.Equal(b.updated) {
+			return strings.Compare(a.ID, b.ID)
+		}
+		return b.updated.Compare(a.updated)
+	})
+
+	total := len(all)
+	if offset > total {
+		offset = total
+	}
+	end := offset + pageSize
+	if end > total {
+		end = total
+	}
+	page := all[offset:end]
+
+	out := make([]*Task, 0, len(page))
+	for _, task := range page {
+		view := taskWithHistoryLength(task, params.HistoryLength)
+		if !includeArtifacts {
+			// The proto defaults include_artifacts to false to keep the payload
+			// small; the copy keeps the stored snapshot untouched.
+			trimmed := *view
+			trimmed.Artifacts = nil
+			view = &trimmed
+		}
+		out = append(out, view)
+	}
+
+	next := ""
+	if end < total {
+		next = strconv.Itoa(end)
+	}
+
+	h.writeResult(w, req.ID, ListTasksResponse{
+		Tasks:         out,
+		NextPageToken: next,
+		PageSize:      pageSize,
+		TotalSize:     total,
 	})
 }
 
-func (h *Handler) handleTaskGet(w http.ResponseWriter, req JSONRPCRequest) {
+// ---------------------------------------------------------------------------
+// CancelTask
+// ---------------------------------------------------------------------------
+
+// handleCancelTask stops a running task and answers with the resulting Task.
+//
+// Cancellation is idempotent for a task that is still retained: cancelling an
+// already-canceled task returns it again rather than erroring. A task that
+// reached any other terminal state is not cancelable, and the spec has a
+// dedicated code for that (-32002) instead of the generic failure this handler
+// used to return.
+func (h *Handler) handleCancelTask(w http.ResponseWriter, req JSONRPCRequest) {
 	var params struct {
 		ID string `json:"id"`
 	}
 	if len(req.Params) > 0 {
-		_ = json.Unmarshal(req.Params, &params)
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			h.writeError(w, req.ID, CodeInvalidParamsError, "Invalid parameters",
+				[]any{errorInfo("INVALID_PARAMS", map[string]string{"detail": err.Error()})})
+			return
+		}
 	}
-
-	if params.ID == "" {
-		_ = json.NewEncoder(w).Encode(JSONRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Error:   &JSONRPCError{Code: -32602, Message: "Invalid params: id is required"},
-		})
+	if strings.TrimSpace(params.ID) == "" {
+		h.writeError(w, req.ID, CodeInvalidParamsError, "Invalid parameters",
+			[]any{errorInfo("INVALID_PARAMS", map[string]string{"field": "id", "detail": "id is required"})})
 		return
 	}
 
-	val, ok := h.tasks.Load(params.ID)
+	task, ok := h.loadTask(params.ID)
 	if !ok {
-		_ = json.NewEncoder(w).Encode(JSONRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Error:   &JSONRPCError{Code: -32004, Message: "Task not found"},
-		})
+		h.taskNotFound(w, req.ID, params.ID)
 		return
 	}
 
-	_ = json.NewEncoder(w).Encode(JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      req.ID,
-		Result:  val,
-	})
+	switch task.Status.State {
+	case TaskStateCanceled:
+		h.writeResult(w, req.ID, task)
+		return
+	case TaskStateCompleted, TaskStateFailed, TaskStateRejected:
+		h.writeError(w, req.ID, CodeTaskNotCancelableError, "Task cannot be canceled",
+			[]any{errorInfo("TASK_NOT_CANCELABLE", map[string]string{
+				"taskId": params.ID,
+				"state":  task.Status.State,
+			})})
+		return
+	}
+
+	if cancel, ok := h.cancels.Load(params.ID); ok {
+		if fn, ok := cancel.(context.CancelFunc); ok {
+			fn()
+		}
+	}
+
+	// Publish the canceled state here rather than waiting for the running turn to
+	// notice: the caller is entitled to the post-cancellation Task in this
+	// response, and the send path refuses to overwrite a terminal state.
+	canceled := *task
+	canceled.Status = taskStatus(TaskStateCanceled)
+	h.publish(canceled)
+
+	h.writeResult(w, req.ID, h.snapshotOr(canceled))
 }

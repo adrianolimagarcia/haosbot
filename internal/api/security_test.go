@@ -109,3 +109,41 @@ func TestSecurityMiddlewareLeavesHealthPublic(t *testing.T) {
 		t.Fatalf("health should remain public: status=%d called=%v", rr.Code, called)
 	}
 }
+
+// Regression guard for the trailing-slash A2A route: the JSON-RPC endpoint also
+// answers on /a2a/ (the official TCK always requests "<interface-url>/"), so
+// registering that path without listing it in protectedPath would expose the
+// full agent — shell execution included — with no bearer token at all.
+func TestSecurityMiddlewareProtectsTheA2ATrailingSlashForm(t *testing.T) {
+	s := NewServer(config.DefaultConfig(), nil, nil)
+	s.cfg.API.APIKey = "secret"
+
+	called := false
+	h := s.securityMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	for _, path := range []string{"/a2a", "/a2a/"} {
+		t.Run(path, func(t *testing.T) {
+			called = false
+			req := httptest.NewRequest(http.MethodPost, "http://example.test"+path, nil)
+			req.RemoteAddr = "203.0.113.10:12345"
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != http.StatusUnauthorized || called {
+				t.Fatalf("%s without a token: status=%d reached-handler=%v, want 401 and not reached", path, rr.Code, called)
+			}
+
+			called = false
+			req = httptest.NewRequest(http.MethodPost, "http://example.test"+path, nil)
+			req.RemoteAddr = "203.0.113.10:12345"
+			req.Header.Set("Authorization", "Bearer secret")
+			rr = httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != http.StatusNoContent || !called {
+				t.Fatalf("%s with a valid token: status=%d reached-handler=%v", path, rr.Code, called)
+			}
+		})
+	}
+}

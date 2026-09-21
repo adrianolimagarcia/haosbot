@@ -37,7 +37,10 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 }
 
 func protectedPath(path string) bool {
-	return path == "/a2a" ||
+	// /a2a/ is listed explicitly because the A2A endpoint also answers on the
+	// trailing-slash form: registering the route without protecting it would let
+	// the same handler be reached with no bearer token at all.
+	return path == "/a2a" || path == "/a2a/" ||
 		strings.HasPrefix(path, "/api/") ||
 		strings.HasPrefix(path, "/v1/")
 }

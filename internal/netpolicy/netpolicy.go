@@ -76,9 +76,23 @@ func NewClient(timeout time.Duration, p Policy) *http.Client {
 			return nil, fmt.Errorf("outbound destination %s resolved to no addresses", host)
 		}
 
-		// Dial an address already validated above; TLS still uses the original
-		// request hostname for SNI/certificate verification.
-		return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
+		// Dial the addresses validated above, in order, until one connects. Trying
+		// only the first is wrong for a dual-stack name: "localhost" commonly
+		// resolves to ::1 first while the peer listens on IPv4 only, so the request
+		// fails even though a later address would have served it. TLS still uses the
+		// original request hostname for SNI and certificate verification.
+		var lastErr error
+		for _, ip := range ips {
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		return nil, fmt.Errorf("outbound destination %s: %w", host, lastErr)
 	}
 
 	client := &http.Client{

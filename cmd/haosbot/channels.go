@@ -37,6 +37,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/bus"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/websocket"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 )
 
@@ -62,6 +63,9 @@ type channelBuilder func(section channels.Section, publisher channels.InboundPub
 var channelBuilders = map[string]channelBuilder{
 	telegram.ChannelName: func(section channels.Section, publisher channels.InboundPublisher) (channels.Channel, error) {
 		return telegram.New(section, publisher)
+	},
+	websocket.ChannelName: func(section channels.Section, publisher channels.InboundPublisher) (channels.Channel, error) {
+		return websocket.New(section, publisher)
 	},
 }
 

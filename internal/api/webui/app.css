@@ -654,7 +654,7 @@ html[data-theme="dark"] .control-input { background: #202023; color: #e4e4e7; bo
 }
 .integration-detail h3 { font-size: 1.15rem; font-weight: 650; }
 .integration-field { display: flex; flex-direction: column; gap: 6px; }
-.integration-field input, .integration-field select {
+.integration-field input, .integration-field select, .integration-field textarea {
   width: 100%; padding: 10px 12px; border-radius: 10px;
   border: 1px solid var(--border-color, #dce3e9);
   background: var(--surface-color, #fff); color: inherit;

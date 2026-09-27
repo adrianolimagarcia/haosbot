@@ -103,9 +103,7 @@ func (c *Channel) Stop(ctx context.Context) error {
 	for _, conn := range c.conns { conns = append(conns, conn) }
 	c.mu.Unlock()
 	for _, conn := range conns {
-		closeCtx, cancel := context.WithTimeout(ctx, time.Second)
-		_ = conn.conn.Close(closeCtx, websocket.StatusGoingAway, "server stopping")
-		cancel()
+		_ = conn.conn.Close(websocket.StatusGoingAway, "server stopping")
 		conn.finish()
 	}
 	if server == nil { return nil }

@@ -51,6 +51,7 @@ type webUISessionSummary struct {
 
 func (s *Server) registerWebUIData(mux *http.ServeMux) {
 	mux.HandleFunc("/api/webui/channels/catalog", s.handleWebUIChannelCatalog)
+	mux.HandleFunc("/api/webui/channels/telegram/validate", s.handleWebUITelegramValidate)
 	mux.HandleFunc("/api/webui/state", s.handleWebUIState)
 	mux.HandleFunc("/api/webui/session", s.handleWebUISession)
 	mux.HandleFunc("/api/webui/session/action", s.handleWebUISessionAction)
@@ -69,6 +70,19 @@ func (s *Server) registerWebUIData(mux *http.ServeMux) {
 	mux.HandleFunc("/api/webui/triggers", s.handleWebUITriggers)
 	mux.HandleFunc("/api/webui/trigger", s.handleWebUITrigger)
 	mux.HandleFunc("/api/webui/trigger/fire", s.handleWebUITriggerFire)
+}
+
+func (s *Server) handleWebUITelegramValidate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg := s.cfg
+	if saved, err := config.Load(configTargetPath(s.cfg)); err == nil { cfg = saved }
+	values, _ := cfg.Channels.Extra["telegram"].(map[string]any)
+	w.Header().Set("Cache-Control", "no-store")
+	writeWebUIJSON(w, telegram.ValidateChannel(values, telegram.ValidationContext{AllowLocalServiceAccess: cfg.Tools.WebUIAllowLocalServiceAccess}))
 }
 
 // The catalog describes runtime support and form fields from the transport's

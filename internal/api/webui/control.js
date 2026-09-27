@@ -272,6 +272,26 @@
     );
     root.appendChild(integrations);
 
+    const mcpTitle = el('div', 'control-toolbar');
+    mcpTitle.appendChild(el('div', 'control-section-title', 'Servidores MCP'));
+    const addMCP = el('button', 'control-button primary', 'Adicionar servidor');
+    addMCP.type = 'button';
+    addMCP.addEventListener('click', () => showMCPSetup(root, toolsCfg));
+    mcpTitle.appendChild(addMCP);
+    root.appendChild(mcpTitle);
+    const mcpGrid = el('div', 'integration-grid');
+    for (const [name, cfg] of Object.entries(mcp)) {
+      const tile = el('button', 'integration-card');
+      tile.type = 'button';
+      tile.append(el('strong', '', name),
+        el('span', 'control-muted', cfg.url || cfg.command || 'Sem endpoint configurado'),
+        el('span', 'integration-status available', cfg.type || (cfg.url ? 'HTTP' : 'stdio')));
+      tile.addEventListener('click', () => showMCPSetup(root, toolsCfg, name));
+      mcpGrid.appendChild(tile);
+    }
+    if (!mcpGrid.childNodes.length) mcpGrid.appendChild(el('div', 'session-loading', 'Nenhum servidor MCP configurado.'));
+    root.appendChild(mcpGrid);
+
     root.appendChild(el('div', 'control-section-title', 'Preview seguro do workspace'));
     const toolbar = el('div', 'control-toolbar');
     const input = el('input', 'control-input');
@@ -300,6 +320,75 @@
       }
     });
     root.appendChild(configEditor('Tools / MCP / CLI Apps', 'tools', toolsCfg));
+  }
+
+  function showMCPSetup(root, toolsCfg, existingName = '') {
+    editorMounted = true;
+    const current = toolsCfg.mcpServers?.[existingName] || {};
+    const form = el('form', 'integration-detail');
+    form.appendChild(el('h3', '', existingName ? 'Editar servidor MCP' : 'Adicionar servidor MCP'));
+    if (current.type && current.type !== 'stdio') {
+      form.appendChild(el('p', 'control-muted', 'Este runtime registra ferramentas MCP apenas via stdio. Edite esta configuração no JSON avançado.'));
+      const back = el('button', 'control-button', 'Voltar');
+      back.type = 'button';
+      back.addEventListener('click', () => renderApps(root));
+      form.appendChild(back);
+      root.replaceChildren(form);
+      return;
+    }
+    const fields = [
+      ['name', 'Nome', existingName, 'text'],
+      ['command', 'Comando (stdio)', current.command || '', 'text'],
+      ['args', 'Argumentos (um por linha)', (current.args || []).join('\n'), 'textarea'],
+      ['toolTimeout', 'Timeout das ferramentas (segundos)', String(current.toolTimeout || 30), 'number']
+    ];
+    const inputs = {};
+    for (const [key, label, value, kind] of fields) {
+      const row = el('label', 'integration-field');
+      row.appendChild(el('span', '', label));
+      const input = el(kind === 'textarea' ? 'textarea' : 'input');
+      if (kind !== 'textarea') input.type = kind;
+      input.value = value;
+      if (key === 'name' && existingName) input.disabled = true;
+      row.appendChild(input);
+      form.appendChild(row);
+      inputs[key] = input;
+    }
+    const status = el('span', 'control-muted', '');
+    const actions = el('div', 'control-toolbar');
+    const save = el('button', 'control-button primary', 'Salvar servidor');
+    save.type = 'submit';
+    const back = el('button', 'control-button', 'Voltar');
+    back.type = 'button';
+    back.addEventListener('click', () => renderApps(root));
+    actions.append(save, back, status);
+    form.appendChild(actions);
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const name = existingName || inputs.name.value.trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(name)) {
+        status.textContent = 'Use 1–64 caracteres: letras, números, ponto, _ ou -.';
+        return;
+      }
+      const endpoint = inputs.command.value.trim();
+      if (!endpoint) { status.textContent = 'Informe o comando.'; return; }
+      const timeout = Number(inputs.toolTimeout.value);
+      if (!Number.isInteger(timeout) || timeout < 1) { status.textContent = 'Timeout inválido.'; return; }
+      const server = { ...current, type: 'stdio', command: endpoint,
+        args: inputs.args.value.split('\n').map(x => x.trim()).filter(Boolean),
+        toolTimeout: timeout };
+      save.disabled = true;
+      status.textContent = 'Salvando…';
+      try {
+        const result = await api('/api/config', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tools: { mcpServers: { [name]: server } } }) });
+        status.textContent = result?.restartRequired ? 'Salvo · reinício necessário' : 'Salvo';
+        state = await api('/api/webui/state');
+      } catch (err) { status.textContent = errorMessage(err); }
+      finally { save.disabled = false; }
+    });
+    root.replaceChildren(form);
   }
 
   function renderSkills(root) {

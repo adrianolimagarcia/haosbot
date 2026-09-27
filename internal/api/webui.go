@@ -77,14 +77,15 @@ const maxRenderTextBytes = 128 << 10
 func (s *Server) registerWebUI(mux *http.ServeMux) {
 	nextRoot, err := fs.Sub(nextWebUI, "webui/next")
 	if err != nil { panic(err) }
-	nextHandler := http.StripPrefix("/next/", http.FileServer(http.FS(nextRoot)))
-	mux.HandleFunc("/next/", func(w http.ResponseWriter, r *http.Request) {
+	nextHandler := http.FileServer(http.FS(nextRoot))
+	mux.Handle("/assets/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet { w.Header().Set("Allow", http.MethodGet); http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		nextHandler.ServeHTTP(w, r)
-	})
-	mux.HandleFunc("/next", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/next/", http.StatusMovedPermanently) })
+	}))
+	mux.HandleFunc("/next/", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/", http.StatusMovedPermanently) })
+	mux.HandleFunc("/next", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/", http.StatusMovedPermanently) })
 	// Stateful browser traffic has an explicit endpoint instead of sharing the
 	// OpenAI-compatible route's historical fixed webui_session.
 	s.registerAgentTurn(mux)
@@ -116,8 +117,8 @@ func (s *Server) registerWebUI(mux *http.ServeMux) {
 	serveAsset("/manifest.webmanifest", "application/manifest+json; charset=utf-8", manifestWebmanifest)
 	serveAsset("/sw.js", "application/javascript; charset=utf-8", serviceWorkerJS)
 
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" && r.URL.Path != "/index.html" {
+	serveLegacy := func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/classic/" {
 			http.NotFound(w, r)
 			return
 		}
@@ -132,6 +133,21 @@ func (s *Server) registerWebUI(mux *http.ServeMux) {
 		// after it so vulnerable global functions are replaced before user input.
 		page := bytes.Replace(indexHTML, []byte("</body>"), []byte("<script src=\"/webui-hardening.js\"></script>\n<script src=\"/webui/enhancements.js\"></script>\n<script src=\"/webui/workbench.js\"></script>\n</body>"), 1)
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(page)
+	}
+	mux.HandleFunc("/classic/", serveLegacy)
+	mux.HandleFunc("/classic", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/classic/", http.StatusMovedPermanently) })
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" && r.URL.Path != "/index.html" { http.NotFound(w, r); return }
+		if r.Method != http.MethodGet { w.Header().Set("Allow", http.MethodGet); http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Security-Policy", webUIContentSecurityPolicy)
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		page, err := nextRoot.ReadFile("index.html")
+		if err != nil { http.Error(w, "WebUI bundle missing", http.StatusInternalServerError); return }
 		_, _ = w.Write(page)
 	})
 }

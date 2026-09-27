@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
-  base: '/next/',
+  base: '/',
   build: { outDir: '../internal/api/webui/next', emptyOutDir: true, assetsDir: 'assets' },
   server: { proxy: { '/api': 'http://127.0.0.1:18790' } },
 });

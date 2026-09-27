@@ -100,7 +100,7 @@ function App() {
         <button className="session-more" title={session.pinned ? 'Desafixar' : 'Fixar'} aria-label={'Fixar ' + session.title} onClick={() => void act(session, 'pin', !session.pinned)}>☆</button>
         <button className="session-more" title={session.archived ? 'Restaurar' : 'Arquivar'} aria-label={'Arquivar ' + session.title} onClick={() => void act(session, 'archive', !session.archived)}><Archive size={14}/></button>
       </div>)}{!sessions.length && <div className="empty-small">Nenhuma conversa encontrada.</div>}</div>
-      <div className="sidebar-bottom">{nav.slice(4).map(({ view: item, icon: Icon, label }) => <button key={item} className={view === item ? 'nav-link active' : 'nav-link'} onClick={() => setView(item)}><Icon size={17}/>{label}</button>)}<a className="old-ui" href="/">WebUI anterior <ChevronLeft size={15}/></a></div>
+      <div className="sidebar-bottom">{nav.slice(4).map(({ view: item, icon: Icon, label }) => <button key={item} className={view === item ? 'nav-link active' : 'nav-link'} onClick={() => setView(item)}><Icon size={17}/>{label}</button>)}<a className="old-ui" href="/classic/">WebUI anterior <ChevronLeft size={15}/></a></div>
     </aside>
     <main className="main">
       <header className="topbar"><div className="breadcrumbs">Workspace <span>/</span> <strong>{view === 'chat' ? currentTitle : nav.find(item => item.view === view)?.label}</strong></div>

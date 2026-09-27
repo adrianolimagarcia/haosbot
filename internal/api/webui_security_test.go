@@ -82,14 +82,22 @@ func TestWebUIIndexIsServed(t *testing.T) {
 
 func TestReactControlPlaneIsEmbedded(t *testing.T) {
 	h := webUIHandler()
-	rr := getWebUI(t, h, "/next/")
-	if rr.Code != http.StatusOK { t.Fatalf("GET /next/ = %d: %s", rr.Code, rr.Body.String()) }
+	rr := getWebUI(t, h, "/")
+	if rr.Code != http.StatusOK { t.Fatalf("GET / = %d: %s", rr.Code, rr.Body.String()) }
 	if !strings.Contains(rr.Body.String(), "HAOSBOT · Control Plane") { t.Fatal("missing React control plane index") }
-	asset := regexp.MustCompile(`/next/assets/[^" ]+\.js`).FindString(rr.Body.String())
+	asset := regexp.MustCompile(`/assets/[^" ]+\.js`).FindString(rr.Body.String())
 	if asset == "" { t.Fatal("compiled JS asset missing from index") }
 	js := getWebUI(t, h, asset)
 	if js.Code != http.StatusOK || !strings.Contains(js.Header().Get("Content-Type"), "javascript") {
 		t.Fatalf("compiled asset: status=%d type=%q", js.Code, js.Header().Get("Content-Type"))
+	}
+}
+
+func TestLegacyWebUIRemainsAvailableAtClassicPath(t *testing.T) {
+	h := webUIHandler()
+	rr := getWebUI(t, h, "/classic/")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `src="/webui/app.js"`) {
+		t.Fatalf("legacy WebUI at /classic/: status=%d", rr.Code)
 	}
 }
 
@@ -215,14 +223,14 @@ func TestWebUIIndexNeedsNothingTheCSPForbids(t *testing.T) {
 	if m := regexp.MustCompile(`(?i)\sstyle\s*=\s*"`).FindAllString(body, -1); len(m) > 0 {
 		t.Errorf("index.html has %d style attributes, which style-src 'self' blocks", len(m))
 	}
-	if !strings.Contains(body, `src="/webui/app.js"`) {
+	if !strings.Contains(body, `/assets/`) {
 		t.Error("index.html does not load /webui/app.js, so its UI wiring would be missing")
 	}
 }
 
 func TestWebUIAssetsAreServedByTheApplication(t *testing.T) {
 	h := webUIHandler()
-	body := getWebUI(t, h, "/").Body.String()
+	body := getWebUI(t, h, "/classic/").Body.String()
 
 	refs := regexp.MustCompile(`(?:src|href)="(/[^"#]*)"`).FindAllStringSubmatch(body, -1)
 	if len(refs) == 0 {
@@ -248,7 +256,7 @@ func TestWebUIAssetsAreServedByTheApplication(t *testing.T) {
 func TestWebUIAssetsAvoidDangerousDOMAPIs(t *testing.T) {
 	h := webUIHandler()
 
-	for _, path := range []string{"/", "/webui/app.js", "/webui/control.js", "/webui-hardening.js", "/sw.js"} {
+	for _, path := range []string{"/classic/", "/webui/app.js", "/webui/control.js", "/webui-hardening.js", "/sw.js"} {
 		body := getWebUI(t, h, path).Body.String()
 		for _, forbidden := range []string{
 			"marked.parse(",

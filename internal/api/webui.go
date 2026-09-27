@@ -146,7 +146,7 @@ func (s *Server) registerWebUI(mux *http.ServeMux) {
 		w.Header().Set("Content-Security-Policy", webUIContentSecurityPolicy)
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		page, err := nextRoot.ReadFile("index.html")
+		page, err := fs.ReadFile(nextRoot, "index.html")
 		if err != nil { http.Error(w, "WebUI bundle missing", http.StatusInternalServerError); return }
 		_, _ = w.Write(page)
 	})

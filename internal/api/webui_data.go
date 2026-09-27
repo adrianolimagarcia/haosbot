@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
 	"github.com/adrianolimagarcia/nanobot-go/internal/skills"
 )
@@ -49,6 +50,7 @@ type webUISessionSummary struct {
 }
 
 func (s *Server) registerWebUIData(mux *http.ServeMux) {
+	mux.HandleFunc("/api/webui/channels/catalog", s.handleWebUIChannelCatalog)
 	mux.HandleFunc("/api/webui/state", s.handleWebUIState)
 	mux.HandleFunc("/api/webui/session", s.handleWebUISession)
 	mux.HandleFunc("/api/webui/session/action", s.handleWebUISessionAction)
@@ -67,6 +69,39 @@ func (s *Server) registerWebUIData(mux *http.ServeMux) {
 	mux.HandleFunc("/api/webui/triggers", s.handleWebUITriggers)
 	mux.HandleFunc("/api/webui/trigger", s.handleWebUITrigger)
 	mux.HandleFunc("/api/webui/trigger/fire", s.handleWebUITriggerFire)
+}
+
+// The catalog describes runtime support and form fields from the transport's
+// own setup contract. Unsupported entries remain visible but cannot be saved.
+func (s *Server) handleWebUIChannelCatalog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	names := []struct{ ID, Name, Description string }{
+		{"telegram", "Telegram", "Bot API · polling ou webhook"},
+		{"discord", "Discord", "Mensagens e comunidades"},
+		{"slack", "Slack", "Mensagens de equipes"},
+		{"whatsapp", "WhatsApp", "Conversas e grupos"},
+		{"email", "Email", "Caixa de entrada e envio"},
+		{"matrix", "Matrix", "Mensageria federada"},
+		{"teams", "Microsoft Teams", "Colaboração corporativa"},
+		{"signal", "Signal", "Mensagens privadas"},
+		{"linear", "Linear", "Eventos de projetos"},
+		{"websocket", "WebSocket", "Integração customizada"},
+	}
+	entries := make([]map[string]any, 0, len(names))
+	for _, n := range names {
+		entry := map[string]any{"id": n.ID, "name": n.Name, "description": n.Description, "available": false}
+		if spec := telegram.LookupSetupSpec(n.ID); spec != nil {
+			entry["available"] = true
+			entry["setup"] = spec.ToPublicDict(n.ID)
+		}
+		entries = append(entries, entry)
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeWebUIJSON(w, map[string]any{"channels": entries})
 }
 
 func (s *Server) handleWebUIState(w http.ResponseWriter, r *http.Request) {

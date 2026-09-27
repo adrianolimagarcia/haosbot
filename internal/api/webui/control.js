@@ -327,18 +327,11 @@
     const current = toolsCfg.mcpServers?.[existingName] || {};
     const form = el('form', 'integration-detail');
     form.appendChild(el('h3', '', existingName ? 'Editar servidor MCP' : 'Adicionar servidor MCP'));
-    if (current.type && current.type !== 'stdio') {
-      form.appendChild(el('p', 'control-muted', 'Este runtime registra ferramentas MCP apenas via stdio. Edite esta configuração no JSON avançado.'));
-      const back = el('button', 'control-button', 'Voltar');
-      back.type = 'button';
-      back.addEventListener('click', () => renderApps(root));
-      form.appendChild(back);
-      root.replaceChildren(form);
-      return;
-    }
     const fields = [
       ['name', 'Nome', existingName, 'text'],
+      ['type', 'Transporte', current.type || (current.url ? 'streamableHttp' : 'stdio'), 'select'],
       ['command', 'Comando (stdio)', current.command || '', 'text'],
+      ['url', 'URL (HTTP)', current.url || '', 'url'],
       ['args', 'Argumentos (um por linha)', (current.args || []).join('\n'), 'textarea'],
       ['toolTimeout', 'Timeout das ferramentas (segundos)', String(current.toolTimeout || 30), 'number']
     ];
@@ -346,8 +339,11 @@
     for (const [key, label, value, kind] of fields) {
       const row = el('label', 'integration-field');
       row.appendChild(el('span', '', label));
-      const input = el(kind === 'textarea' ? 'textarea' : 'input');
-      if (kind !== 'textarea') input.type = kind;
+      const input = el(kind === 'textarea' ? 'textarea' : kind === 'select' ? 'select' : 'input');
+      if (kind === 'select') for (const option of ['stdio', 'streamableHttp', 'sse']) {
+        const item = el('option', '', option); item.value = option; input.appendChild(item);
+      }
+      if (kind !== 'textarea' && kind !== 'select') input.type = kind;
       input.value = value;
       if (key === 'name' && existingName) input.disabled = true;
       row.appendChild(input);
@@ -370,12 +366,13 @@
         status.textContent = 'Use 1–64 caracteres: letras, números, ponto, _ ou -.';
         return;
       }
-      const endpoint = inputs.command.value.trim();
-      if (!endpoint) { status.textContent = 'Informe o comando.'; return; }
+      const type = inputs.type.value;
+      const endpoint = type === 'stdio' ? inputs.command.value.trim() : inputs.url.value.trim();
+      if (!endpoint) { status.textContent = type === 'stdio' ? 'Informe o comando.' : 'Informe a URL.'; return; }
       const timeout = Number(inputs.toolTimeout.value);
       if (!Number.isInteger(timeout) || timeout < 1) { status.textContent = 'Timeout inválido.'; return; }
-      const server = { ...current, type: 'stdio', command: endpoint,
-        args: inputs.args.value.split('\n').map(x => x.trim()).filter(Boolean),
+      const server = { ...current, type, command: type === 'stdio' ? endpoint : '', url: type === 'stdio' ? '' : endpoint,
+        args: type === 'stdio' ? inputs.args.value.split('\n').map(x => x.trim()).filter(Boolean) : [],
         toolTimeout: timeout };
       save.disabled = true;
       status.textContent = 'Salvando…';

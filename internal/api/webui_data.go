@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,10 +14,13 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
+	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
+	"github.com/adrianolimagarcia/nanobot-go/internal/mcp"
+	"github.com/adrianolimagarcia/nanobot-go/internal/mcpruntime"
 	"github.com/adrianolimagarcia/nanobot-go/internal/skills"
+	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
 )
 
 const (
@@ -52,6 +56,7 @@ type webUISessionSummary struct {
 func (s *Server) registerWebUIData(mux *http.ServeMux) {
 	mux.HandleFunc("/api/webui/channels/catalog", s.handleWebUIChannelCatalog)
 	mux.HandleFunc("/api/webui/channels/telegram/validate", s.handleWebUITelegramValidate)
+	mux.HandleFunc("/api/webui/mcp/test", s.handleWebUIMCPTest)
 	mux.HandleFunc("/api/webui/state", s.handleWebUIState)
 	mux.HandleFunc("/api/webui/session", s.handleWebUISession)
 	mux.HandleFunc("/api/webui/session/action", s.handleWebUISessionAction)
@@ -72,6 +77,49 @@ func (s *Server) registerWebUIData(mux *http.ServeMux) {
 	mux.HandleFunc("/api/webui/trigger/fire", s.handleWebUITriggerFire)
 }
 
+func (s *Server) handleWebUIMCPTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	cfg := s.cfg
+	if saved, err := config.Load(configTargetPath(s.cfg)); err == nil {
+		cfg = saved
+	}
+	server, ok := cfg.Tools.MCPServers[name]
+	if name == "" || !ok {
+		http.Error(w, "MCP server not found", http.StatusNotFound)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	registry := tools.NewRegistry()
+	kind := ""
+	if server.Type != nil {
+		kind = strings.ToLower(strings.TrimSpace(*server.Type))
+	}
+	if kind == "stdio" || (kind == "" && strings.TrimSpace(server.URL) == "") {
+		manager, err := mcp.RegisterConfigured(ctx, registry, map[string]config.MCPServerConfig{name: server})
+		if manager != nil {
+			defer manager.Close()
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+	} else {
+		manager := mcpruntime.NewManager(mcpruntime.Options{SSRFWhitelist: cfg.Tools.SSRFWhitelist})
+		defer manager.Close()
+		if err := manager.LoadAndRegister(ctx, registry, map[string]config.MCPServerConfig{name: server}); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+	}
+	writeWebUIJSON(w, map[string]any{"name": name, "status": "connected", "tools": registry.Names()})
+}
+
 func (s *Server) handleWebUITelegramValidate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -79,7 +127,9 @@ func (s *Server) handleWebUITelegramValidate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	cfg := s.cfg
-	if saved, err := config.Load(configTargetPath(s.cfg)); err == nil { cfg = saved }
+	if saved, err := config.Load(configTargetPath(s.cfg)); err == nil {
+		cfg = saved
+	}
 	values, _ := cfg.Channels.Extra["telegram"].(map[string]any)
 	w.Header().Set("Cache-Control", "no-store")
 	writeWebUIJSON(w, telegram.ValidateChannel(values, telegram.ValidationContext{AllowLocalServiceAccess: cfg.Tools.WebUIAllowLocalServiceAccess}))

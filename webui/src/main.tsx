@@ -1,8 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Activity, Archive, Bot, Cable, ChevronLeft, Clock3, KeyRound, Layers3, MessageSquare, Plus, Search, Settings2, Sparkles, Wrench, type LucideIcon } from 'lucide-react';
-import { patchConfig, request, sessionAction, setToken, streamTurn, token, type CatalogChannel, type Session, type State } from './api';
+import { patchConfig, request, sessionAction, setToken, streamTurn, token, uploadAttachment, type CatalogChannel, type Session, type State } from './api';
 import './style.css';
+
+document.documentElement.dataset.theme = localStorage.getItem('haosbot-next-theme') || 'light';
 
 type View = 'chat' | 'apps' | 'skills' | 'automations' | 'channels' | 'models' | 'memory' | 'files' | 'runtime' | 'settings';
 type Message = { role: string; content: string };
@@ -26,7 +28,9 @@ function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState('');
   const [query, setQuery] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
   const [activity, setActivity] = useState<string[]>([]);
+  const [attachments, setAttachments] = useState<Array<{ name: string; path: string }>>([]);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState('');
   const [showAuth, setShowAuth] = useState(false);
@@ -45,23 +49,23 @@ function App() {
       const data = await request<{ messages: Array<{ role: string; content: string | { text?: string } }> }>('/api/webui/session?key=' + encodeURIComponent(session.key));
       setMessages(data.messages.map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : m.content?.text || '' })));
       setSelected(session.key); sessionStorage.setItem('haosbot_session_id', session.session_id);
-      setView('chat'); setActivity([]); setError('');
+      setView('chat'); setActivity([]); setAttachments([]); setError('');
     } catch (cause) { setError(String(cause)); }
   }
   function newChat() {
     controller.current?.abort();
     const id = crypto.randomUUID();
     sessionStorage.setItem('haosbot_session_id', id);
-    setSelected(''); setMessages([]); setActivity([]); setView('chat'); setError('');
+    setSelected(''); setMessages([]); setActivity([]); setAttachments([]); setView('chat'); setError('');
   }
   async function send() {
-    const text = draft.trim(); if (!text || working) return;
+    const text = draft.trim() || (attachments.length ? 'Analise os arquivos anexados.' : ''); if (!text || working) return;
     setDraft(''); setWorking(true); setError(''); setActivity([]);
     setMessages(previous => [...previous, { role: 'user', content: text }, { role: 'assistant', content: '' }]);
     const abort = new AbortController(); controller.current = abort;
     let partial = '';
     try {
-      await streamTurn(sessionId, text, event => {
+      await streamTurn(sessionId, text, attachments.map(item => item.path), event => {
         if (event.type === 'text_delta') {
           partial += event.delta || '';
           setMessages(previous => previous.map((message, index) => index === previous.length - 1 ? { ...message, content: partial } : message));
@@ -71,16 +75,23 @@ function App() {
           setMessages(previous => previous.map((message, index) => index === previous.length - 1 ? { ...message, content: event.content || partial } : message));
         } else if (event.type === 'error') throw new Error(event.error || 'Falha no turno');
       }, abort.signal);
-      await refresh();
+      setAttachments([]); await refresh();
     } catch (cause) { if (!abort.signal.aborted) setError(String(cause)); }
     finally { setWorking(false); controller.current = null; }
+  }
+  async function addFiles(files: FileList | null) {
+    if (!files?.length) return;
+    for (const file of Array.from(files)) {
+      try { const item = await uploadAttachment(sessionId, file); setAttachments(previous => [...previous, item]); }
+      catch (cause) { setError(String(cause)); }
+    }
   }
   async function act(session: Session, action: string, value?: unknown) {
     try { await sessionAction(session.key, action, value); if (action === 'delete' && session.key === selected) newChat(); await refresh(); }
     catch (cause) { setError(String(cause)); }
   }
   const currentTitle = state?.sessions?.find(s => s.key === selected)?.title || 'Novo chat';
-  const sessions = (state?.sessions || []).filter(s => !s.archived && s.title.toLowerCase().includes(query.toLowerCase()));
+  const sessions = (state?.sessions || []).filter(s => (showArchived || !s.archived) && s.title.toLowerCase().includes(query.toLowerCase()));
   return <div className="shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-icon"><Bot size={21}/></div><div><strong>HAOSBOT</strong><span>Agent workspace</span></div></div>
@@ -88,19 +99,21 @@ function App() {
       <nav aria-label="Navegação principal">{nav.slice(0, 4).map(({ view: item, icon: Icon, label }) => <button key={item} className={view === item ? 'nav-link active' : 'nav-link'} onClick={() => setView(item)}><Icon size={17}/>{label}</button>)}</nav>
       <div className="section-caption">CONVERSAS</div>
       <label className="search"><Search size={15}/><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Buscar conversas" aria-label="Buscar conversas"/></label>
+      <button className="archive-toggle" onClick={() => setShowArchived(!showArchived)}>{showArchived ? 'Ocultar arquivadas' : 'Mostrar arquivadas'}</button>
       <div className="sessions">{sessions.map(session => <div key={session.key} className={selected === session.key && view === 'chat' ? 'session active' : 'session'}>
         <button title={session.title} onClick={() => void openSession(session)}><MessageSquare size={15}/><span>{session.title}</span></button>
-        <button className="session-more" title="Arquivar" aria-label={'Arquivar ' + session.title} onClick={() => void act(session, 'archive', true)}><Archive size={14}/></button>
+        <button className="session-more" title={session.pinned ? 'Desafixar' : 'Fixar'} aria-label={'Fixar ' + session.title} onClick={() => void act(session, 'pin', !session.pinned)}>☆</button>
+        <button className="session-more" title={session.archived ? 'Restaurar' : 'Arquivar'} aria-label={'Arquivar ' + session.title} onClick={() => void act(session, 'archive', !session.archived)}><Archive size={14}/></button>
       </div>)}{!sessions.length && <div className="empty-small">Nenhuma conversa encontrada.</div>}</div>
       <div className="sidebar-bottom">{nav.slice(4).map(({ view: item, icon: Icon, label }) => <button key={item} className={view === item ? 'nav-link active' : 'nav-link'} onClick={() => setView(item)}><Icon size={17}/>{label}</button>)}<a className="old-ui" href="/">WebUI anterior <ChevronLeft size={15}/></a></div>
     </aside>
     <main className="main">
       <header className="topbar"><div className="breadcrumbs">Workspace <span>/</span> <strong>{view === 'chat' ? currentTitle : nav.find(item => item.view === view)?.label}</strong></div>
-        <div className="top-actions"><span className="model-tag">{state?.config?.agents?.defaults?.model || 'Modelo não selecionado'}</span><button title="Autenticação" aria-label="Autenticação" onClick={() => setShowAuth(!showAuth)}><KeyRound size={17}/></button><button title="Atualizar" aria-label="Atualizar" onClick={() => void refresh()}><Activity size={17}/></button></div></header>
+        <div className="top-actions"><span className="model-tag">{state?.config?.agents?.defaults?.model || 'Modelo não selecionado'}</span>{view === 'chat' && selected && <><button title="Renomear conversa" onClick={() => { const value = window.prompt('Novo título', currentTitle); const session = state?.sessions.find(s => s.key === selected); if (value?.trim() && session) void act(session, 'rename', value.trim()); }}>Renomear</button><button title="Excluir conversa" onClick={() => { const session = state?.sessions.find(s => s.key === selected); if (session && window.confirm('Excluir esta conversa?')) void act(session, 'delete'); }}>Excluir</button></>}<button title="Autenticação" aria-label="Autenticação" onClick={() => setShowAuth(!showAuth)}><KeyRound size={17}/></button><button title="Atualizar" aria-label="Atualizar" onClick={() => void refresh()}><Activity size={17}/></button></div></header>
       {showAuth && <div className="auth-strip"><label>Token de API <input type="password" defaultValue={token()} placeholder="Token para esta sessão" onChange={event => setToken(event.target.value)}/></label><button onClick={() => { setShowAuth(false); void refresh(); }}>Aplicar</button></div>}
       {error && <div role="alert" className="error">{error}<button onClick={() => setError('')}>Fechar</button></div>}
       {view === 'chat' ? <div className="chat-layout"><div className="chat-body"><div className="conversation">{messages.length ? messages.map((message, index) => <div key={index} className={'message ' + message.role}><div className="avatar">{message.role === 'user' ? 'U' : <Bot size={17}/>}</div><div><small>{message.role === 'user' ? 'Você' : 'HAOSBOT'}</small><p>{message.content || (working && index === messages.length - 1 ? 'Pensando…' : '')}</p></div></div>) : <div className="welcome"><div className="hero-icon"><Bot size={32}/></div><h1>Como posso ajudar?</h1><p>Converse com o agente, acompanhe ferramentas e explore o seu workspace.</p><div className="welcome-links"><button onClick={() => setView('skills')}><Sparkles size={17}/> Explorar skills</button><button onClick={() => setView('memory')}><Layers3 size={17}/> Ver memória</button></div></div>}</div></div>
-        <div className="composer-wrap"><div className="composer"><textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="Envie uma mensagem para o HAOSBOT…" aria-label="Mensagem"/><div className="composer-footer"><span>Enter para enviar · Shift+Enter para nova linha</span>{working ? <button onClick={() => controller.current?.abort()}>Parar</button> : <button className="send" onClick={() => void send()} disabled={!draft.trim()}>Enviar ↑</button>}</div></div></div>
+        <div className="composer-wrap"><div className="composer"><textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="Envie uma mensagem para o HAOSBOT…" aria-label="Mensagem"/>{attachments.length > 0 && <div className="attachment-list">{attachments.map(item => <span key={item.path}>{item.name}<button title={'Remover ' + item.name} onClick={() => setAttachments(previous => previous.filter(other => other.path !== item.path))}>×</button></span>)}</div>}<div className="composer-footer"><label className="attach-button">+ Arquivo<input type="file" multiple hidden onChange={event => { void addFiles(event.target.files); event.target.value = ''; }}/></label><span>Enter para enviar · Shift+Enter para nova linha</span>{working ? <button onClick={() => controller.current?.abort()}>Parar</button> : <button className="send" onClick={() => void send()} disabled={!draft.trim() && !attachments.length}>Enviar ↑</button>}</div></div></div>
         {activity.length > 0 && <aside className="activity-panel"><h3>Atividade</h3>{activity.map((row, index) => <p key={index}>{row}</p>)}</aside>}
       </div> : <Workspace view={view} state={state} refresh={refresh} report={setError}/>}
     </main>
@@ -165,15 +178,24 @@ function Channels({ state, refresh, report }: { state: State; refresh: () => Pro
 function Apps({ state, refresh, report }: { state: State; refresh: () => Promise<void>; report: (error: string) => void }) {
   const mcp = state.config.tools?.mcpServers || {};
   const [name, setName] = useState(''); const [command, setCommand] = useState(''); const [args, setArgs] = useState(''); const [status, setStatus] = useState('');
+  const [type, setType] = useState('stdio'); const [url, setURL] = useState('');
+  const [headerName, setHeaderName] = useState('Authorization'); const [headerValue, setHeaderValue] = useState('');
   async function save() {
-    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(name) || !command.trim()) { setStatus('Informe nome válido e comando.'); return; }
-    try { await patchConfig({ tools: { mcpServers: { [name]: { ...mcp[name], type: 'stdio', command: command.trim(), args: args.split('\n').map(x => x.trim()).filter(Boolean) } } } }); setStatus('Salvo · reinício necessário'); await refresh(); }
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(name) || !(type === 'stdio' ? command.trim() : url.trim())) { setStatus('Informe nome válido e endpoint.'); return; }
+    const headers = { ...(mcp[name]?.headers || {}) };
+    if (type !== 'stdio' && headerName.trim() && headerValue.trim()) headers[headerName.trim()] = headerValue.trim();
+    try { await patchConfig({ tools: { mcpServers: { [name]: { ...mcp[name], type, command: type === 'stdio' ? command.trim() : '', url: type === 'stdio' ? '' : url.trim(), args: type === 'stdio' ? args.split('\n').map(x => x.trim()).filter(Boolean) : [], headers } } } }); setStatus('Salvo · reinício necessário'); setHeaderValue(''); await refresh(); }
     catch (error) { report(String(error)); }
+  }
+  async function testServer() {
+    try { const data = await request<{ tools: string[] }>('/api/webui/mcp/test?name=' + encodeURIComponent(name), { method: 'POST' });
+      setStatus(`Conectado · ${(data.tools || []).length} ferramentas: ${(data.tools || []).join(', ')}`); }
+    catch (error) { setStatus(String(error)); }
   }
   return <Panel title="Apps & MCP" subtitle="Ferramentas de execução e servidores MCP disponíveis para o agente.">
     <div className="stats-grid">{Object.entries(state.capabilities).map(([key, enabled]) => <Stat key={key} title={key.replaceAll('_', ' ')} value={enabled ? 'Ativo' : 'Desativado'}/>)}</div>
-    <h2>Servidores MCP</h2><div className="tile-grid">{Object.entries(mcp).map(([key, cfg]) => <button className="tile" key={key} onClick={() => { setName(key); setCommand((cfg as any).command || ''); setArgs(((cfg as any).args || []).join('\n')); }}><Wrench size={19}/><strong>{key}</strong><span>{(cfg as any).command || (cfg as any).url || 'Sem endpoint'}</span><small>{(cfg as any).type || 'stdio'}</small></button>)}{!Object.keys(mcp).length && <p className="muted">Nenhum servidor configurado.</p>}</div>
-    <div className="settings-card"><h2>Configurar servidor stdio</h2><p>O runtime registra ferramentas MCP via stdio. Outros transportes exigem suporte no backend.</p><div className="form-grid"><label>Nome<input value={name} onChange={event => setName(event.target.value)}/></label><label>Comando<input value={command} onChange={event => setCommand(event.target.value)}/></label><label className="wide">Argumentos, um por linha<textarea value={args} onChange={event => setArgs(event.target.value)}/></label></div><div className="form-actions"><button className="primary" onClick={() => void save()}>Salvar servidor</button><span>{status}</span></div></div>
+    <h2>Servidores MCP</h2><div className="tile-grid">{Object.entries(mcp).map(([key, cfg]) => <button className="tile" key={key} onClick={() => { setName(key); setCommand((cfg as any).command || ''); setURL((cfg as any).url || ''); setType((cfg as any).type || ((cfg as any).url ? 'streamableHttp' : 'stdio')); setArgs(((cfg as any).args || []).join('\n')); setHeaderName('Authorization'); setHeaderValue(''); }}><Wrench size={19}/><strong>{key}</strong><span>{(cfg as any).command || (cfg as any).url || 'Sem endpoint'}</span><small>{(cfg as any).type || 'stdio'}</small></button>)}{!Object.keys(mcp).length && <p className="muted">Nenhum servidor configurado.</p>}</div>
+    <div className="settings-card"><h2>Configurar servidor MCP</h2><div className="form-grid"><label>Nome<input value={name} onChange={event => setName(event.target.value)}/></label><label>Transporte<select value={type} onChange={event => setType(event.target.value)}><option value="stdio">stdio</option><option value="streamableHttp">Streamable HTTP</option><option value="sse">SSE</option></select></label>{type === 'stdio' ? <><label>Comando<input value={command} onChange={event => setCommand(event.target.value)}/></label><label className="wide">Argumentos, um por linha<textarea value={args} onChange={event => setArgs(event.target.value)}/></label></> : <><label className="wide">URL<input value={url} onChange={event => setURL(event.target.value)}/></label><label>Header de autenticação<input value={headerName} onChange={event => setHeaderName(event.target.value)}/></label><label>Valor secreto<input type="password" value={headerValue} placeholder="Vazio para manter configuração atual" onChange={event => setHeaderValue(event.target.value)}/></label><p className="muted wide">Use headers de autenticação estáticos. OAuth ainda não está disponível neste runtime.</p></>}</div><div className="form-actions"><button className="primary" onClick={() => void save()}>Salvar servidor</button><button disabled={!mcp[name]} onClick={() => void testServer()}>Testar conexão</button><span>{status}</span></div></div>
     <p className="muted">CLI Apps: {state.config.tools?.cliApps?.enable === false ? 'desativado' : 'habilitado'} · Marketplace de apps ainda sem API de gerenciamento.</p>
   </Panel>;
 }
@@ -208,10 +230,13 @@ function Skills({ state, refresh, report }: { state: State; refresh: () => Promi
 
 function Automations({ report }: { report: (error: string) => void }) {
   const [jobs, setJobs] = useState<any[]>([]); const [status, setStatus] = useState('');
+  const [triggers, setTriggers] = useState<any[]>([]); const [tab, setTab] = useState<'jobs' | 'triggers'>('jobs');
   const [name, setName] = useState(''); const [message, setMessage] = useState(''); const [seconds, setSeconds] = useState('3600');
   const [selected, setSelected] = useState<any>(null); const [history, setHistory] = useState<any[]>([]);
   const reload = async () => { const data = await request<{ jobs: any[] }>('/api/webui/automations'); setJobs(data.jobs || []); };
   useEffect(() => { reload().catch(error => { setStatus('Scheduler indisponível'); report(String(error)); }); }, []);
+  async function reloadTriggers() { const data = await request<{ triggers: any[] }>('/api/webui/triggers'); setTriggers(data.triggers || []); }
+  useEffect(() => { if (tab === 'triggers') reloadTriggers().catch(error => report(String(error))); }, [tab]);
   async function create() {
     const interval = Number(seconds);
     if (!name.trim() || !message.trim() || !Number.isInteger(interval) || interval < 1) { setStatus('Informe nome, instrução e intervalo válido.'); return; }
@@ -231,24 +256,49 @@ function Automations({ report }: { report: (error: string) => void }) {
       await reload(); setSelected(null); setStatus(verb === 'run' ? 'Execução solicitada' : 'Automação removida'); }
     catch (error) { setStatus(String(error)); }
   }
-  return <Panel title="Automações" subtitle="Agende turnos e acompanhe execuções persistidas."><div className="stats-grid"><Stat title="Total" value={jobs.length}/><Stat title="Ativas" value={jobs.filter(job => job.enabled).length}/><Stat title="Executando" value={jobs.filter(job => job.state?.pending).length}/></div><h2>Tarefas</h2><div className="tile-grid">{jobs.map(job => <button className="tile" key={job.id} onClick={() => void select(job)}><Clock3 size={19}/><strong>{job.name || job.id}</strong><span>{job.schedule?.expr || (job.schedule?.everyMs ? `A cada ${job.schedule.everyMs / 1000} s` : job.schedule?.kind) || 'Agendamento'}</span><small>{job.state?.pending ? 'Executando' : job.enabled ? 'Ativa' : 'Pausada'}</small></button>)}{!jobs.length && <p className="muted">{status || 'Nenhuma automação cadastrada.'}</p>}</div>
+  async function createTrigger() {
+    const sessionId = sessionStorage.getItem('haosbot_session_id') || crypto.randomUUID();
+    try { await request('/api/webui/triggers', { method: 'POST', body: JSON.stringify({ name, session_key: `webui:${sessionId}` }) }); await reloadTriggers(); setName(''); setStatus('Trigger criado'); }
+    catch (error) { setStatus(String(error)); }
+  }
+  async function updateTrigger(trigger: any, action: 'fire' | 'toggle' | 'delete') {
+    try {
+      if (action === 'fire') { const content = window.prompt('Conteúdo para disparar este trigger:'); if (content == null) return; await request('/api/webui/trigger/fire?id=' + encodeURIComponent(trigger.id), { method: 'POST', body: JSON.stringify({ content }) }); }
+      else if (action === 'toggle') await request('/api/webui/trigger?id=' + encodeURIComponent(trigger.id), { method: 'PATCH', body: JSON.stringify({ enabled: !trigger.enabled }) });
+      else await request('/api/webui/trigger?id=' + encodeURIComponent(trigger.id), { method: 'DELETE' });
+      await reloadTriggers();
+    } catch (error) { setStatus(String(error)); }
+  }
+  return <Panel title="Automações" subtitle="Agende turnos e gerencie triggers locais."><div className="form-actions"><button className={tab === 'jobs' ? 'primary' : ''} onClick={() => setTab('jobs')}>Jobs</button><button className={tab === 'triggers' ? 'primary' : ''} onClick={() => setTab('triggers')}>Triggers</button><span>{status}</span></div>{tab === 'jobs' && <><div className="stats-grid"><Stat title="Total" value={jobs.length}/><Stat title="Ativas" value={jobs.filter(job => job.enabled).length}/><Stat title="Executando" value={jobs.filter(job => job.state?.pending).length}/></div><h2>Tarefas</h2><div className="tile-grid">{jobs.map(job => <button className="tile" key={job.id} onClick={() => void select(job)}><Clock3 size={19}/><strong>{job.name || job.id}</strong><span>{job.schedule?.expr || (job.schedule?.everyMs ? `A cada ${job.schedule.everyMs / 1000} s` : job.schedule?.kind) || 'Agendamento'}</span><small>{job.state?.pending ? 'Executando' : job.enabled ? 'Ativa' : 'Pausada'}</small></button>)}{!jobs.length && <p className="muted">{status || 'Nenhuma automação cadastrada.'}</p>}</div>
     {selected && <div className="settings-card"><h2>{selected.name}</h2><div className="form-actions"><button className="primary" onClick={() => void action(selected, 'run')}>Executar agora</button><button onClick={() => { if (window.confirm('Excluir esta automação?')) void action(selected, 'delete'); }}>Excluir</button><button onClick={() => setSelected(null)}>Fechar</button></div><h2>Histórico</h2>{history.map((run, index) => <p className="muted" key={index}>{run.status} · {run.runId || run.run_id}</p>)}{!history.length && <p className="muted">Nenhuma execução.</p>}</div>}
-    <div className="settings-card"><h2>Nova automação</h2><div className="form-grid"><label>Nome<input value={name} onChange={event => setName(event.target.value)}/></label><label>Intervalo (segundos)<input type="number" min="1" value={seconds} onChange={event => setSeconds(event.target.value)}/></label><label className="wide">Instrução<textarea value={message} onChange={event => setMessage(event.target.value)}/></label></div><div className="form-actions"><button className="primary" onClick={() => void create()}>Criar automação</button><span>{status}</span></div></div></Panel>;
+    <div className="settings-card"><h2>Nova automação</h2><div className="form-grid"><label>Nome<input value={name} onChange={event => setName(event.target.value)}/></label><label>Intervalo (segundos)<input type="number" min="1" value={seconds} onChange={event => setSeconds(event.target.value)}/></label><label className="wide">Instrução<textarea value={message} onChange={event => setMessage(event.target.value)}/></label></div><div className="form-actions"><button className="primary" onClick={() => void create()}>Criar automação</button><span>{status}</span></div></div></>}{tab === 'triggers' && <><div className="tile-grid">{triggers.map(trigger => <article className="tile" key={trigger.id}><Sparkles size={19}/><strong>{trigger.name}</strong><span>{trigger.sessionKey || trigger.session_key}</span><small>{trigger.enabled ? 'Ativo' : 'Desativado'}</small><div className="form-actions"><button onClick={() => void updateTrigger(trigger, 'fire')}>Disparar</button><button onClick={() => void updateTrigger(trigger, 'toggle')}>{trigger.enabled ? 'Pausar' : 'Ativar'}</button><button onClick={() => void updateTrigger(trigger, 'delete')}>Excluir</button></div></article>)}</div><div className="settings-card"><h2>Novo trigger</h2><label>Nome<input value={name} onChange={event => setName(event.target.value)}/></label><div className="form-actions"><button className="primary" onClick={() => void createTrigger()}>Criar trigger</button><span>{status}</span></div></div></>}</Panel>;
 }
 
 function Models({ state, refresh, report }: { state: State; refresh: () => Promise<void>; report: (error: string) => void }) {
   const providers = state.config.providers || {};
   const [query, setQuery] = useState(''); const [selected, setSelected] = useState(''); const [key, setKey] = useState(''); const [base, setBase] = useState(''); const [model, setModel] = useState(state.config.agents?.defaults?.model || ''); const [status, setStatus] = useState('');
+  const defaults = state.config.agents?.defaults || {};
+  const [provider, setProvider] = useState(defaults.provider || '');
+  const [maxTokens, setMaxTokens] = useState(String(defaults.maxTokens || ''));
+  const [contextWindow, setContextWindow] = useState(String(defaults.contextWindowTokens || ''));
+  const [temperature, setTemperature] = useState(String(defaults.temperature ?? ''));
+  const [reasoning, setReasoning] = useState(defaults.reasoningEffort || '');
+  const [fallback, setFallback] = useState<string>((defaults.fallbackModels || []).filter((value: unknown) => typeof value === 'string').join(', '));
   const names = ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'xiaomiMimo', 'ollama', 'lmStudio', 'custom', ...Object.keys(providers).filter(name => !['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'xiaomiMimo', 'ollama', 'lmStudio', 'custom'].includes(name))];
   async function save() {
     try { await patchConfig({ providers: { [selected]: { apiBase: base || null, ...(key ? { apiKey: key } : {}) } } }); setStatus('Salvo · reinício necessário'); setKey(''); await refresh(); }
     catch (error) { report(String(error)); }
   }
   async function saveModel() {
-    try { await patchConfig({ agents: { defaults: { model: model.trim() } } }); setStatus('Modelo salvo · reinício necessário'); await refresh(); }
+    const numeric = [maxTokens, contextWindow, temperature];
+    if (numeric.some(value => value && !Number.isFinite(Number(value)))) { setStatus('Parâmetros numéricos inválidos.'); return; }
+    try { await patchConfig({ agents: { defaults: { model: model.trim(), provider: provider.trim(),
+      ...(maxTokens ? { maxTokens: Number(maxTokens) } : {}), ...(contextWindow ? { contextWindowTokens: Number(contextWindow) } : {}),
+      ...(temperature ? { temperature: Number(temperature) } : {}), reasoningEffort: reasoning || null,
+      fallbackModels: [...fallback.split(',').map(value => value.trim()).filter(Boolean), ...(defaults.fallbackModels || []).filter((value: unknown) => typeof value === 'object' && value !== null)] } } }); setStatus('Modelo salvo · reinício necessário'); await refresh(); }
     catch (error) { report(String(error)); }
   }
-  return <Panel title="Models & Providers" subtitle="Selecione o modelo principal e configure as conexões do runtime."><div className="settings-card"><h2>Modelo principal</h2><div className="form-actions"><input value={model} onChange={event => setModel(event.target.value)} aria-label="Modelo principal"/><button className="primary" onClick={() => void saveModel()}>Salvar modelo</button></div></div><label className="search big"><Search size={16}/><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Buscar provider"/></label><div className="tile-grid">{names.filter(name => name.toLowerCase().includes(query.toLowerCase())).map(name => <button key={name} className="tile" onClick={() => { setSelected(name); setBase(providers[name]?.apiBase || ''); setKey(''); setStatus(''); }}><Bot size={19}/><strong>{name}</strong><span>{providers[name]?.apiBase || 'API ou endpoint local'}</span><small className={providers[name]?.apiKeyConfigured ? 'available' : ''}>{providers[name]?.apiKeyConfigured ? 'Chave configurada' : 'Configurar'}</small></button>)}</div>{selected && <div className="settings-card"><h2>{selected}</h2><div className="form-grid"><label>Chave de API<input type="password" value={key} placeholder={providers[selected]?.apiKeyConfigured ? 'Configurada · deixe vazio para manter' : ''} onChange={event => setKey(event.target.value)}/></label><label>Endpoint<input value={base} onChange={event => setBase(event.target.value)}/></label></div><div className="form-actions"><button className="primary" onClick={() => void save()}>Salvar provider</button><span>{status}</span></div></div>}</Panel>;
+  return <Panel title="Models & Providers" subtitle="Selecione o modelo principal, fallback e parâmetros do runtime."><div className="settings-card"><h2>Modelo principal</h2><div className="form-grid"><label>Modelo<input value={model} onChange={event => setModel(event.target.value)}/></label><label>Provider<input value={provider} onChange={event => setProvider(event.target.value)}/></label><label>Max tokens<input type="number" value={maxTokens} onChange={event => setMaxTokens(event.target.value)}/></label><label>Context window<input type="number" value={contextWindow} onChange={event => setContextWindow(event.target.value)}/></label><label>Temperature<input type="number" step="any" value={temperature} onChange={event => setTemperature(event.target.value)}/></label><label>Reasoning effort<input value={reasoning} onChange={event => setReasoning(event.target.value)}/></label><label className="wide">Fallback models, separados por vírgula<input value={fallback} onChange={event => setFallback(event.target.value)}/></label></div><div className="form-actions"><button className="primary" onClick={() => void saveModel()}>Salvar modelo</button><span>{status}</span></div></div><h2>Providers</h2><label className="search big"><Search size={16}/><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Buscar provider"/></label><div className="tile-grid">{names.filter(name => name.toLowerCase().includes(query.toLowerCase())).map(name => <button key={name} className="tile" onClick={() => { setSelected(name); setBase(providers[name]?.apiBase || ''); setKey(''); setStatus(''); }}><Bot size={19}/><strong>{name}</strong><span>{providers[name]?.apiBase || 'API ou endpoint local'}</span><small className={providers[name]?.apiKeyConfigured ? 'available' : ''}>{providers[name]?.apiKeyConfigured ? 'Chave configurada' : 'Configurar'}</small></button>)}</div>{selected && <div className="settings-card"><h2>{selected}</h2><div className="form-grid"><label>Chave de API<input type="password" value={key} placeholder={providers[selected]?.apiKeyConfigured ? 'Configurada · deixe vazio para manter' : ''} onChange={event => setKey(event.target.value)}/></label><label>Endpoint<input value={base} onChange={event => setBase(event.target.value)}/></label></div><div className="form-actions"><button className="primary" onClick={() => void save()}>Salvar provider</button><span>{status}</span></div></div>}</Panel>;
 }
 
 function Memory({ state, report }: { state: State; report: (error: string) => void }) {
@@ -275,7 +325,21 @@ function Runtime({ state }: { state: State }) {
 }
 
 function Settings({ state }: { state: State }) {
-  return <Panel title="Configurações" subtitle="Informações do ambiente e aparência do control plane."><div className="stats-grid"><Stat title="Workspace" value={state.workspace}/><Stat title="Sessões" value={state.sessions?.length || 0}/><Stat title="Skills" value={state.skills?.length || 0}/></div><div className="settings-card"><h2>Sobre</h2><p>Esta versão usa React e TypeScript compilados no binário Go. A WebUI anterior permanece disponível durante a migração das operações avançadas.</p><a href="/">Abrir WebUI anterior →</a></div></Panel>;
+  const [tab, setTab] = useState('Overview');
+  const [theme, setTheme] = useState(localStorage.getItem('haosbot-next-theme') || 'light');
+  const [advanced, setAdvanced] = useState(JSON.stringify(state.config, null, 2));
+  const [status, setStatus] = useState('');
+  useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('haosbot-next-theme', theme); }, [theme]);
+  return <Panel title="Configurações" subtitle="Aparência, capacidades e ajustes avançados do control plane.">
+    <div className="settings-tabs">{['Overview', 'Appearance', 'Models', 'Capabilities', 'System', 'Advanced', 'About'].map(item => <button key={item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>{item}</button>)}</div>
+    {tab === 'Overview' && <div className="stats-grid"><Stat title="Workspace" value={state.workspace}/><Stat title="Sessões" value={state.sessions?.length || 0}/><Stat title="Skills" value={state.skills?.length || 0}/></div>}
+    {tab === 'Appearance' && <div className="settings-card"><h2>Tema</h2><div className="form-actions"><button className={theme === 'light' ? 'primary' : ''} onClick={() => setTheme('light')}>Claro</button><button className={theme === 'dark' ? 'primary' : ''} onClick={() => setTheme('dark')}>Escuro</button></div></div>}
+    {tab === 'Models' && <div className="settings-card"><h2>Modelo atual</h2><p>{state.config.agents?.defaults?.model || 'Não configurado'} · {state.config.agents?.defaults?.provider || 'Provider automático'}</p><p>Os parâmetros e fallback estão em Models & Providers na navegação.</p></div>}
+    {tab === 'Capabilities' && <div className="stats-grid">{Object.entries(state.capabilities).map(([key, value]) => <Stat key={key} title={key.replaceAll('_', ' ')} value={value ? 'Ativo' : 'Desativado'}/>)}</div>}
+    {tab === 'System' && <div className="settings-card"><h2>Gateway</h2><p>Workspace: {state.workspace}</p><div className="form-actions"><button onClick={async () => { if (!window.confirm('Reiniciar o gateway agora?')) return; try { await request('/api/restart', { method: 'POST' }); setStatus('Reiniciando…'); } catch (error) { setStatus(String(error)); } }}>Reiniciar gateway</button><span>{status}</span></div></div>}
+    {tab === 'Advanced' && <div className="settings-card"><h2>Configuração avançada</h2><p>Campos secretos redigidos são preservados ao salvar.</p><textarea className="memory-text" value={advanced} onChange={event => setAdvanced(event.target.value)}/><div className="form-actions"><button className="primary" onClick={async () => { try { await patchConfig(JSON.parse(advanced)); setStatus('Salvo · reinício necessário'); } catch (error) { setStatus(String(error)); } }}>Salvar JSON</button><span>{status}</span></div></div>}
+    {tab === 'About' && <div className="settings-card"><h2>HAOSBOT</h2><p>Control Plane compilado em React/TypeScript e servido pelo binário Go. Recursos avançados em migração permanecem disponíveis na interface anterior.</p><a href="/">Abrir WebUI anterior →</a></div>}
+  </Panel>;
 }
 
 createRoot(document.getElementById('root')!).render(<App/>);

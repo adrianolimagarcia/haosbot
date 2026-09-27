@@ -17,10 +17,10 @@ export const patchConfig = (patch: object) => request<{ restartRequired: boolean
 export const sessionAction = (key: string, action: string, value?: unknown) => request('/api/webui/session/action', { method: 'POST', body: JSON.stringify({ key, action, value }) });
 
 export type TurnEvent = { type: string; delta?: string; content?: string; error?: string; toolName?: string; contextChars?: number };
-export async function streamTurn(sessionId: string, message: string, onEvent: (event: TurnEvent) => void, signal: AbortSignal) {
+export async function streamTurn(sessionId: string, message: string, media: string[], onEvent: (event: TurnEvent) => void, signal: AbortSignal) {
   const headers = new Headers({ 'Content-Type': 'application/json' });
   if (token()) headers.set('Authorization', `Bearer ${token()}`);
-  const response = await fetch('/api/agent/turn/stream', { method: 'POST', headers, body: JSON.stringify({ sessionId, message }), signal });
+  const response = await fetch('/api/agent/turn/stream', { method: 'POST', headers, body: JSON.stringify({ sessionId, message, media }), signal });
   if (!response.ok || !response.body) throw new Error(`${response.status}: ${(await response.text()).slice(0, 250)}`);
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -33,4 +33,12 @@ export async function streamTurn(sessionId: string, message: string, onEvent: (e
     for (const line of lines) if (line.trim()) onEvent(JSON.parse(line) as TurnEvent);
     if (done) { if (pending.trim()) onEvent(JSON.parse(pending) as TurnEvent); break; }
   }
+}
+
+export async function uploadAttachment(sessionId: string, file: File): Promise<{ name: string; path: string }> {
+  const form = new FormData(); form.append('sessionId', sessionId); form.append('file', file);
+  const headers = new Headers(); if (token()) headers.set('Authorization', `Bearer ${token()}`);
+  const response = await fetch('/api/webui/attachment', { method: 'POST', headers, body: form });
+  if (!response.ok) throw new Error(`${response.status}: ${(await response.text()).slice(0, 250)}`);
+  return response.json();
 }

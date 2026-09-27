@@ -23,6 +23,7 @@ import (
 	cronruntime "github.com/adrianolimagarcia/nanobot-go/internal/cron"
 	"github.com/adrianolimagarcia/nanobot-go/internal/memory"
 	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
+	"github.com/adrianolimagarcia/nanobot-go/internal/mcp"
 	"github.com/adrianolimagarcia/nanobot-go/internal/mcpruntime"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools/cliapps"
 	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
@@ -125,10 +126,32 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 			slog.Warn("CLI Apps enabled but exec capability is disabled; run_cli_app not registered")
 		}
 	}
-	mcpManager := mcpruntime.NewManager(mcpruntime.Options{SSRFWhitelist: append([]string(nil), cfg.Tools.SSRFWhitelist...)})
-	if err := mcpManager.LoadAndRegister(context.Background(), registry, cfg.Tools.MCPServers); err != nil {
-		slog.Warn("some MCP servers were not loaded", "error", err)
+	httpServers := map[string]config.MCPServerConfig{}
+	stdioServers := map[string]config.MCPServerConfig{}
+	for name, server := range cfg.Tools.MCPServers {
+		kind := ""
+		if server.Type != nil { kind = strings.ToLower(strings.TrimSpace(*server.Type)) }
+		if kind == "stdio" || (kind == "" && strings.TrimSpace(server.URL) == "") {
+			stdioServers[name] = server
+		} else {
+			httpServers[name] = server
+		}
 	}
+	mcpManager := mcpruntime.NewManager(mcpruntime.Options{SSRFWhitelist: append([]string(nil), cfg.Tools.SSRFWhitelist...)})
+	if err := mcpManager.LoadAndRegister(context.Background(), registry, httpServers); err != nil {
+		slog.Warn("some HTTP MCP servers were not loaded", "error", err)
+	}
+	stdioManager, err := mcp.RegisterConfigured(context.Background(), registry, stdioServers)
+	if err != nil {
+		slog.Warn("some stdio MCP servers were not loaded", "error", err)
+	}
+	managersTransferred := false
+	defer func() {
+		if !managersTransferred {
+			_ = mcpManager.Close()
+			stdioManager.Close()
+		}
+	}()
 
 	scheduler := cronruntime.NewService(filepath.Join(config.DefaultDataDir(), "cron", workspaceGraphNamespace(workspace), "jobs.json"), nil)
 	if err := scheduler.Load(); err != nil {
@@ -330,6 +353,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		return nil, fmt.Errorf("build agent loop: %w", err)
 	}
 
+	managersTransferred = true
 	return &agentRuntime{
 		cfg:   cfg,
 		bus:   messageBus,
@@ -343,6 +367,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 			_ = triggerSvc.Close(shutdownCtx)
 			_ = scheduler.Close(shutdownCtx)
 			_ = mcpManager.Close()
+			stdioManager.Close()
 			projections.Close(shutdownCtx)
 			memoryMDProjection.Close()
 			cancel()

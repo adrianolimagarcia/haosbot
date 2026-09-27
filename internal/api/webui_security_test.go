@@ -36,6 +36,31 @@ func getWebUI(t *testing.T, h http.Handler, path string) *httptest.ResponseRecor
 	return doRequest(t, h, req)
 }
 
+func TestWebUIChannelCatalogExposesOnlyImplementedSetup(t *testing.T) {
+	h := webUIHandler()
+	rr := getWebUI(t, h, "/api/webui/channels/catalog")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("catalog status = %d: %s", rr.Code, rr.Body.String())
+	}
+	var payload struct {
+		Channels []struct {
+			ID string `json:"id"`
+			Available bool `json:"available"`
+			Setup *struct { Fields []struct { Field string `json:"field"` } `json:"fields"` } `json:"setup"`
+		} `json:"channels"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil { t.Fatal(err) }
+	if len(payload.Channels) < 2 || payload.Channels[0].ID != "telegram" || !payload.Channels[0].Available || payload.Channels[0].Setup == nil {
+		t.Fatalf("telegram setup missing: %+v", payload.Channels)
+	}
+	if len(payload.Channels[0].Setup.Fields) != 19 || payload.Channels[0].Setup.Fields[0].Field != "token" {
+		t.Fatalf("unexpected Telegram fields: %+v", payload.Channels[0].Setup.Fields)
+	}
+	for _, channel := range payload.Channels[1:] {
+		if channel.Available || channel.Setup != nil { t.Errorf("%s advertised without a runtime transport", channel.ID) }
+	}
+}
+
 func TestWebUIIndexIsServed(t *testing.T) {
 	h := webUIHandler()
 	rr := getWebUI(t, h, "/")

@@ -1143,18 +1143,33 @@
     root.append(grid);
     root.appendChild(el('div', 'control-section-title', 'Providers configurados'));
     const providers = state.config?.providers || {};
-    const providerList = el('div', 'control-list');
-    for (const [name, cfg] of Object.entries(providers)) {
-      if (!cfg || typeof cfg !== 'object') continue;
-      const row = el('div', 'control-list-row');
-      row.append(
-        el('div', '', name),
-        el('div', 'control-muted', cfg.baseUrl || cfg.base_url || cfg.apiType || cfg.api_type || '')
-      );
-      providerList.appendChild(row);
-    }
-    if (!providerList.childNodes.length) providerList.appendChild(el('div', 'session-loading', 'Nenhum provider configurado.'));
+    const preferred = ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'xiaomiMimo', 'ollama', 'lmStudio', 'custom'];
+    const filter = el('input', 'integration-search');
+    filter.type = 'search';
+    filter.placeholder = 'Buscar provider…';
+    filter.setAttribute('aria-label', 'Buscar provider');
+    root.appendChild(filter);
+    const providerList = el('div', 'integration-grid');
     root.appendChild(providerList);
+    const drawProviders = () => {
+      providerList.replaceChildren();
+      const names = [...preferred, ...Object.keys(providers).filter(name => !preferred.includes(name))];
+      for (const name of names) {
+        if (!name.toLocaleLowerCase().includes(filter.value.trim().toLocaleLowerCase())) continue;
+        const cfg = providers[name] || {};
+        const configured = cfg.apiKeyConfigured || !!cfg.apiBase;
+        const tile = el('button', 'integration-card');
+        tile.type = 'button';
+        tile.append(el('strong', '', name),
+          el('span', 'control-muted', cfg.apiBase || cfg.apiType || 'Configurar credenciais e endpoint'),
+          el('span', configured ? 'integration-status available' : 'integration-status',
+            configured ? 'Configuração presente · editar' : 'Sem credencial ou endpoint'));
+        tile.addEventListener('click', () => showProviderSetup(root, name, cfg));
+        providerList.appendChild(tile);
+      }
+    };
+    filter.addEventListener('input', drawProviders);
+    drawProviders();
     root.appendChild(configEditor('Providers avançados', 'providers', providers));
     root.appendChild(configEditor('Agent defaults', 'agents', state.config?.agents || {}));
     root.appendChild(el('div', 'control-section-title', 'Long-term Memory · MEMORY.md'));
@@ -1188,6 +1203,56 @@
       } catch (err) { status.textContent = err.message; }
     });
     loadMemory();
+  }
+
+  function showProviderSetup(root, name, current) {
+    editorMounted = true;
+    const form = el('form', 'integration-detail');
+    form.appendChild(el('h3', '', 'Provider · ' + name));
+    form.appendChild(el('p', 'control-muted', 'A configuração é salva no HAOSbot e aplicada após reiniciar o gateway.'));
+    const fields = [
+      ['apiKey', 'Chave de API', '', 'password'],
+      ['apiBase', 'Endpoint (opcional)', current.apiBase || '', 'url'],
+      ['apiType', 'Tipo de API', current.apiType || '', 'text']
+    ];
+    const inputs = {};
+    for (const [key, label, value, kind] of fields) {
+      const row = el('label', 'integration-field');
+      row.appendChild(el('span', '', label));
+      const input = el('input');
+      input.type = kind;
+      input.value = value;
+      if (key === 'apiKey' && current.apiKeyConfigured) input.placeholder = 'Chave configurada · deixe vazio para manter';
+      row.appendChild(input);
+      form.appendChild(row);
+      inputs[key] = input;
+    }
+    const actions = el('div', 'control-toolbar');
+    const save = el('button', 'control-button primary', 'Salvar provider');
+    save.type = 'submit';
+    const back = el('button', 'control-button', 'Voltar');
+    back.type = 'button';
+    back.addEventListener('click', () => renderSettings(root));
+    const status = el('span', 'control-muted', '');
+    actions.append(save, back, status);
+    form.appendChild(actions);
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const patch = { apiBase: inputs.apiBase.value.trim() || null,
+        apiType: inputs.apiType.value.trim() };
+      if (inputs.apiKey.value.trim()) patch.apiKey = inputs.apiKey.value.trim();
+      save.disabled = true;
+      status.textContent = 'Salvando…';
+      try {
+        const result = await api('/api/config', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ providers: { [name]: patch } }) });
+        status.textContent = result?.restartRequired ? 'Salvo · reinício necessário' : 'Salvo';
+        state = await api('/api/webui/state');
+      } catch (err) { status.textContent = errorMessage(err); }
+      finally { save.disabled = false; }
+    });
+    root.replaceChildren(form);
   }
 
   function fmtMs(value) {

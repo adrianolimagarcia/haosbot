@@ -80,6 +80,19 @@ func TestWebUIIndexIsServed(t *testing.T) {
 	}
 }
 
+func TestReactControlPlaneIsEmbedded(t *testing.T) {
+	h := webUIHandler()
+	rr := getWebUI(t, h, "/next/")
+	if rr.Code != http.StatusOK { t.Fatalf("GET /next/ = %d: %s", rr.Code, rr.Body.String()) }
+	if !strings.Contains(rr.Body.String(), "HAOSBOT · Control Plane") { t.Fatal("missing React control plane index") }
+	asset := regexp.MustCompile(`/next/assets/[^" ]+\.js`).FindString(rr.Body.String())
+	if asset == "" { t.Fatal("compiled JS asset missing from index") }
+	js := getWebUI(t, h, asset)
+	if js.Code != http.StatusOK || !strings.Contains(js.Header().Get("Content-Type"), "javascript") {
+		t.Fatalf("compiled asset: status=%d type=%q", js.Code, js.Header().Get("Content-Type"))
+	}
+}
+
 func TestWebUIResponseCarriesStrictSecurityHeaders(t *testing.T) {
 	h := webUIHandler()
 	rr := getWebUI(t, h, "/")

@@ -2,8 +2,9 @@ package api
 
 import (
 	"bytes"
-	_ "embed"
 	"encoding/json"
+	"embed"
+	"io/fs"
 	"net/http"
 )
 
@@ -44,6 +45,9 @@ var manifestWebmanifest []byte
 //go:embed webui/sw.js
 var serviceWorkerJS []byte
 
+//go:embed webui/next
+var nextWebUI embed.FS
+
 // webUIContentSecurityPolicy is the policy sent with the browser shell.
 //
 // It is deliberately strict: no 'unsafe-inline', no 'unsafe-eval' and no remote
@@ -71,6 +75,16 @@ const webUIContentSecurityPolicy = "default-src 'none'; " +
 const maxRenderTextBytes = 128 << 10
 
 func (s *Server) registerWebUI(mux *http.ServeMux) {
+	nextRoot, err := fs.Sub(nextWebUI, "webui/next")
+	if err != nil { panic(err) }
+	nextHandler := http.StripPrefix("/next/", http.FileServer(http.FS(nextRoot)))
+	mux.HandleFunc("/next/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet { w.Header().Set("Allow", http.MethodGet); http.Error(w, "Method not allowed", http.StatusMethodNotAllowed); return }
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		nextHandler.ServeHTTP(w, r)
+	})
+	mux.HandleFunc("/next", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/next/", http.StatusMovedPermanently) })
 	// Stateful browser traffic has an explicit endpoint instead of sharing the
 	// OpenAI-compatible route's historical fixed webui_session.
 	s.registerAgentTurn(mux)

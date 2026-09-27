@@ -885,10 +885,121 @@
   function renderChannels(root) {
     setPanelTitle('Canais', 'Integrations');
     const channels = state.config?.channels || {};
-    root.append(
-      card('Configuração de canais', 'Edite a configuração redigida. Campos secretos em branco preservam os valores existentes.', 'Reinício para aplicar'),
-      configEditor('channels', 'channels', channels)
-    );
+    const catalog = [
+      ['telegram', 'Telegram', 'Bot API · polling ou webhook', true],
+      ['discord', 'Discord', 'Mensagens e comunidades', false],
+      ['slack', 'Slack', 'Mensagens de equipes', false],
+      ['whatsapp', 'WhatsApp', 'Conversas e grupos', false],
+      ['email', 'Email', 'Caixa de entrada e envio', false],
+      ['matrix', 'Matrix', 'Mensageria federada', false],
+      ['teams', 'Microsoft Teams', 'Colaboração corporativa', false],
+      ['signal', 'Signal', 'Mensagens privadas', false],
+      ['linear', 'Linear', 'Eventos de projetos', false],
+      ['websocket', 'WebSocket', 'Integração customizada', false]
+    ];
+    const toolbar = el('div', 'control-toolbar');
+    const search = el('input', 'integration-search');
+    search.type = 'search';
+    search.placeholder = 'Buscar integração…';
+    search.setAttribute('aria-label', 'Buscar integração');
+    toolbar.appendChild(search);
+    root.appendChild(toolbar);
+    const grid = el('div', 'integration-grid');
+    root.appendChild(grid);
+    const draw = () => {
+      grid.replaceChildren();
+      const query = search.value.trim().toLocaleLowerCase();
+      for (const [id, name, description, supported] of catalog) {
+        if (!(name + ' ' + description).toLocaleLowerCase().includes(query)) continue;
+        const configured = channels[id] && typeof channels[id] === 'object';
+        const tile = el('button', 'integration-card');
+        tile.type = 'button';
+        tile.append(el('strong', '', name), el('span', 'control-muted', description),
+          el('span', supported ? 'integration-status available' : 'integration-status',
+            supported ? (configured ? 'Configurado · abrir' : 'Disponível · configurar') : 'Transporte indisponível'));
+        tile.addEventListener('click', () => supported ? showTelegramSetup(root, channels) :
+          showUnavailableChannel(root, name));
+        grid.appendChild(tile);
+      }
+    };
+    search.addEventListener('input', draw);
+    draw();
+    const advanced = el('details', 'integration-advanced');
+    advanced.appendChild(el('summary', '', 'Configuração avançada dos canais'));
+    advanced.appendChild(configEditor('JSON dos canais', 'channels', channels));
+    root.appendChild(advanced);
+  }
+
+  function showUnavailableChannel(root, name) {
+    const notice = el('div', 'integration-detail');
+    notice.append(el('h3', '', name), el('p', 'control-muted',
+      'Este transporte ainda não está implementado no runtime. O catálogo apresenta a integração planejada; salvar credenciais aqui não ativaria o canal.'));
+    const close = el('button', 'control-button', 'Voltar ao catálogo');
+    close.type = 'button';
+    close.addEventListener('click', () => renderChannels(root));
+    notice.appendChild(close);
+    root.replaceChildren(notice);
+  }
+
+  function showTelegramSetup(root, channels) {
+    editorMounted = true;
+    const current = channels.telegram || {};
+    const panel = el('form', 'integration-detail');
+    panel.append(el('h3', '', 'Configurar Telegram'), el('p', 'control-muted',
+      'Crie um bot no BotFather. As alterações são aplicadas após reiniciar o HAOSbot.'));
+    const fields = [
+      ['token', 'Token do bot', 'password'],
+      ['mode', 'Modo', 'select', ['polling', 'webhook']],
+      ['allowFrom', 'Usuários permitidos (separados por vírgula)', 'list'],
+      ['proxy', 'Proxy (opcional)', 'text'],
+      ['webhookUrl', 'URL do webhook', 'url']
+    ];
+    const inputs = {};
+    for (const [key, label, kind, options] of fields) {
+      const row = el('label', 'integration-field');
+      row.appendChild(el('span', '', label));
+      const input = el(kind === 'select' ? 'select' : 'input');
+      if (kind === 'select') {
+        for (const option of options) {
+          const item = el('option', '', option);
+          item.value = option;
+          input.appendChild(item);
+        }
+      } else input.type = kind === 'list' ? 'text' : kind;
+      input.value = key === 'allowFrom' ? (Array.isArray(current[key]) ? current[key].join(', ') : '') :
+        (key === 'token' ? '' : (current[key] || (key === 'mode' ? 'polling' : '')));
+      if (key === 'token') input.placeholder = current.tokenConfigured ? 'Token configurado · deixe vazio para manter' : 'Cole o token do BotFather';
+      row.appendChild(input);
+      panel.appendChild(row);
+      inputs[key] = input;
+    }
+    const status = el('span', 'control-muted', '');
+    const actions = el('div', 'control-toolbar');
+    const save = el('button', 'control-button primary', 'Salvar configuração');
+    save.type = 'submit';
+    const back = el('button', 'control-button', 'Voltar');
+    back.type = 'button';
+    back.addEventListener('click', () => renderChannels(root));
+    actions.append(save, back, status);
+    panel.appendChild(actions);
+    panel.addEventListener('submit', async event => {
+      event.preventDefault();
+      save.disabled = true;
+      status.textContent = 'Salvando…';
+      try {
+        const telegram = { mode: inputs.mode.value,
+          allowFrom: inputs.allowFrom.value.split(',').map(x => x.trim()).filter(Boolean),
+          proxy: inputs.proxy.value.trim(), webhookUrl: inputs.webhookUrl.value.trim() };
+        if (inputs.token.value.trim()) telegram.token = inputs.token.value.trim();
+        const result = await api('/api/config', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channels: { telegram } }) });
+        status.textContent = result?.restartRequired ? 'Salvo · reinício necessário' : 'Salvo';
+        state = await api('/api/webui/state');
+      } catch (err) { status.textContent = errorMessage(err); }
+      finally { save.disabled = false; }
+    });
+    root.replaceChildren(panel);
   }
 
   function renderRuntime(root) {

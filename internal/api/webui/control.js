@@ -882,21 +882,16 @@
     }
   }
 
-  function renderChannels(root) {
+  async function renderChannels(root) {
     setPanelTitle('Canais', 'Integrations');
     const channels = state.config?.channels || {};
-    const catalog = [
-      ['telegram', 'Telegram', 'Bot API · polling ou webhook', true],
-      ['discord', 'Discord', 'Mensagens e comunidades', false],
-      ['slack', 'Slack', 'Mensagens de equipes', false],
-      ['whatsapp', 'WhatsApp', 'Conversas e grupos', false],
-      ['email', 'Email', 'Caixa de entrada e envio', false],
-      ['matrix', 'Matrix', 'Mensageria federada', false],
-      ['teams', 'Microsoft Teams', 'Colaboração corporativa', false],
-      ['signal', 'Signal', 'Mensagens privadas', false],
-      ['linear', 'Linear', 'Eventos de projetos', false],
-      ['websocket', 'WebSocket', 'Integração customizada', false]
-    ];
+    let catalog;
+    try {
+      catalog = (await api('/api/webui/channels/catalog')).channels;
+    } catch (err) {
+      root.replaceChildren(el('div', 'session-loading', 'Não foi possível carregar o catálogo: ' + errorMessage(err)));
+      return;
+    }
     const toolbar = el('div', 'control-toolbar');
     const search = el('input', 'integration-search');
     search.type = 'search';
@@ -909,7 +904,7 @@
     const draw = () => {
       grid.replaceChildren();
       const query = search.value.trim().toLocaleLowerCase();
-      for (const [id, name, description, supported] of catalog) {
+      for (const { id, name, description, available: supported, setup } of catalog) {
         if (!(name + ' ' + description).toLocaleLowerCase().includes(query)) continue;
         const configured = channels[id] && typeof channels[id] === 'object';
         const tile = el('button', 'integration-card');
@@ -917,7 +912,7 @@
         tile.append(el('strong', '', name), el('span', 'control-muted', description),
           el('span', supported ? 'integration-status available' : 'integration-status',
             supported ? (configured ? 'Configurado · abrir' : 'Disponível · configurar') : 'Transporte indisponível'));
-        tile.addEventListener('click', () => supported ? showTelegramSetup(root, channels) :
+        tile.addEventListener('click', () => supported ? showTelegramSetup(root, channels, setup) :
           showUnavailableChannel(root, name));
         grid.appendChild(tile);
       }
@@ -941,21 +936,19 @@
     root.replaceChildren(notice);
   }
 
-  function showTelegramSetup(root, channels) {
+  function showTelegramSetup(root, channels, setup) {
     editorMounted = true;
     const current = channels.telegram || {};
     const panel = el('form', 'integration-detail');
     panel.append(el('h3', '', 'Configurar Telegram'), el('p', 'control-muted',
       'Crie um bot no BotFather. As alterações são aplicadas após reiniciar o HAOSbot.'));
-    const fields = [
-      ['token', 'Token do bot', 'password'],
-      ['mode', 'Modo', 'select', ['polling', 'webhook']],
-      ['allowFrom', 'Usuários permitidos (separados por vírgula)', 'list'],
-      ['proxy', 'Proxy (opcional)', 'text'],
-      ['webhookUrl', 'URL do webhook', 'url']
-    ];
+    const labels = { token: 'Token do bot', mode: 'Modo', allowFrom: 'Usuários permitidos (separados por vírgula)',
+      proxy: 'Proxy (opcional)', webhookUrl: 'URL do webhook' };
+    const fields = (setup?.fields || []).map(field => [field.field, labels[field.field] || field.field,
+      field.kind === 'secret' ? 'password' : field.kind === 'enum' || field.kind === 'bool' ? 'select' : field.kind,
+      field.kind === 'bool' ? ['true', 'false'] : field.choices, field.default_value]);
     const inputs = {};
-    for (const [key, label, kind, options] of fields) {
+    for (const [key, label, kind, options, defaultValue] of fields) {
       const row = el('label', 'integration-field');
       row.appendChild(el('span', '', label));
       const input = el(kind === 'select' ? 'select' : 'input');
@@ -965,9 +958,12 @@
           item.value = option;
           input.appendChild(item);
         }
-      } else input.type = kind === 'list' ? 'text' : kind;
+      } else input.type = kind === 'int' || kind === 'float' ? 'number' : 'text';
+      if (kind === 'float') input.step = 'any';
+      if (kind === 'password') input.type = 'password';
       input.value = key === 'allowFrom' ? (Array.isArray(current[key]) ? current[key].join(', ') : '') :
-        (key === 'token' ? '' : (current[key] || (key === 'mode' ? 'polling' : '')));
+        (kind === 'list' ? (Array.isArray(current[key]) ? current[key].join(', ') : '') :
+          (kind === 'password' ? '' : (current[key] ?? defaultValue ?? '')));
       if (key === 'token') input.placeholder = current.tokenConfigured ? 'Token configurado · deixe vazio para manter' : 'Cole o token do BotFather';
       row.appendChild(input);
       panel.appendChild(row);
@@ -987,10 +983,15 @@
       save.disabled = true;
       status.textContent = 'Salvando…';
       try {
-        const telegram = { mode: inputs.mode.value,
-          allowFrom: inputs.allowFrom.value.split(',').map(x => x.trim()).filter(Boolean),
-          proxy: inputs.proxy.value.trim(), webhookUrl: inputs.webhookUrl.value.trim() };
-        if (inputs.token.value.trim()) telegram.token = inputs.token.value.trim();
+        const telegram = {};
+        for (const [key, , kind] of fields) {
+          const value = inputs[key].value.trim();
+          if (kind === 'password' && !value) continue;
+          if ((kind === 'int' || kind === 'float') && !value) continue;
+          telegram[key] = kind === 'list' ? value.split(',').map(x => x.trim()).filter(Boolean) :
+            kind === 'int' || kind === 'float' ? Number(value) :
+              setup.fields.find(field => field.field === key)?.kind === 'bool' ? value === 'true' : value;
+        }
         const result = await api('/api/config', { method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ channels: { telegram } }) });

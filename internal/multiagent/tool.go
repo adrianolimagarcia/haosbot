@@ -36,12 +36,12 @@ func (t *Tool) Execute(ctx context.Context, raw json.RawMessage) (tools.Result, 
 		return tools.Errf("multi-agent runtime is unavailable"), nil
 	}
 	var req struct {
-		Action         string \`json:"action"\`
-		Agent          string \`json:"agent"\`
-		Prompt         string \`json:"prompt"\`
-		TaskID         string \`json:"task_id"\`
-		Wait           *bool  \`json:"wait"\`
-		TimeoutSeconds int    \`json:"timeout_seconds"\`
+		Action         string `json:"action"`
+		Agent          string `json:"agent"`
+		Prompt         string `json:"prompt"`
+		TaskID         string `json:"task_id"`
+		Wait           *bool  `json:"wait"`
+		TimeoutSeconds int    `json:"timeout_seconds"`
 	}
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return tools.Errf("invalid agents arguments: %v", err), nil

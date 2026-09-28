@@ -20,7 +20,7 @@ func TestManagerDelegateLifecycleAndLimits(t *testing.T) {
 		return "done:" + profile.ID, nil
 	})
 	var err error
-	manager, err = NewManager([]Profile{{ID: "coder", Enabled: true}}, Limits{
+	manager, err = NewManager([]Profile{{ID: "coder", Enabled: true, DelegateTo: []string{"coder"}}}, Limits{
 		MaxDepth: 2, MaxParallel: 1, MaxChildren: 2, MaxTasks: 16,
 		TaskTimeout: time.Second, Retention: time.Hour,
 	}, exec, "", nil)
@@ -120,7 +120,7 @@ func TestNestedDelegateWaitYieldsSingleWorkerSlot(t *testing.T) {
 	})
 	var err error
 	manager, err = NewManager([]Profile{
-		{ID: "parent", Enabled: true},
+		{ID: "parent", Enabled: true, DelegateTo: []string{"child"}},
 		{ID: "child", Enabled: true},
 	}, Limits{
 		MaxDepth: 3, MaxParallel: 1, MaxChildren: 2, MaxTasks: 16,
@@ -135,5 +135,19 @@ func TestNestedDelegateWaitYieldsSingleWorkerSlot(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if task.Status != TaskCompleted || !strings.Contains(task.Result, "child-result") {
 		t.Fatalf("nested task = %+v", task)
+	}
+}
+
+
+func TestDelegationRBACRejectsUnlistedTarget(t *testing.T) {
+	manager, err := NewManager([]Profile{
+		{ID: "planner", Enabled: true, DelegateTo: []string{"researcher"}},
+		{ID: "coder", Enabled: true},
+	}, Limits{MaxDepth: 3, MaxParallel: 2, MaxChildren: 2, MaxTasks: 16, TaskTimeout: time.Second, Retention: time.Hour},
+		ExecutorFunc(func(context.Context, Profile, Task) (string, error) { return "ok", nil }), "", nil)
+	if err != nil { t.Fatal(err) }
+	ctx := WithExecutionMeta(context.Background(), ExecutionMeta{TaskID: "p", RootTaskID: "p", TraceID: "t", AgentID: "planner", Depth: 1})
+	if _, err := manager.Delegate(ctx, DelegateRequest{AgentID: "coder", Prompt: "blocked"}); err == nil {
+		t.Fatal("expected delegation RBAC rejection")
 	}
 }

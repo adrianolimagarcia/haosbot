@@ -57,9 +57,18 @@ func (t *Tool) Execute(ctx context.Context, raw json.RawMessage) (tools.Result, 
 		if req.Wait != nil {
 			wait = *req.Wait
 		}
-		task, err := t.manager.Delegate(ctx, DelegateRequest{
-			AgentID: req.Agent, Prompt: req.Prompt, Wait: wait, Timeout: timeout, Detach: !wait,
-		})
+		delegate := func() (*Task, error) {
+			return t.manager.Delegate(ctx, DelegateRequest{
+				AgentID: req.Agent, Prompt: req.Prompt, Wait: wait, Timeout: timeout, Detach: !wait,
+			})
+		}
+		var task *Task
+		var err error
+		if wait {
+			task, err = t.manager.withYieldedSlot(ctx, delegate)
+		} else {
+			task, err = delegate()
+		}
 		if err != nil {
 			if task != nil {
 				return jsonResult(map[string]any{"task": task, "error": err.Error()})
@@ -83,7 +92,9 @@ func (t *Tool) Execute(ctx context.Context, raw json.RawMessage) (tools.Result, 
 			waitCtx, cancel = context.WithTimeout(ctx, timeout)
 			defer cancel()
 		}
-		task, err := t.manager.Wait(waitCtx, strings.TrimSpace(req.TaskID))
+		task, err := t.manager.withYieldedSlot(waitCtx, func() (*Task, error) {
+			return t.manager.Wait(waitCtx, strings.TrimSpace(req.TaskID))
+		})
 		if err != nil {
 			return jsonResult(map[string]any{"task": task, "error": err.Error()})
 		}

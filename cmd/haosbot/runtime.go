@@ -23,6 +23,7 @@ import (
 	cronruntime "github.com/adrianolimagarcia/nanobot-go/internal/cron"
 	"github.com/adrianolimagarcia/nanobot-go/internal/memory"
 	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
+	"github.com/adrianolimagarcia/nanobot-go/internal/multiagent"
 	"github.com/adrianolimagarcia/nanobot-go/internal/mcp"
 	"github.com/adrianolimagarcia/nanobot-go/internal/mcpruntime"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools/cliapps"
@@ -47,6 +48,7 @@ type agentRuntime struct {
 	metrics   *observability.Registry
 	scheduler *cronruntime.Service
 	triggers  *triggersruntime.Service
+	multiAgents *multiagent.Manager
 	closeF    func()
 }
 
@@ -250,6 +252,13 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	if err == nil {
 		err = loop.RecoverPendingGraphMemory()
 	}
+	var multiAgents *multiagent.Manager
+	if err == nil {
+		multiAgents, err = buildMultiAgentManager(cfg, multiAgentRuntimeDeps{
+			bus: messageBus, store: store, tools: registry,
+			workspace: workspace, metrics: metrics,
+		})
+	}
 	if err == nil {
 		err = scheduler.SetExecutor(func(ctx context.Context, job cronruntime.Job, runID string) (cronruntime.RunResult, error) {
 			if job.Payload.Kind == cronruntime.PayloadSystemEvent {
@@ -362,6 +371,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		metrics: metrics,
 		scheduler: scheduler,
 		triggers: triggerSvc,
+		multiAgents: multiAgents,
 		closeF: func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			_ = triggerSvc.Close(shutdownCtx)
@@ -607,6 +617,7 @@ func cmdGateway(args []string) error {
 	apiServer.SetSessionStore(rt.store)
 	apiServer.SetScheduler(rt.scheduler)
 	apiServer.SetTriggerService(rt.triggers)
+	apiServer.SetMultiAgentManager(rt.multiAgents)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

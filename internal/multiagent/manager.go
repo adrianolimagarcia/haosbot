@@ -346,7 +346,8 @@ func (m *Manager) Delegate(ctx context.Context, req DelegateRequest) (*Task, err
 			return waited, err
 		}
 	}
-	return cloneTask(task), nil
+	out, _ := m.Get(task.ID)
+	return out, nil
 }
 
 func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, id string) {
@@ -475,12 +476,15 @@ func (m *Manager) Cancel(id string) (*Task, error) {
 	m.mu.RLock()
 	task := m.tasks[id]
 	cancel := m.cancels[id]
-	m.mu.RUnlock()
 	if task == nil {
+		m.mu.RUnlock()
 		return nil, fmt.Errorf("multiagent: task %q not found", id)
 	}
-	if isTerminal(task.Status) {
-		return cloneTask(task), nil
+	terminal := isTerminal(task.Status)
+	snapshot := cloneTask(task)
+	m.mu.RUnlock()
+	if terminal {
+		return snapshot, nil
 	}
 	if cancel != nil {
 		cancel()

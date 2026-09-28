@@ -8,12 +8,12 @@ func PublicSetup() map[string]any {
 // PublicSetupFor returns the OneBot fields under the requested config key.
 func PublicSetupFor(channelName string) map[string]any {
 	fields := []any{
-		field("websocketUrl", "string", true),
-		field("apiBase", "string", true),
-		field("accessToken", "secret", true),
-		field("selfId", "string", false),
-		field("allowFrom", "list", false),
-		field("allowedGroups", "list", false),
+		field(channelName, "websocketUrl", "string", true),
+		field(channelName, "apiBase", "string", true),
+		field(channelName, "accessToken", "secret", true),
+		field(channelName, "selfId", "string", false),
+		field(channelName, "allowFrom", "list", false),
+		field(channelName, "allowedGroups", "list", false),
 	}
 	return map[string]any{
 		"fields":                 fields,
@@ -23,7 +23,7 @@ func PublicSetupFor(channelName string) map[string]any {
 	}
 }
 
-func field(name, kind string, required bool) map[string]any {
+func field(channelName, name, kind string, required bool) map[string]any {
 	return map[string]any{
 		"field":    name,
 		"key":      "channels." + channelName + "." + name,

@@ -6,6 +6,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/discord"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/email"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/linear"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/matrix"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/mattermost"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/napcat"
@@ -53,6 +54,13 @@ func All() []Manifest {
 			Description: "IMAP inbox + SMTP replies",
 			Build:       adapt(email.New),
 			Setup:       email.PublicSetup(),
+		},
+		{
+			ID:          linear.ChannelName,
+			Name:        "Linear",
+			Description: "Issue comments via signed webhooks + GraphQL",
+			Build:       adapt(linear.New),
+			Setup:       linear.PublicSetup(),
 		},
 		{
 			ID:          matrix.ChannelName,

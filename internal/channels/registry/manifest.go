@@ -5,6 +5,7 @@ package registry
 import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/discord"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/dingtalk"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/email"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/feishu"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/linear"
@@ -51,6 +52,13 @@ func All() []Manifest {
 			Description: "Integração customizada via conexão persistente",
 			Build:       adapt(websocket.New),
 			Setup:       websocket.PublicSetup(),
+		},
+		{
+			ID:          dingtalk.ChannelName,
+			Name:        "DingTalk",
+			Description: "Stream Mode WebSocket + session webhook replies",
+			Build:       adapt(dingtalk.New),
+			Setup:       dingtalk.PublicSetup(),
 		},
 		{
 			ID:          email.ChannelName,

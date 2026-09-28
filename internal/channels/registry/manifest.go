@@ -30,7 +30,9 @@ func All() []Manifest {
 			ID:          telegram.ChannelName,
 			Name:        "Telegram",
 			Description: "Bot API · polling ou webhook",
-			Build:       adapt(telegram.New),
+			Build: func(section channels.Section, publisher channels.InboundPublisher) (channels.Channel, error) {
+				return telegram.New(section, publisher)
+			},
 			Setup:       telegram.LookupSetupSpec(telegram.ChannelName).ToPublicDict(telegram.ChannelName),
 		},
 		{

@@ -3,7 +3,7 @@ package dingtalk
 import (
 	"testing"
 
-	"github.com/adrianolimagaracia/nanobot-go/internal/channels"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels"
 )
 
 func TestConfigDefaults(t *testing.T) {

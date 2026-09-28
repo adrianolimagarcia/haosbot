@@ -28,21 +28,21 @@ func All() []Manifest {
 			ID:          telegram.ChannelName,
 			Name:        "Telegram",
 			Description: "Bot API · polling ou webhook",
-			Build:       telegram.New,
+			Build:       adapt(telegram.New),
 			Setup:       telegram.LookupSetupSpec(telegram.ChannelName).ToPublicDict(telegram.ChannelName),
 		},
 		{
 			ID:          websocket.ChannelName,
 			Name:        "WebSocket",
 			Description: "Integração customizada via conexão persistente",
-			Build:       websocket.New,
+			Build:       adapt(websocket.New),
 			Setup:       websocket.PublicSetup(),
 		},
 		{
 			ID:          matrix.ChannelName,
 			Name:        "Matrix",
 			Description: "Mensageria federada",
-			Build:       matrix.New,
+			Build:       adapt(matrix.New),
 			Setup:       matrix.PublicSetup(),
 		},
 	}
@@ -65,4 +65,11 @@ func Builders() map[string]Builder {
 		result[manifest.ID] = manifest.Build
 	}
 	return result
+}
+
+// adapt converts concrete constructors to the shared runtime signature.
+func adapt[T channels.Channel](build func(channels.Section, channels.InboundPublisher) (T, error)) Builder {
+	return func(section channels.Section, publisher channels.InboundPublisher) (channels.Channel, error) {
+		return build(section, publisher)
+	}
 }

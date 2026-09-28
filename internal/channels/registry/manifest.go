@@ -4,6 +4,7 @@ package registry
 
 import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/discord"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/matrix"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/slack"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
@@ -29,29 +30,36 @@ func All() []Manifest {
 			ID:          telegram.ChannelName,
 			Name:        "Telegram",
 			Description: "Bot API · polling ou webhook",
-			Build:       telegram.New,
+			Build:       adapt(telegram.New),
 			Setup:       telegram.LookupSetupSpec(telegram.ChannelName).ToPublicDict(telegram.ChannelName),
 		},
 		{
 			ID:          websocket.ChannelName,
 			Name:        "WebSocket",
 			Description: "Integração customizada via conexão persistente",
-			Build:       websocket.New,
+			Build:       adapt(websocket.New),
 			Setup:       websocket.PublicSetup(),
 		},
 		{
 			ID:          matrix.ChannelName,
 			Name:        "Matrix",
 			Description: "Mensageria federada",
-			Build:       matrix.New,
+			Build:       adapt(matrix.New),
 			Setup:       matrix.PublicSetup(),
 		},
 		{
 			ID:          slack.ChannelName,
 			Name:        "Slack",
 			Description: "Mensagens de equipes via Socket Mode",
-			Build:       slack.New,
+			Build:       adapt(slack.New),
 			Setup:       slack.PublicSetup(),
+		},
+		{
+			ID:          discord.ChannelName,
+			Name:        "Discord",
+			Description: "Mensagens e comunidades",
+			Build:       adapt(discord.New),
+			Setup:       discord.PublicSetup(),
 		},
 	}
 }
@@ -73,4 +81,11 @@ func Builders() map[string]Builder {
 		result[manifest.ID] = manifest.Build
 	}
 	return result
+}
+
+// adapt converts concrete channel constructors to the common runtime signature.
+func adapt[T channels.Channel](build func(channels.Section, channels.InboundPublisher) (T, error)) Builder {
+	return func(section channels.Section, publisher channels.InboundPublisher) (channels.Channel, error) {
+		return build(section, publisher)
+	}
 }

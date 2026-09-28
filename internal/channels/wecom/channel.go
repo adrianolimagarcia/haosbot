@@ -240,11 +240,20 @@ func (c *Channel) connectAndRun(ctx context.Context) (bool, error) {
 			if json.Unmarshal(frame.Body, &event) == nil {
 				if event.Event.Type == "disconnected_event" { return true, errServerDisconnected }
 				if event.Event.Type == "enter_chat" && c.cfg.WelcomeMessage != "" && event.ChatID != "" && c.IsAllowed(event.From.UserID) {
-					_, _ = c.request(ctx, wsFrame{
+					welcomeFrame := wsFrame{
 						Cmd: cmdRespondWelcome,
 						Headers: wsHeaders{ReqID: frame.Headers.ReqID},
 						Body: mustJSON(map[string]any{"msgtype":"text","text":map[string]string{"content":c.cfg.WelcomeMessage}}),
-					})
+					}
+					// request waits for an ACK that is consumed by this read loop, so
+					// execute it separately and keep the reader available.
+					go func() {
+						replyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						if _, err := c.request(replyCtx, welcomeFrame); err != nil {
+							c.Logger().Warn("WeCom welcome reply failed", "error", err)
+						}
+					}()
 				}
 			}
 		}

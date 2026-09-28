@@ -17,6 +17,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/netpolicy"
 	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
 	"github.com/adrianolimagarcia/nanobot-go/internal/prompt"
+	"github.com/adrianolimagarcia/nanobot-go/internal/provider"
 	"github.com/adrianolimagarcia/nanobot-go/internal/session"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
 )
@@ -27,6 +28,8 @@ type multiAgentRuntimeDeps struct {
 	tools     *tools.Registry
 	workspace string
 	metrics   *observability.Registry
+	provider  provider.Provider
+	model     string
 }
 
 func buildMultiAgentManager(cfg *config.Config, deps multiAgentRuntimeDeps) (*multiagent.Manager, error) {
@@ -80,9 +83,18 @@ func buildMultiAgentManager(cfg *config.Config, deps multiAgentRuntimeDeps) (*mu
 			workerCfg.Agents.Defaults.MaxToolIterations = profile.MaxToolIterations
 		}
 
-		prov, model, err := resolveProvider(&workerCfg)
-		if err != nil {
-			return nil, fmt.Errorf("multiagent %s provider: %w", profile.ID, err)
+		prov, model := deps.provider, deps.model
+		var err error
+		// Profiles inherit the gateway provider/client by default. A dedicated
+		// client is created only when the profile explicitly overrides routing.
+		if strings.TrimSpace(profile.Model) != "" || strings.TrimSpace(profile.Provider) != "" {
+			prov, model, err = resolveProvider(&workerCfg)
+			if err != nil {
+				return nil, fmt.Errorf("multiagent %s provider: %w", profile.ID, err)
+			}
+		}
+		if prov == nil {
+			return nil, fmt.Errorf("multiagent %s provider is unavailable", profile.ID)
 		}
 
 		agentWorkspace := filepath.Join(deps.workspace, ".haosbot", "agents", profile.ID)
@@ -109,9 +121,14 @@ func buildMultiAgentManager(cfg *config.Config, deps multiAgentRuntimeDeps) (*mu
 		if workerCfg.Agents.Defaults.ReasoningEffort != nil {
 			reasoning = *workerCfg.Agents.Defaults.ReasoningEffort
 		}
+		workerSystemPrompt := strings.TrimSpace(profile.Instructions) + "\n\n" +
+			"You are a delegated HAOS worker. Work only on the delegated task. " +
+			"Return evidence and a concise result to the parent agent. " +
+			"Do not claim work was completed unless tool results support it.\n\n" +
+			builder.BuildSystemPrompt("multiagent", nil, deps.workspace, false)
 		loop, err := agent.NewLoop(agent.LoopConfig{
 			Bus: deps.bus, Store: transcriptStore{deps.store}, Provider: prov,
-			Tools: workerTools, Prompt: builder, Model: model,
+			Tools: workerTools, Prompt: builder, SystemPrompt: workerSystemPrompt, Model: model,
 			MaxTokens: maxTokens,
 			ContextWindowTokens: workerCfg.Agents.Defaults.ContextWindowTokens,
 			AutoSummarizeTokens: 120_000,

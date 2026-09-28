@@ -9,6 +9,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/linear"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/matrix"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/mattermost"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/msteams"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/napcat"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/slack"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/signal"
@@ -83,6 +84,13 @@ func All() []Manifest {
 			Description: "Mensagens e comunidades",
 			Build:       adapt(discord.New),
 			Setup:       discord.PublicSetup(),
+		},
+		{
+			ID:          msteams.ChannelName,
+			Name:        "Microsoft Teams",
+			Description: "Bot Framework webhook + OAuth replies",
+			Build:       adapt(msteams.New),
+			Setup:       msteams.PublicSetup(),
 		},
 		{
 			ID:          napcat.ChannelName,

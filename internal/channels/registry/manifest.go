@@ -6,6 +6,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/discord"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/matrix"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/napcat"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/slack"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/websocket"
@@ -62,6 +63,13 @@ func All() []Manifest {
 			Description: "Mensagens e comunidades",
 			Build:       adapt(discord.New),
 			Setup:       discord.PublicSetup(),
+		},
+		{
+			ID:          napcat.ChannelName,
+			Name:        "Napcat",
+			Description: "Gateway compatível com OneBot 11",
+			Build:       adapt(napcat.New),
+			Setup:       napcat.PublicSetup(),
 		},
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/websocket"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/whatsapp"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/weixin"
 )
 
 // Builder constructs one channel runtime from its decoded configuration.
@@ -110,6 +111,13 @@ func All() []Manifest {
 			Description: "Mensageria privada via signal-cli-rest-api",
 			Build:       adapt(signal.New),
 			Setup:       signal.PublicSetup(),
+		},
+		{
+			ID:          weixin.ChannelName,
+			Name:        "WeChat / Weixin",
+			Description: "Personal WeChat via iLink HTTP long-poll",
+			Build:       adapt(weixin.New),
+			Setup:       weixin.PublicSetup(),
 		},
 		{
 			ID:          whatsapp.ChannelName,

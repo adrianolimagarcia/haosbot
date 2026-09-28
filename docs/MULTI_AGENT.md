@@ -34,7 +34,9 @@ The built-in profiles are `planner`, `researcher`, `coder` and `reviewer`. They 
         "role": "coder",
         "instructions": "Implement delegated engineering work completely.",
         "toolAllow": ["*"],
-        "memoryScope": "project"
+        "delegateTo": ["reviewer"],
+        "memoryScope": "project",
+        "maxParallel": 1
       },
       "remote-reviewer": {
         "enabled": true,
@@ -50,7 +52,7 @@ The built-in profiles are `planner`, `researcher`, `coder` and `reviewer`. They 
 }
 ```
 
-A profile can override `model` and `provider`. When only `model` is specified, a provider prefix such as `deepseek/model-name` is resolved using the normal `auto` provider routing.
+A profile can override `model` and `provider`. `maxParallel` limits concurrent executions for that profile, while `delegateTo` is the worker-to-worker RBAC allowlist. An empty `delegateTo` forbids that worker from creating child tasks; `["*"]` allows any enabled target. When only `model` is specified, a provider prefix such as `deepseek/model-name` is resolved using the normal `auto` provider routing.
 
 `memoryScope=private` is enforced by removing shared `memory_search` access from that local worker. `team`, `project` and `global` currently share the workspace-derived GraphRAG visibility; they are retained as forward-compatible policy labels until Memory Fabric gains separate physical indexes for those scopes.
 

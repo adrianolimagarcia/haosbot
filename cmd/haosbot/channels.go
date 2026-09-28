@@ -35,9 +35,7 @@ import (
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/bus"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels"
-	"github.com/adrianolimagarcia/nanobot-go/internal/channels/matrix"
-	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
-	"github.com/adrianolimagarcia/nanobot-go/internal/channels/websocket"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/registry"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 )
 
@@ -54,23 +52,10 @@ const defaultChannelEnabled = false
 // channelBuilder constructs one channel runtime from its decoded configuration
 // section. Python: `plugin.load_channel_class()(section, self.bus)`
 // (manager.py:206, :289-291).
-type channelBuilder func(section channels.Section, publisher channels.InboundPublisher) (channels.Channel, error)
+type channelBuilder = registry.Builder
 
-// channelBuilders is the port's channel registry, keyed by the
-// `channels.<name>` configuration key — the Go stand-in for the reference's
-// package scan (registry.py:16-38) and its lazily imported runtime
-// (plugin.py:74-94).
-var channelBuilders = map[string]channelBuilder{
-	telegram.ChannelName: func(section channels.Section, publisher channels.InboundPublisher) (channels.Channel, error) {
-		return telegram.New(section, publisher)
-	},
-	websocket.ChannelName: func(section channels.Section, publisher channels.InboundPublisher) (channels.Channel, error) {
-		return websocket.New(section, publisher)
-	},
-	matrix.ChannelName: func(section channels.Section, publisher channels.InboundPublisher) (channels.Channel, error) {
-		return matrix.New(section, publisher)
-	},
-}
+// channelBuilders is the runtime view of the shared transport manifest list.
+var channelBuilders = registry.Builders()
 
 // buildChannelManager constructs the channel manager and registers every
 // channel the configuration activates.

@@ -72,6 +72,11 @@ func buildMultiAgentManager(cfg *config.Config, deps multiAgentRuntimeDeps) (*mu
 		workerCfg.Agents.Defaults = cfg.Agents.Defaults
 		if strings.TrimSpace(profile.Model) != "" {
 			workerCfg.Agents.Defaults.Model = profile.Model
+			// A model prefix should be allowed to select its provider when the
+			// profile did not pin one explicitly.
+			if strings.TrimSpace(profile.Provider) == "" {
+				workerCfg.Agents.Defaults.Provider = "auto"
+			}
 		}
 		if strings.TrimSpace(profile.Provider) != "" {
 			workerCfg.Agents.Defaults.Provider = profile.Provider
@@ -111,6 +116,9 @@ func buildMultiAgentManager(cfg *config.Config, deps multiAgentRuntimeDeps) (*mu
 		}
 
 		workerTools := subsetToolRegistry(deps.tools, profile.ToolAllow)
+		if strings.EqualFold(strings.TrimSpace(profile.MemoryScope), "private") {
+			workerTools = withoutTool(workerTools, "memory_search")
+		}
 		builder := prompt.New(agentWorkspace)
 		builder.DisabledSkills = append([]string(nil), workerCfg.Agents.Defaults.DisabledSkills...)
 		builder.Timezone = workerCfg.Agents.Defaults.Timezone
@@ -228,6 +236,20 @@ func subsetToolRegistry(base *tools.Registry, allow []string) *tools.Registry {
 	out := tools.NewRegistry()
 	for _, name := range base.Names() {
 		if !set[name] {
+			continue
+		}
+		if tool, ok := base.Get(name); ok {
+			out.Register(tool)
+		}
+	}
+	return out
+}
+
+
+func withoutTool(base *tools.Registry, denied string) *tools.Registry {
+	out := tools.NewRegistry()
+	for _, name := range base.Names() {
+		if name == denied {
 			continue
 		}
 		if tool, ok := base.Get(name); ok {

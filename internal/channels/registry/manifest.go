@@ -6,6 +6,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/discord"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/email"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/feishu"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/linear"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/matrix"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/mattermost"
@@ -57,6 +58,13 @@ func All() []Manifest {
 			Description: "IMAP inbox + SMTP replies",
 			Build:       adapt(email.New),
 			Setup:       email.PublicSetup(),
+		},
+		{
+			ID:          feishu.ChannelName,
+			Name:        "Feishu / Lark",
+			Description: "Official event webhook + OpenAPI replies",
+			Build:       adapt(feishu.New),
+			Setup:       feishu.PublicSetup(),
 		},
 		{
 			ID:          linear.ChannelName,

@@ -742,13 +742,13 @@ func DefaultAgentProfiles() map[string]AgentProfileConfig {
 		"planner": {
 			Enabled: true, Name: "Planner", Role: "planner",
 			Instructions: "Decompose complex requests into an explicit plan, dependencies, risks, and acceptance criteria. Do not implement unless asked by the parent task.",
-			ToolAllow: []string{"memory_search", "read_file", "list_dir", "web_search", "web_fetch", "agents"},
+			ToolAllow: []string{"memory_search", "read_file", "list_dir", "agents"},
 			MemoryScope: "project",
 		},
 		"researcher": {
 			Enabled: true, Name: "Researcher", Role: "researcher",
 			Instructions: "Gather and verify evidence for the delegated task. Return concise findings, sources or file evidence, uncertainty, and what the parent agent should do next.",
-			ToolAllow: []string{"memory_search", "read_file", "list_dir", "web_search", "web_fetch", "agents"},
+			ToolAllow: []string{"memory_search", "read_file", "list_dir", "agents"},
 			MemoryScope: "project",
 		},
 		"coder": {

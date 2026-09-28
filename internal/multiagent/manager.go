@@ -96,6 +96,53 @@ type DelegateRequest struct {
 }
 
 type executionContextKey struct{}
+type executionLeaseContextKey struct{}
+
+type executionLease struct {
+	manager *Manager
+	mu      sync.Mutex
+	held    bool
+}
+
+func (l *executionLease) acquire(ctx context.Context) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.held {
+		return nil
+	}
+	select {
+	case l.manager.sem <- struct{}{}:
+		l.held = true
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (l *executionLease) release() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.held {
+		return
+	}
+	<-l.manager.sem
+	l.held = false
+}
+
+// withYieldedSlot prevents nested synchronous delegation from deadlocking when
+// every worker slot is occupied by a parent waiting for its child.
+func (m *Manager) withYieldedSlot(ctx context.Context, fn func() (*Task, error)) (*Task, error) {
+	lease, _ := ctx.Value(executionLeaseContextKey{}).(*executionLease)
+	if lease == nil || lease.manager != m {
+		return fn()
+	}
+	lease.release()
+	result, runErr := fn()
+	if err := lease.acquire(ctx); err != nil && runErr == nil {
+		runErr = err
+	}
+	return result, runErr
+}
 
 type ExecutionMeta struct {
 	TaskID     string
@@ -358,13 +405,13 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, id string)
 		m.mu.Unlock()
 	}()
 
-	select {
-	case m.sem <- struct{}{}:
-		defer func() { <-m.sem }()
-	case <-ctx.Done():
-		m.finish(id, TaskCanceled, "", ctx.Err())
+	lease := &executionLease{manager: m}
+	if err := lease.acquire(ctx); err != nil {
+		m.finish(id, TaskCanceled, "", err)
 		return
 	}
+	defer lease.release()
+	ctx = context.WithValue(ctx, executionLeaseContextKey{}, lease)
 
 	m.mu.Lock()
 	task := m.tasks[id]

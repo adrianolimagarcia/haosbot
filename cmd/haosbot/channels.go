@@ -49,11 +49,6 @@ const channelLoadError = "Channel runtime could not be loaded. Check gateway log
 // explicit `enabled` to activate its runtime.
 const defaultChannelEnabled = false
 
-// channelBuilder constructs one channel runtime from its decoded configuration
-// section. Python: `plugin.load_channel_class()(section, self.bus)`
-// (manager.py:206, :289-291).
-type channelBuilder = registry.Builder
-
 // channelBuilders is the runtime view of the shared transport manifest list.
 var channelBuilders = registry.Builders()
 

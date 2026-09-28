@@ -120,6 +120,7 @@ func TestScheduledIdempotencyKeyUsesScheduleInstant(t *testing.T) {
 		done <- struct{}{}
 		return RunResult{RunID: runID}, nil
 	})
+	defer s.Close(context.Background())
 	if err := s.Load(); err != nil { t.Fatal(err) }
 	j, err := s.AddJob(testJob("idem", 60_000))
 	if err != nil { t.Fatal(err) }

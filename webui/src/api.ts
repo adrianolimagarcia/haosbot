@@ -1,5 +1,6 @@
 export type Session = { key: string; session_id: string; title: string; pinned: boolean; archived: boolean; selectable: boolean; updated_at: string };
-export type CatalogChannel = { id: string; name: string; description: string; available: boolean; setup?: { fields: Array<{ field: string; kind: string; choices: string[]; required: boolean; default_value?: string }>; verifies_connection?: boolean; external_dependency?: string } };
+export type ChannelCapabilities = { text: boolean; media: boolean; threads: boolean; reactions: boolean; streaming: boolean; typing: boolean; groups: boolean };
+export type CatalogChannel = { id: string; name: string; description: string; available: boolean; probe?: 'config' | 'dependency' | 'live'; capabilities?: ChannelCapabilities; setup?: { fields: Array<{ field: string; kind: string; choices: string[]; required: boolean; default_value?: string }>; verifies_connection?: boolean; external_dependency?: string } };
 export type State = { sessions: Session[]; skills: Array<{ name: string; description: string; available: boolean; unavailable_reason?: string }>;
   config: Record<string, any>; metrics: Record<string, any>; capabilities: Record<string, boolean>; memory: { path: string; bytes: number }; workspace: string };
 

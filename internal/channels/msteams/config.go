@@ -57,7 +57,7 @@ func sectionConfig(section channels.Section) (Config,error) {
 	for _,pattern:=range cfg.TrustedServiceURLHosts {
 		p:=strings.TrimSpace(strings.ToLower(pattern))
 		if p=="" || strings.ContainsAny(p,"/:?#@") { return Config{},fmt.Errorf("msteams: invalid trustedServiceUrlHosts entry %q",pattern) }
-		if strings.HasPrefix(p,"*.") { p=strings.TrimPrefix(p,"*.") }
+		p=strings.TrimPrefix(p,"*.")
 		if _,err:=url.Parse("https://"+p);err!=nil {return Config{},fmt.Errorf("msteams: invalid trusted host %q",pattern)}
 	}
 	return cfg,nil

@@ -12,6 +12,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/signal"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/websocket"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/whatsapp"
 )
 
 // Builder constructs one channel runtime from its decoded configuration.
@@ -36,7 +37,7 @@ func All() []Manifest {
 			Build: func(section channels.Section, publisher channels.InboundPublisher) (channels.Channel, error) {
 				return telegram.New(section, publisher)
 			},
-			Setup:       telegram.LookupSetupSpec(telegram.ChannelName).ToPublicDict(telegram.ChannelName),
+			Setup:       telegramSetup(),
 		},
 		{
 			ID:          websocket.ChannelName,
@@ -94,7 +95,20 @@ func All() []Manifest {
 			Build:       adapt(signal.New),
 			Setup:       signal.PublicSetup(),
 		},
+		{
+			ID:          whatsapp.ChannelName,
+			Name:        "WhatsApp Cloud API",
+			Description: "Mensagens via webhook oficial e Graph API",
+			Build:       adapt(whatsapp.New),
+			Setup:       whatsapp.PublicSetup(),
+		},
 	}
+}
+
+func telegramSetup() map[string]any {
+	setup := telegram.LookupSetupSpec(telegram.ChannelName).ToPublicDict(telegram.ChannelName)
+	setup["verifies_connection"] = true
+	return setup
 }
 
 // Lookup returns the manifest for a registered transport.

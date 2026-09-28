@@ -6,6 +6,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/discord"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/matrix"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/mattermost"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/napcat"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/slack"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
@@ -70,6 +71,13 @@ func All() []Manifest {
 			Description: "Gateway compatível com OneBot 11",
 			Build:       adapt(napcat.New),
 			Setup:       napcat.PublicSetup(),
+		},
+		{
+			ID:          mattermost.ChannelName,
+			Name:        "Mattermost",
+			Description: "Mensageria auto-hospedada com WebSocket",
+			Build:       adapt(mattermost.New),
+			Setup:       mattermost.PublicSetup(),
 		},
 	}
 }

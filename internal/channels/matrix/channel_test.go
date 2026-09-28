@@ -113,3 +113,30 @@ func TestSyncAndSend(t *testing.T) {
 		t.Fatal("Start did not return after cancellation")
 	}
 }
+
+func TestRoomFilterAndIgnoredEvents(t *testing.T) {
+	publisher := &capturePublisher{inbound: make(chan core.InboundMessage, 1)}
+	channel, err := New(channels.NewMapSection(map[string]any{
+		"homeserver": "https://matrix.example.org",
+		"accessToken": "secret",
+		"userId": "@haosbot:example.org",
+		"rooms": []any{"!allowed:example.org"},
+	}), publisher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !channel.acceptRoom("!allowed:example.org") || channel.acceptRoom("!other:example.org") {
+		t.Fatal("room filter did not enforce the configured room list")
+	}
+	event := roomEvent{Sender: "@haosbot:example.org", Type: "m.room.message"}
+	event.Content.MsgType = "m.text"
+	event.Content.Body = "ignore own message"
+	if err := channel.handleEvent(context.Background(), "!allowed:example.org", event); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case message := <-publisher.inbound:
+		t.Fatalf("own Matrix event was published: %#v", message)
+	default:
+	}
+}

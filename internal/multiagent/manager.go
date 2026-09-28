@@ -155,6 +155,9 @@ func NewManager(profiles []Profile, limits Limits, executor Executor, persistPat
 		if profile.ID == "" {
 			return nil, errors.New("multiagent: profile id is required")
 		}
+		if !validProfileID(profile.ID) {
+			return nil, fmt.Errorf("multiagent: invalid profile id %q", profile.ID)
+		}
 		if profile.Name == "" {
 			profile.Name = profile.ID
 		}
@@ -634,4 +637,20 @@ func newID(prefix string) string {
 		return prefix + "-" + hex.EncodeToString(raw[:])
 	}
 	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+}
+
+func validProfileID(id string) bool {
+	if len(id) == 0 || len(id) > 64 {
+		return false
+	}
+	for i, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			if i == 0 && (r == '-' || r == '_') {
+				return false
+			}
+			continue
+		}
+		return false
+	}
+	return true
 }

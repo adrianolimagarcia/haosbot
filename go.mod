@@ -20,6 +20,8 @@ toolchain go1.25.14
 
 require github.com/adrianolimagarcia/micrographrag-go v0.0.0-20260916231938-fdb8fd561f1c
 
+require github.com/coder/websocket v1.8.15
+
 require (
 	github.com/asg017/sqlite-vec-go-bindings v0.0.0-20260326160809-b64d0e563e61 // indirect
 	github.com/mattn/go-sqlite3 v1.14.49

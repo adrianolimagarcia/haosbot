@@ -350,7 +350,17 @@ func TestChannelActivationStringFalseIsStillEnabled(t *testing.T) {
 // therefore implements it — this test is the guard on that assumption.
 func TestRegisteredRuntimesImplementDeliveryPolicy(t *testing.T) {
 	for name, build := range channelBuilders {
-		section := channels.NewMapSection(map[string]any{"enabled": true, "token": "T"})
+		section := channels.NewMapSection(map[string]any{
+			"enabled": true,
+			// Include the required fields for every built-in runtime. This test
+			// only constructs channels; network connections are opened by Start.
+			"token": "T", "botToken": "T", "appToken": "T",
+			"serverUrl": "https://example.org", "homeserver": "https://example.org",
+			"accessToken": "T", "userId": "@bot:example.org", "websocketUrl": "wss://ws.example.test/ws",
+			"apiBase": "https://api.example.test", "number": "+15551234567", "selfId": "1", "port": 3978,
+			"phoneNumberId": "1", "appId": "app", "appSecret": "secret", "verifyToken": "verify", "verificationToken": "verify",
+			"apiKey": "key", "webhookSigningSecret": "secret", "clawToken": "claw", "graphVersion": "v99.0",
+		})
 		ch, err := build(section, nil)
 		if err != nil {
 			t.Fatalf("channelBuilders[%q] returned %v, want a channel", name, err)

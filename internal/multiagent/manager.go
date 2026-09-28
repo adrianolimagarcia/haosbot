@@ -35,7 +35,9 @@ type Profile struct {
 	Endpoint          string   `json:"endpoint,omitempty"`
 	TokenEnv          string   `json:"token_env,omitempty"`
 	ToolAllow         []string `json:"tool_allow,omitempty"`
+	DelegateTo        []string `json:"delegate_to,omitempty"`
 	MemoryScope       string   `json:"memory_scope"`
+	MaxParallel       int      `json:"max_parallel,omitempty"`
 	MaxTokens         int      `json:"max_tokens,omitempty"`
 	MaxToolIterations int      `json:"max_tool_iterations,omitempty"`
 	Enabled           bool     `json:"enabled"`
@@ -177,6 +179,7 @@ type Manager struct {
 	limits      Limits
 	executor    Executor
 	sem         chan struct{}
+	profileSems map[string]chan struct{}
 	persistPath string
 	sink        func(Event)
 }
@@ -194,6 +197,7 @@ func NewManager(profiles []Profile, limits Limits, executor Executor, persistPat
 		limits:      limits,
 		executor:    executor,
 		sem:         make(chan struct{}, limits.MaxParallel),
+		profileSems: make(map[string]chan struct{}),
 		persistPath: strings.TrimSpace(persistPath),
 		sink:        sink,
 	}
@@ -214,7 +218,14 @@ func NewManager(profiles []Profile, limits Limits, executor Executor, persistPat
 		if _, exists := m.profiles[profile.ID]; exists {
 			return nil, fmt.Errorf("multiagent: duplicate profile %q", profile.ID)
 		}
+		profile.ToolAllow = append([]string(nil), profile.ToolAllow...)
+		profile.DelegateTo = append([]string(nil), profile.DelegateTo...)
 		m.profiles[profile.ID] = profile
+		perProfile := profile.MaxParallel
+		if perProfile <= 0 || perProfile > limits.MaxParallel {
+			perProfile = limits.MaxParallel
+		}
+		m.profileSems[profile.ID] = make(chan struct{}, perProfile)
 	}
 	if err := m.load(); err != nil {
 		return nil, err
@@ -263,6 +274,7 @@ func (m *Manager) Profiles() []Profile {
 	out := make([]Profile, 0, len(m.profiles))
 	for _, p := range m.profiles {
 		p.ToolAllow = append([]string(nil), p.ToolAllow...)
+		p.DelegateTo = append([]string(nil), p.DelegateTo...)
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -274,6 +286,7 @@ func (m *Manager) Profile(id string) (Profile, bool) {
 	defer m.mu.RUnlock()
 	p, ok := m.profiles[id]
 	p.ToolAllow = append([]string(nil), p.ToolAllow...)
+	p.DelegateTo = append([]string(nil), p.DelegateTo...)
 	return p, ok
 }
 
@@ -321,6 +334,12 @@ func (m *Manager) Delegate(ctx context.Context, req DelegateRequest) (*Task, err
 	}
 	if depth > m.limits.MaxDepth {
 		return nil, fmt.Errorf("multiagent: max delegation depth %d exceeded", m.limits.MaxDepth)
+	}
+	if nested && meta.AgentID != "" {
+		source, exists := m.Profile(meta.AgentID)
+		if !exists || !delegationAllowed(source.DelegateTo, req.AgentID) {
+			return nil, fmt.Errorf("multiagent: agent %q is not allowed to delegate to %q", meta.AgentID, req.AgentID)
+		}
 	}
 	for _, id := range ancestry {
 		if id == req.AgentID {
@@ -404,6 +423,26 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, id string)
 		delete(m.cancels, id)
 		m.mu.Unlock()
 	}()
+
+	m.mu.RLock()
+	preTask := m.tasks[id]
+	var profileSem chan struct{}
+	if preTask != nil {
+		profileSem = m.profileSems[preTask.AgentID]
+	}
+	m.mu.RUnlock()
+	if preTask == nil {
+		return
+	}
+	if profileSem != nil {
+		select {
+		case profileSem <- struct{}{}:
+			defer func() { <-profileSem }()
+		case <-ctx.Done():
+			m.finish(id, TaskCanceled, "", ctx.Err())
+			return
+		}
+	}
 
 	lease := &executionLease{manager: m}
 	if err := lease.acquire(ctx); err != nil {
@@ -704,4 +743,15 @@ func validProfileID(id string) bool {
 		return false
 	}
 	return true
+}
+
+
+func delegationAllowed(allowed []string, target string) bool {
+	for _, item := range allowed {
+		item = strings.TrimSpace(item)
+		if item == "*" || item == target {
+			return true
+		}
+	}
+	return false
 }

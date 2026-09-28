@@ -15,7 +15,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/registry"
-	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
 	"github.com/adrianolimagarcia/nanobot-go/internal/mcp"
@@ -56,7 +55,7 @@ type webUISessionSummary struct {
 
 func (s *Server) registerWebUIData(mux *http.ServeMux) {
 	mux.HandleFunc("/api/webui/channels/catalog", s.handleWebUIChannelCatalog)
-	mux.HandleFunc("/api/webui/channels/telegram/validate", s.handleWebUITelegramValidate)
+	mux.HandleFunc("/api/webui/channels/", s.handleWebUIChannelValidate)
 	mux.HandleFunc("/api/webui/mcp/test", s.handleWebUIMCPTest)
 	mux.HandleFunc("/api/webui/state", s.handleWebUIState)
 	mux.HandleFunc("/api/webui/session", s.handleWebUISession)
@@ -121,19 +120,35 @@ func (s *Server) handleWebUIMCPTest(w http.ResponseWriter, r *http.Request) {
 	writeWebUIJSON(w, map[string]any{"name": name, "status": "connected", "tools": registry.Names()})
 }
 
-func (s *Server) handleWebUITelegramValidate(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleWebUIChannelValidate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	const prefix = "/api/webui/channels/"
+	path := strings.TrimPrefix(r.URL.Path, prefix)
+	name, suffix, ok := strings.Cut(path, "/")
+	if !ok || suffix != "validate" || strings.TrimSpace(name) == "" || strings.Contains(name, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	if _, exists := registry.Lookup(name); !exists {
+		http.NotFound(w, r)
 		return
 	}
 	cfg := s.cfg
 	if saved, err := config.Load(configTargetPath(s.cfg)); err == nil {
 		cfg = saved
 	}
-	values, _ := cfg.Channels.Extra["telegram"].(map[string]any)
+	values, _ := cfg.Channels.Extra[name].(map[string]any)
+	if values == nil {
+		values = map[string]any{}
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeWebUIJSON(w, telegram.ValidateChannel(values, telegram.ValidationContext{AllowLocalServiceAccess: cfg.Tools.WebUIAllowLocalServiceAccess}))
+	writeWebUIJSON(w, registry.Validate(name, values, registry.ValidationContext{
+		AllowLocalServiceAccess: cfg.Tools.WebUIAllowLocalServiceAccess,
+	}))
 }
 
 // The catalog describes runtime support and form fields from the transport's
@@ -169,7 +184,14 @@ func (s *Server) handleWebUIChannelCatalog(w http.ResponseWriter, r *http.Reques
 		entry := map[string]any{"id": n.ID, "name": n.Name, "description": n.Description, "available": false}
 		if manifest, ok := registry.Lookup(n.ID); ok {
 			entry["available"] = true
-			entry["setup"] = manifest.Setup
+			setup := make(map[string]any, len(manifest.Setup)+1)
+			for key, value := range manifest.Setup {
+				setup[key] = value
+			}
+			setup["verifies_connection"] = true
+			entry["setup"] = setup
+			entry["probe"] = manifest.Probe
+			entry["capabilities"] = manifest.Capabilities
 		}
 		entries = append(entries, entry)
 	}

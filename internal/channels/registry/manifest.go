@@ -28,16 +28,18 @@ type Builder func(channels.Section, channels.InboundPublisher) (channels.Channel
 
 // Manifest describes a transport to both the runtime and management UI.
 type Manifest struct {
-	ID          string
-	Name        string
-	Description string
-	Build       Builder
-	Setup       map[string]any
+	ID           string
+	Name         string
+	Description  string
+	Build        Builder
+	Setup        map[string]any
+	Probe        ProbeLevel
+	Capabilities Capabilities
 }
 
 // All returns the registered transports in stable UI order.
 func All() []Manifest {
-	return []Manifest{
+	out := []Manifest{
 		{
 			ID:          telegram.ChannelName,
 			Name:        "Telegram",
@@ -167,6 +169,36 @@ func All() []Manifest {
 			Setup:       whatsapp.PublicSetup(),
 		},
 	}
+	for i := range out {
+		out[i].Probe = ProbeConfig
+		out[i].Capabilities = Capabilities{Text: true}
+		switch out[i].ID {
+		case telegram.ChannelName:
+			out[i].Probe = ProbeLive
+			out[i].Capabilities.Threads = true
+			out[i].Capabilities.Groups = true
+		case websocket.ChannelName:
+			out[i].Capabilities.Media = true
+			out[i].Capabilities.Threads = true
+			out[i].Capabilities.Streaming = true
+		case slack.ChannelName, discord.ChannelName:
+			out[i].Capabilities.Threads = true
+			out[i].Capabilities.Groups = true
+		case mattermost.ChannelName:
+			out[i].Capabilities.Threads = true
+			out[i].Capabilities.Groups = true
+		case msteams.ChannelName:
+			out[i].Capabilities.Threads = true
+		case matrix.ChannelName, dingtalk.ChannelName, mochat.ChannelName:
+			out[i].Capabilities.Groups = true
+		case napcat.ChannelName, napcat.QQChannelName:
+			out[i].Capabilities.Groups = true
+		case signal.ChannelName:
+			out[i].Probe = ProbeDependency
+			out[i].Capabilities.Groups = true
+		}
+	}
+	return out
 }
 
 func telegramSetup() map[string]any {

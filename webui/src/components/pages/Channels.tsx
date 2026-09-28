@@ -32,7 +32,7 @@ export function Channels({ state, refresh, report }: { state: State; refresh: ()
     catch (error) { setStatus(String(error)); }
   }
   async function validate() {
-    try { const result = await request<{ status: string; message: string; checks: Array<{ label: string; status: string; message?: string }> }>('/api/webui/channels/telegram/validate');
+    try { const result = await request<{ status: string; message: string; checks: Array<{ label: string; status: string; message?: string }> }>(`/api/webui/channels/${encodeURIComponent(selected?.id || '')}/validate`);
       setStatus(`${result.status}: ${result.message} ${result.checks.map(check => `${check.label}: ${check.status}${check.message ? ` (${check.message})` : ''}`).join(' · ')}`); }
     catch (error) { setStatus(String(error)); }
   }

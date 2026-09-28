@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/registry"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
@@ -147,13 +148,13 @@ func (s *Server) handleWebUIChannelCatalog(w http.ResponseWriter, r *http.Reques
 		{"telegram", "Telegram", "Bot API · polling ou webhook"},
 		{"discord", "Discord", "Mensagens e comunidades"},
 		{"slack", "Slack", "Mensagens de equipes"},
-		{"whatsapp", "WhatsApp", "Conversas e grupos"},
+		{"whatsapp", "WhatsApp Cloud API", "Webhook oficial e mensagens 1:1"},
 		{"weixin", "WeChat / Weixin", "Mensageria WeChat"},
 		{"feishu", "Feishu / Lark", "Mensagens de equipes"},
 		{"dingtalk", "DingTalk", "Colaboração corporativa"},
 		{"email", "Email", "Caixa de entrada e envio"},
 		{"matrix", "Matrix", "Mensageria federada"},
-		{"qq", "QQ", "Mensagens QQ"},
+		{"qq", "QQ via OneBot", "Mensagens QQ por gateway OneBot 11"},
 		{"napcat", "Napcat", "Gateway compatível com QQ"},
 		{"wecom", "WeCom", "Mensagens corporativas"},
 		{"teams", "Microsoft Teams", "Colaboração corporativa"},
@@ -166,9 +167,9 @@ func (s *Server) handleWebUIChannelCatalog(w http.ResponseWriter, r *http.Reques
 	entries := make([]map[string]any, 0, len(names))
 	for _, n := range names {
 		entry := map[string]any{"id": n.ID, "name": n.Name, "description": n.Description, "available": false}
-		if spec := telegram.LookupSetupSpec(n.ID); spec != nil {
+		if manifest, ok := registry.Lookup(n.ID); ok {
 			entry["available"] = true
-			entry["setup"] = spec.ToPublicDict(n.ID)
+			entry["setup"] = manifest.Setup
 		}
 		entries = append(entries, entry)
 	}

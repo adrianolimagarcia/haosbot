@@ -225,6 +225,7 @@ func TestDirtyExecutionBlocksAnotherRunUntilPersisted(t *testing.T) {
 		calls.Add(1)
 		return RunResult{RunID: runID, Response: "side effect"}, nil
 	})
+	defer s.Close(context.Background())
 	if err := s.Load(); err != nil { t.Fatal(err) }
 	ms := int64(60_000)
 	job, err := s.AddJob(Job{

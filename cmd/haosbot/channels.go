@@ -9,13 +9,12 @@ package main
 // This file is the minimum of that phase the gateway needs, and nothing more:
 //
 //   - the plugin REGISTRY is the static channelBuilders table below. The port
-//     ships one channel runtime, Telegram.
+//     ships Telegram, WebSocket, Matrix, Slack, Discord, Napcat, QQ via OneBot, Mattermost, Signal, and WhatsApp Cloud API runtimes.
 //   - the ACTIVATION rule is _channel_section (manager.py:152-182) plus
 //     channel_instance_specs (manager.py:258-265, contracts.py:337-356): a
 //     channel is active only when its `channels.<name>` section exists AND
 //     resolves to enabled, where an omitted `enabled` falls back to the
-//     plugin's default_enabled — false for every channel here (plugin.py:38;
-//     only the reference's websocket channel declares true).
+//     plugin's default_enabled — false for every channel here (plugin.py:38).
 //   - the DELIVERY POLICY resolution is _build_channel (manager.py:206-232):
 //     the global `channels.send_progress` / `send_tool_hints` / `show_reasoning`
 //     policy, the channel's own progress_transport_defaults() hook, and the
@@ -24,7 +23,7 @@ package main
 // Deliberately absent, with the reason: multi-instance channels
 // (contracts.py:73-109), the channel dependency gate
 // (optional_features.ensure_enabled_channel_dependencies, manager.py:279), hot
-// reload (manager.py:429-596) and the reference's other 16 channels. A
+// reload (manager.py:429-596) and the reference's other 8 channels. A
 // `channels.<name>` key with no runtime here is ignored exactly as the
 // reference ignores a config key that has no plugin: _init_channels iterates
 // the discovered plugins, never the configuration keys (manager.py:254-257).
@@ -36,7 +35,7 @@ import (
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/bus"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels"
-	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/registry"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 )
 
@@ -50,20 +49,8 @@ const channelLoadError = "Channel runtime could not be loaded. Check gateway log
 // explicit `enabled` to activate its runtime.
 const defaultChannelEnabled = false
 
-// channelBuilder constructs one channel runtime from its decoded configuration
-// section. Python: `plugin.load_channel_class()(section, self.bus)`
-// (manager.py:206, :289-291).
-type channelBuilder func(section channels.Section, publisher channels.InboundPublisher) (channels.Channel, error)
-
-// channelBuilders is the port's channel registry, keyed by the
-// `channels.<name>` configuration key — the Go stand-in for the reference's
-// package scan (registry.py:16-38) and its lazily imported runtime
-// (plugin.py:74-94).
-var channelBuilders = map[string]channelBuilder{
-	telegram.ChannelName: func(section channels.Section, publisher channels.InboundPublisher) (channels.Channel, error) {
-		return telegram.New(section, publisher)
-	},
-}
+// channelBuilders is the runtime view of the shared transport manifest list.
+var channelBuilders = registry.Builders()
 
 // buildChannelManager constructs the channel manager and registers every
 // channel the configuration activates.

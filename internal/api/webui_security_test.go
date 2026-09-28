@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/registry"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 )
 
@@ -46,7 +47,7 @@ func TestWebUIChannelCatalogExposesOnlyImplementedSetup(t *testing.T) {
 		Channels []struct {
 			ID string `json:"id"`
 			Available bool `json:"available"`
-			Setup *struct { Fields []struct { Field string `json:"field"` } `json:"fields"` } `json:"setup"`
+			Setup *struct { Fields []struct { Field string `json:"field"` } `json:"fields"`; VerifiesConnection bool `json:"verifies_connection"` } `json:"setup"`
 		} `json:"channels"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil { t.Fatal(err) }
@@ -56,8 +57,20 @@ func TestWebUIChannelCatalogExposesOnlyImplementedSetup(t *testing.T) {
 	if len(payload.Channels[0].Setup.Fields) != 19 || payload.Channels[0].Setup.Fields[0].Field != "token" {
 		t.Fatalf("unexpected Telegram fields: %+v", payload.Channels[0].Setup.Fields)
 	}
-	for _, channel := range payload.Channels[1:] {
-		if channel.Available || channel.Setup != nil { t.Errorf("%s advertised without a runtime transport", channel.ID) }
+	if !payload.Channels[0].Setup.VerifiesConnection {
+		t.Fatal("Telegram setup should expose its supported connection check")
+	}
+	implemented := make(map[string]bool)
+	for _, manifest := range registry.All() {
+		implemented[manifest.ID] = true
+	}
+	for _, channel := range payload.Channels {
+		if channel.Available != implemented[channel.ID] {
+			t.Errorf("%s available=%v, registry says %v", channel.ID, channel.Available, implemented[channel.ID])
+		}
+		if channel.Available != (channel.Setup != nil) {
+			t.Errorf("%s availability and setup schema disagree", channel.ID)
+		}
 	}
 }
 

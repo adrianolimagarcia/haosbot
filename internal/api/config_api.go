@@ -164,6 +164,10 @@ func mergeConfigMap(dst, patch map[string]any) {
 		if isSecretKey(key) && blankSecret(incoming) {
 			continue
 		}
+		if incoming == nil {
+			delete(dst, key)
+			continue
+		}
 		incomingMap, incomingIsMap := incoming.(map[string]any)
 		if incomingIsMap {
 			if existingMap, ok := dst[key].(map[string]any); ok {

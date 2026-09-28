@@ -100,6 +100,24 @@ func TestSaveConfigPatchPreservesUnrelatedFieldsAndBlankSecrets(t *testing.T) {
 	}
 }
 
+func TestSaveConfigPatchRemovesMapEntry(t *testing.T) {
+	cfg := config.DefaultConfig()
+	typ := "stdio"
+	cfg.Tools.MCPServers["remove-me"] = config.MCPServerConfig{Type: &typ, Command: "echo"}
+	target := filepath.Join(t.TempDir(), "config.json")
+	patch := map[string]any{"tools": map[string]any{"mcpServers": map[string]any{"remove-me": nil}}}
+	if err := saveConfigPatch(cfg, target, patch); err != nil {
+		t.Fatalf("saveConfigPatch: %v", err)
+	}
+	got, err := config.Load(target)
+	if err != nil {
+		t.Fatalf("reload patched config: %v", err)
+	}
+	if _, ok := got.Tools.MCPServers["remove-me"]; ok {
+		t.Fatal("MCP server entry was not removed")
+	}
+}
+
 func TestRedactedConfigRemovesDynamicHeaderSecrets(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Providers.OpenAI.ExtraHeaders = map[string]string{

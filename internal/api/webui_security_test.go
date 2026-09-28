@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/registry"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 )
 
@@ -36,6 +37,43 @@ func getWebUI(t *testing.T, h http.Handler, path string) *httptest.ResponseRecor
 	return doRequest(t, h, req)
 }
 
+func TestWebUIChannelCatalogExposesOnlyImplementedSetup(t *testing.T) {
+	h := webUIHandler()
+	rr := getWebUI(t, h, "/api/webui/channels/catalog")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("catalog status = %d: %s", rr.Code, rr.Body.String())
+	}
+	var payload struct {
+		Channels []struct {
+			ID string `json:"id"`
+			Available bool `json:"available"`
+			Setup *struct { Fields []struct { Field string `json:"field"` } `json:"fields"`; VerifiesConnection bool `json:"verifies_connection"` } `json:"setup"`
+		} `json:"channels"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil { t.Fatal(err) }
+	if len(payload.Channels) < 2 || payload.Channels[0].ID != "telegram" || !payload.Channels[0].Available || payload.Channels[0].Setup == nil {
+		t.Fatalf("telegram setup missing: %+v", payload.Channels)
+	}
+	if len(payload.Channels[0].Setup.Fields) != 19 || payload.Channels[0].Setup.Fields[0].Field != "token" {
+		t.Fatalf("unexpected Telegram fields: %+v", payload.Channels[0].Setup.Fields)
+	}
+	if !payload.Channels[0].Setup.VerifiesConnection {
+		t.Fatal("Telegram setup should expose its supported connection check")
+	}
+	implemented := make(map[string]bool)
+	for _, manifest := range registry.All() {
+		implemented[manifest.ID] = true
+	}
+	for _, channel := range payload.Channels {
+		if channel.Available != implemented[channel.ID] {
+			t.Errorf("%s available=%v, registry says %v", channel.ID, channel.Available, implemented[channel.ID])
+		}
+		if channel.Available != (channel.Setup != nil) {
+			t.Errorf("%s availability and setup schema disagree", channel.ID)
+		}
+	}
+}
+
 func TestWebUIIndexIsServed(t *testing.T) {
 	h := webUIHandler()
 	rr := getWebUI(t, h, "/")
@@ -52,6 +90,27 @@ func TestWebUIIndexIsServed(t *testing.T) {
 	}
 	if !strings.Contains(body, "</html>") {
 		t.Fatal("GET / did not return a complete HTML document")
+	}
+}
+
+func TestReactControlPlaneIsEmbedded(t *testing.T) {
+	h := webUIHandler()
+	rr := getWebUI(t, h, "/")
+	if rr.Code != http.StatusOK { t.Fatalf("GET / = %d: %s", rr.Code, rr.Body.String()) }
+	if !strings.Contains(rr.Body.String(), "HAOSBOT · Control Plane") { t.Fatal("missing React control plane index") }
+	asset := regexp.MustCompile(`/assets/[^" ]+\.js`).FindString(rr.Body.String())
+	if asset == "" { t.Fatal("compiled JS asset missing from index") }
+	js := getWebUI(t, h, asset)
+	if js.Code != http.StatusOK || !strings.Contains(js.Header().Get("Content-Type"), "javascript") {
+		t.Fatalf("compiled asset: status=%d type=%q", js.Code, js.Header().Get("Content-Type"))
+	}
+}
+
+func TestLegacyWebUIRemainsAvailableAtClassicPath(t *testing.T) {
+	h := webUIHandler()
+	rr := getWebUI(t, h, "/classic/")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `src="/webui/app.js"`) {
+		t.Fatalf("legacy WebUI at /classic/: status=%d", rr.Code)
 	}
 }
 
@@ -177,14 +236,14 @@ func TestWebUIIndexNeedsNothingTheCSPForbids(t *testing.T) {
 	if m := regexp.MustCompile(`(?i)\sstyle\s*=\s*"`).FindAllString(body, -1); len(m) > 0 {
 		t.Errorf("index.html has %d style attributes, which style-src 'self' blocks", len(m))
 	}
-	if !strings.Contains(body, `src="/webui/app.js"`) {
+	if !strings.Contains(body, `/assets/`) {
 		t.Error("index.html does not load /webui/app.js, so its UI wiring would be missing")
 	}
 }
 
 func TestWebUIAssetsAreServedByTheApplication(t *testing.T) {
 	h := webUIHandler()
-	body := getWebUI(t, h, "/").Body.String()
+	body := getWebUI(t, h, "/classic/").Body.String()
 
 	refs := regexp.MustCompile(`(?:src|href)="(/[^"#]*)"`).FindAllStringSubmatch(body, -1)
 	if len(refs) == 0 {
@@ -210,7 +269,7 @@ func TestWebUIAssetsAreServedByTheApplication(t *testing.T) {
 func TestWebUIAssetsAvoidDangerousDOMAPIs(t *testing.T) {
 	h := webUIHandler()
 
-	for _, path := range []string{"/", "/webui/app.js", "/webui/control.js", "/webui-hardening.js", "/sw.js"} {
+	for _, path := range []string{"/classic/", "/webui/app.js", "/webui/control.js", "/webui-hardening.js", "/sw.js"} {
 		body := getWebUI(t, h, path).Body.String()
 		for _, forbidden := range []string{
 			"marked.parse(",

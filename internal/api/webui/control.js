@@ -272,6 +272,26 @@
     );
     root.appendChild(integrations);
 
+    const mcpTitle = el('div', 'control-toolbar');
+    mcpTitle.appendChild(el('div', 'control-section-title', 'Servidores MCP'));
+    const addMCP = el('button', 'control-button primary', 'Adicionar servidor');
+    addMCP.type = 'button';
+    addMCP.addEventListener('click', () => showMCPSetup(root, toolsCfg));
+    mcpTitle.appendChild(addMCP);
+    root.appendChild(mcpTitle);
+    const mcpGrid = el('div', 'integration-grid');
+    for (const [name, cfg] of Object.entries(mcp)) {
+      const tile = el('button', 'integration-card');
+      tile.type = 'button';
+      tile.append(el('strong', '', name),
+        el('span', 'control-muted', cfg.url || cfg.command || 'Sem endpoint configurado'),
+        el('span', 'integration-status available', cfg.type || (cfg.url ? 'HTTP' : 'stdio')));
+      tile.addEventListener('click', () => showMCPSetup(root, toolsCfg, name));
+      mcpGrid.appendChild(tile);
+    }
+    if (!mcpGrid.childNodes.length) mcpGrid.appendChild(el('div', 'session-loading', 'Nenhum servidor MCP configurado.'));
+    root.appendChild(mcpGrid);
+
     root.appendChild(el('div', 'control-section-title', 'Preview seguro do workspace'));
     const toolbar = el('div', 'control-toolbar');
     const input = el('input', 'control-input');
@@ -300,6 +320,72 @@
       }
     });
     root.appendChild(configEditor('Tools / MCP / CLI Apps', 'tools', toolsCfg));
+  }
+
+  function showMCPSetup(root, toolsCfg, existingName = '') {
+    editorMounted = true;
+    const current = toolsCfg.mcpServers?.[existingName] || {};
+    const form = el('form', 'integration-detail');
+    form.appendChild(el('h3', '', existingName ? 'Editar servidor MCP' : 'Adicionar servidor MCP'));
+    const fields = [
+      ['name', 'Nome', existingName, 'text'],
+      ['type', 'Transporte', current.type || (current.url ? 'streamableHttp' : 'stdio'), 'select'],
+      ['command', 'Comando (stdio)', current.command || '', 'text'],
+      ['url', 'URL (HTTP)', current.url || '', 'url'],
+      ['args', 'Argumentos (um por linha)', (current.args || []).join('\n'), 'textarea'],
+      ['toolTimeout', 'Timeout das ferramentas (segundos)', String(current.toolTimeout || 30), 'number']
+    ];
+    const inputs = {};
+    for (const [key, label, value, kind] of fields) {
+      const row = el('label', 'integration-field');
+      row.appendChild(el('span', '', label));
+      const input = el(kind === 'textarea' ? 'textarea' : kind === 'select' ? 'select' : 'input');
+      if (kind === 'select') for (const option of ['stdio', 'streamableHttp', 'sse']) {
+        const item = el('option', '', option); item.value = option; input.appendChild(item);
+      }
+      if (kind !== 'textarea' && kind !== 'select') input.type = kind;
+      input.value = value;
+      if (key === 'name' && existingName) input.disabled = true;
+      row.appendChild(input);
+      form.appendChild(row);
+      inputs[key] = input;
+    }
+    const status = el('span', 'control-muted', '');
+    const actions = el('div', 'control-toolbar');
+    const save = el('button', 'control-button primary', 'Salvar servidor');
+    save.type = 'submit';
+    const back = el('button', 'control-button', 'Voltar');
+    back.type = 'button';
+    back.addEventListener('click', () => renderApps(root));
+    actions.append(save, back, status);
+    form.appendChild(actions);
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const name = existingName || inputs.name.value.trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(name)) {
+        status.textContent = 'Use 1–64 caracteres: letras, números, ponto, _ ou -.';
+        return;
+      }
+      const type = inputs.type.value;
+      const endpoint = type === 'stdio' ? inputs.command.value.trim() : inputs.url.value.trim();
+      if (!endpoint) { status.textContent = type === 'stdio' ? 'Informe o comando.' : 'Informe a URL.'; return; }
+      const timeout = Number(inputs.toolTimeout.value);
+      if (!Number.isInteger(timeout) || timeout < 1) { status.textContent = 'Timeout inválido.'; return; }
+      const server = { ...current, type, command: type === 'stdio' ? endpoint : '', url: type === 'stdio' ? '' : endpoint,
+        args: type === 'stdio' ? inputs.args.value.split('\n').map(x => x.trim()).filter(Boolean) : [],
+        toolTimeout: timeout };
+      save.disabled = true;
+      status.textContent = 'Salvando…';
+      try {
+        const result = await api('/api/config', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tools: { mcpServers: { [name]: server } } }) });
+        status.textContent = result?.restartRequired ? 'Salvo · reinício necessário' : 'Salvo';
+        state = await api('/api/webui/state');
+      } catch (err) { status.textContent = errorMessage(err); }
+      finally { save.disabled = false; }
+    });
+    root.replaceChildren(form);
   }
 
   function renderSkills(root) {
@@ -882,13 +968,125 @@
     }
   }
 
-  function renderChannels(root) {
+  async function renderChannels(root) {
     setPanelTitle('Canais', 'Integrations');
     const channels = state.config?.channels || {};
-    root.append(
-      card('Configuração de canais', 'Edite a configuração redigida. Campos secretos em branco preservam os valores existentes.', 'Reinício para aplicar'),
-      configEditor('channels', 'channels', channels)
-    );
+    let catalog;
+    try {
+      catalog = (await api('/api/webui/channels/catalog')).channels;
+    } catch (err) {
+      root.replaceChildren(el('div', 'session-loading', 'Não foi possível carregar o catálogo: ' + errorMessage(err)));
+      return;
+    }
+    const toolbar = el('div', 'control-toolbar');
+    const search = el('input', 'integration-search');
+    search.type = 'search';
+    search.placeholder = 'Buscar integração…';
+    search.setAttribute('aria-label', 'Buscar integração');
+    toolbar.appendChild(search);
+    root.appendChild(toolbar);
+    const grid = el('div', 'integration-grid');
+    root.appendChild(grid);
+    const draw = () => {
+      grid.replaceChildren();
+      const query = search.value.trim().toLocaleLowerCase();
+      for (const { id, name, description, available: supported, setup } of catalog) {
+        if (!(name + ' ' + description).toLocaleLowerCase().includes(query)) continue;
+        const configured = channels[id] && typeof channels[id] === 'object';
+        const tile = el('button', 'integration-card');
+        tile.type = 'button';
+        tile.append(el('strong', '', name), el('span', 'control-muted', description),
+          el('span', supported ? 'integration-status available' : 'integration-status',
+            supported ? (configured ? 'Configurado · abrir' : 'Disponível · configurar') : 'Transporte indisponível'));
+        tile.addEventListener('click', () => supported ? showTelegramSetup(root, channels, setup) :
+          showUnavailableChannel(root, name));
+        grid.appendChild(tile);
+      }
+    };
+    search.addEventListener('input', draw);
+    draw();
+    const advanced = el('details', 'integration-advanced');
+    advanced.appendChild(el('summary', '', 'Configuração avançada dos canais'));
+    advanced.appendChild(configEditor('JSON dos canais', 'channels', channels));
+    root.appendChild(advanced);
+  }
+
+  function showUnavailableChannel(root, name) {
+    const notice = el('div', 'integration-detail');
+    notice.append(el('h3', '', name), el('p', 'control-muted',
+      'Este transporte ainda não está implementado no runtime. O catálogo apresenta a integração planejada; salvar credenciais aqui não ativaria o canal.'));
+    const close = el('button', 'control-button', 'Voltar ao catálogo');
+    close.type = 'button';
+    close.addEventListener('click', () => renderChannels(root));
+    notice.appendChild(close);
+    root.replaceChildren(notice);
+  }
+
+  function showTelegramSetup(root, channels, setup) {
+    editorMounted = true;
+    const current = channels.telegram || {};
+    const panel = el('form', 'integration-detail');
+    panel.append(el('h3', '', 'Configurar Telegram'), el('p', 'control-muted',
+      'Crie um bot no BotFather. As alterações são aplicadas após reiniciar o HAOSbot.'));
+    const labels = { token: 'Token do bot', mode: 'Modo', allowFrom: 'Usuários permitidos (separados por vírgula)',
+      proxy: 'Proxy (opcional)', webhookUrl: 'URL do webhook' };
+    const fields = (setup?.fields || []).map(field => [field.field, labels[field.field] || field.field,
+      field.kind === 'secret' ? 'password' : field.kind === 'enum' || field.kind === 'bool' ? 'select' : field.kind,
+      field.kind === 'bool' ? ['true', 'false'] : field.choices, field.default_value]);
+    const inputs = {};
+    for (const [key, label, kind, options, defaultValue] of fields) {
+      const row = el('label', 'integration-field');
+      row.appendChild(el('span', '', label));
+      const input = el(kind === 'select' ? 'select' : 'input');
+      if (kind === 'select') {
+        for (const option of options) {
+          const item = el('option', '', option);
+          item.value = option;
+          input.appendChild(item);
+        }
+      } else input.type = kind === 'int' || kind === 'float' ? 'number' : 'text';
+      if (kind === 'float') input.step = 'any';
+      if (kind === 'password') input.type = 'password';
+      input.value = key === 'allowFrom' ? (Array.isArray(current[key]) ? current[key].join(', ') : '') :
+        (kind === 'list' ? (Array.isArray(current[key]) ? current[key].join(', ') : '') :
+          (kind === 'password' ? '' : (current[key] ?? defaultValue ?? '')));
+      if (key === 'token') input.placeholder = current.tokenConfigured ? 'Token configurado · deixe vazio para manter' : 'Cole o token do BotFather';
+      row.appendChild(input);
+      panel.appendChild(row);
+      inputs[key] = input;
+    }
+    const status = el('span', 'control-muted', '');
+    const actions = el('div', 'control-toolbar');
+    const save = el('button', 'control-button primary', 'Salvar configuração');
+    save.type = 'submit';
+    const back = el('button', 'control-button', 'Voltar');
+    back.type = 'button';
+    back.addEventListener('click', () => renderChannels(root));
+    actions.append(save, back, status);
+    panel.appendChild(actions);
+    panel.addEventListener('submit', async event => {
+      event.preventDefault();
+      save.disabled = true;
+      status.textContent = 'Salvando…';
+      try {
+        const telegram = {};
+        for (const [key, , kind] of fields) {
+          const value = inputs[key].value.trim();
+          if (kind === 'password' && !value) continue;
+          if ((kind === 'int' || kind === 'float') && !value) continue;
+          telegram[key] = kind === 'list' ? value.split(',').map(x => x.trim()).filter(Boolean) :
+            kind === 'int' || kind === 'float' ? Number(value) :
+              setup.fields.find(field => field.field === key)?.kind === 'bool' ? value === 'true' : value;
+        }
+        const result = await api('/api/config', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channels: { telegram } }) });
+        status.textContent = result?.restartRequired ? 'Salvo · reinício necessário' : 'Salvo';
+        state = await api('/api/webui/state');
+      } catch (err) { status.textContent = errorMessage(err); }
+      finally { save.disabled = false; }
+    });
+    root.replaceChildren(panel);
   }
 
   function renderRuntime(root) {
@@ -942,18 +1140,33 @@
     root.append(grid);
     root.appendChild(el('div', 'control-section-title', 'Providers configurados'));
     const providers = state.config?.providers || {};
-    const providerList = el('div', 'control-list');
-    for (const [name, cfg] of Object.entries(providers)) {
-      if (!cfg || typeof cfg !== 'object') continue;
-      const row = el('div', 'control-list-row');
-      row.append(
-        el('div', '', name),
-        el('div', 'control-muted', cfg.baseUrl || cfg.base_url || cfg.apiType || cfg.api_type || '')
-      );
-      providerList.appendChild(row);
-    }
-    if (!providerList.childNodes.length) providerList.appendChild(el('div', 'session-loading', 'Nenhum provider configurado.'));
+    const preferred = ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'xiaomiMimo', 'ollama', 'lmStudio', 'custom'];
+    const filter = el('input', 'integration-search');
+    filter.type = 'search';
+    filter.placeholder = 'Buscar provider…';
+    filter.setAttribute('aria-label', 'Buscar provider');
+    root.appendChild(filter);
+    const providerList = el('div', 'integration-grid');
     root.appendChild(providerList);
+    const drawProviders = () => {
+      providerList.replaceChildren();
+      const names = [...preferred, ...Object.keys(providers).filter(name => !preferred.includes(name))];
+      for (const name of names) {
+        if (!name.toLocaleLowerCase().includes(filter.value.trim().toLocaleLowerCase())) continue;
+        const cfg = providers[name] || {};
+        const configured = cfg.apiKeyConfigured || !!cfg.apiBase;
+        const tile = el('button', 'integration-card');
+        tile.type = 'button';
+        tile.append(el('strong', '', name),
+          el('span', 'control-muted', cfg.apiBase || cfg.apiType || 'Configurar credenciais e endpoint'),
+          el('span', configured ? 'integration-status available' : 'integration-status',
+            configured ? 'Configuração presente · editar' : 'Sem credencial ou endpoint'));
+        tile.addEventListener('click', () => showProviderSetup(root, name, cfg));
+        providerList.appendChild(tile);
+      }
+    };
+    filter.addEventListener('input', drawProviders);
+    drawProviders();
     root.appendChild(configEditor('Providers avançados', 'providers', providers));
     root.appendChild(configEditor('Agent defaults', 'agents', state.config?.agents || {}));
     root.appendChild(el('div', 'control-section-title', 'Long-term Memory · MEMORY.md'));
@@ -987,6 +1200,56 @@
       } catch (err) { status.textContent = err.message; }
     });
     loadMemory();
+  }
+
+  function showProviderSetup(root, name, current) {
+    editorMounted = true;
+    const form = el('form', 'integration-detail');
+    form.appendChild(el('h3', '', 'Provider · ' + name));
+    form.appendChild(el('p', 'control-muted', 'A configuração é salva no HAOSbot e aplicada após reiniciar o gateway.'));
+    const fields = [
+      ['apiKey', 'Chave de API', '', 'password'],
+      ['apiBase', 'Endpoint (opcional)', current.apiBase || '', 'url'],
+      ['apiType', 'Tipo de API', current.apiType || '', 'text']
+    ];
+    const inputs = {};
+    for (const [key, label, value, kind] of fields) {
+      const row = el('label', 'integration-field');
+      row.appendChild(el('span', '', label));
+      const input = el('input');
+      input.type = kind;
+      input.value = value;
+      if (key === 'apiKey' && current.apiKeyConfigured) input.placeholder = 'Chave configurada · deixe vazio para manter';
+      row.appendChild(input);
+      form.appendChild(row);
+      inputs[key] = input;
+    }
+    const actions = el('div', 'control-toolbar');
+    const save = el('button', 'control-button primary', 'Salvar provider');
+    save.type = 'submit';
+    const back = el('button', 'control-button', 'Voltar');
+    back.type = 'button';
+    back.addEventListener('click', () => renderSettings(root));
+    const status = el('span', 'control-muted', '');
+    actions.append(save, back, status);
+    form.appendChild(actions);
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const patch = { apiBase: inputs.apiBase.value.trim() || null,
+        apiType: inputs.apiType.value.trim() };
+      if (inputs.apiKey.value.trim()) patch.apiKey = inputs.apiKey.value.trim();
+      save.disabled = true;
+      status.textContent = 'Salvando…';
+      try {
+        const result = await api('/api/config', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ providers: { [name]: patch } }) });
+        status.textContent = result?.restartRequired ? 'Salvo · reinício necessário' : 'Salvo';
+        state = await api('/api/webui/state');
+      } catch (err) { status.textContent = errorMessage(err); }
+      finally { save.disabled = false; }
+    });
+    root.replaceChildren(form);
   }
 
   function fmtMs(value) {

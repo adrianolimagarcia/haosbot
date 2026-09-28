@@ -5,6 +5,7 @@ package registry
 import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/matrix"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/slack"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/websocket"
 )
@@ -44,6 +45,13 @@ func All() []Manifest {
 			Description: "Mensageria federada",
 			Build:       matrix.New,
 			Setup:       matrix.PublicSetup(),
+		},
+		{
+			ID:          slack.ChannelName,
+			Name:        "Slack",
+			Description: "Mensagens de equipes via Socket Mode",
+			Build:       slack.New,
+			Setup:       slack.PublicSetup(),
 		},
 	}
 }

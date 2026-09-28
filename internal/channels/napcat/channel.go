@@ -19,6 +19,7 @@ import (
 )
 
 const maxResponseBytes = 1 << 20
+const QQChannelName = "qq"
 
 // Channel connects to a Napcat OneBot 11 gateway.
 type Channel struct {
@@ -31,6 +32,15 @@ type Channel struct {
 }
 
 func New(section channels.Section, publisher channels.InboundPublisher) (*Channel, error) {
+	return newChannel(ChannelName, "Napcat / OneBot", section, publisher)
+}
+
+// NewQQ enables a QQ bot through a OneBot 11 gateway such as Napcat.
+func NewQQ(section channels.Section, publisher channels.InboundPublisher) (*Channel, error) {
+	return newChannel(QQChannelName, "QQ via OneBot 11", section, publisher)
+}
+
+func newChannel(channelName, displayName string, section channels.Section, publisher channels.InboundPublisher) (*Channel, error) {
 	cfg, err := sectionConfig(section)
 	if err != nil {
 		return nil, err
@@ -42,7 +52,7 @@ func New(section channels.Section, publisher channels.InboundPublisher) (*Channe
 		},
 	}
 	channel.Base = channels.NewBase(channel, section, publisher,
-		channels.WithName(ChannelName), channels.WithDisplayName("Napcat / OneBot"))
+		channels.WithName(channelName), channels.WithDisplayName(displayName))
 	return channel, nil
 }
 

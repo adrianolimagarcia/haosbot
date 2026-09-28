@@ -34,7 +34,10 @@ func New(section channels.Section, publisher channels.InboundPublisher) (*Channe
 	if err != nil {
 		return nil, err
 	}
-	c := &Channel{cfg: cfg, client: &http.Client{Timeout: 30 * time.Second}}
+	c := &Channel{cfg: cfg, client: &http.Client{
+		Timeout:       30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
 	c.Base = channels.NewBase(c, section, publisher,
 		channels.WithName(ChannelName), channels.WithDisplayName("Signal"))
 	return c, nil
@@ -97,7 +100,7 @@ func (c *Channel) receive(ctx context.Context) error {
 	if c.cfg.APIToken != "" {
 		header.Set("Authorization", "Bearer "+c.cfg.APIToken)
 	}
-	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: header})
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPClient: c.client, HTTPHeader: header})
 	if err != nil {
 		return err
 	}

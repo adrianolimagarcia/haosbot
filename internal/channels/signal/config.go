@@ -13,19 +13,19 @@ const ChannelName = "signal"
 // Config connects to a signal-cli-rest-api service. Signal's protocol remains
 // owned by that companion service; HAOSbot only speaks its HTTP/WebSocket API.
 type Config struct {
-	Enabled  bool
-	APIBase  string
-	Number   string
-	APIToken string
+	Enabled   bool
+	APIBase   string
+	Number    string
+	APIToken  string
 	AllowFrom []string
 }
 
 func parseConfig(values map[string]any) (Config, error) {
 	cfg := Config{
-		Enabled:  boolValue(values["enabled"], false),
-		APIBase:  strings.TrimRight(strings.TrimSpace(stringValue(values["apiBase"], "")), "/"),
-		Number:   strings.TrimSpace(stringValue(values["number"], "")),
-		APIToken: strings.TrimSpace(stringValue(values["apiToken"], "")),
+		Enabled:   boolValue(values["enabled"], false),
+		APIBase:   strings.TrimRight(strings.TrimSpace(stringValue(values["apiBase"], "")), "/"),
+		Number:    strings.TrimSpace(stringValue(values["number"], "")),
+		APIToken:  strings.TrimSpace(stringValue(values["apiToken"], "")),
 		AllowFrom: stringList(values["allowFrom"]),
 	}
 	if cfg.APIBase != "" {

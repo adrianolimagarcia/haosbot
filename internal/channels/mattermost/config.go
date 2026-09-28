@@ -12,10 +12,10 @@ const ChannelName = "mattermost"
 
 // Config contains the Mattermost server URL, bot token, and optional scope.
 type Config struct {
-	Enabled        bool
-	ServerURL      string
-	BotToken       string
-	AllowFrom      []string
+	Enabled         bool
+	ServerURL       string
+	BotToken        string
+	AllowFrom       []string
 	AllowedChannels []string
 }
 

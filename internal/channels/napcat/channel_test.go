@@ -135,3 +135,17 @@ func TestGroupFilterAndChatID(t *testing.T) {
 		t.Fatalf("splitChatID(group:G1) = %q, %q, %v", kind, id, ok)
 	}
 }
+
+func TestQQAliasUsesOneBotRuntimeIdentity(t *testing.T) {
+	channel, err := NewQQ(channels.NewMapSection(map[string]any{
+		"websocketUrl": "ws://127.0.0.1:3001/ws",
+		"apiBase":      "http://127.0.0.1:3000",
+		"accessToken":  "secret",
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if channel.Name() != QQChannelName || channel.DisplayName() != "QQ via OneBot 11" {
+		t.Fatalf("QQ OneBot identity = %q / %q", channel.Name(), channel.DisplayName())
+	}
+}

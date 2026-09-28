@@ -74,6 +74,13 @@ func All() []Manifest {
 			Setup:       napcat.PublicSetup(),
 		},
 		{
+			ID:          napcat.QQChannelName,
+			Name:        "QQ via OneBot",
+			Description: "QQ conectado a um gateway OneBot 11, como Napcat",
+			Build:       adapt(napcat.NewQQ),
+			Setup:       napcat.PublicSetupFor(napcat.QQChannelName),
+		},
+		{
 			ID:          mattermost.ChannelName,
 			Name:        "Mattermost",
 			Description: "Mensageria auto-hospedada com WebSocket",

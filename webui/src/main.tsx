@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Activity, Archive, Bot, Cable, ChevronLeft, Clock3, KeyRound, Layers3, MessageSquare, Plus, Search, Settings2, Sparkles, Wrench, type LucideIcon } from 'lucide-react';
+import { Activity, Archive, Bot, Cable, ChevronLeft, Clock3, KeyRound, Layers3, MessageSquare, Plus, Search, Settings2, Sparkles, Users, Wrench, type LucideIcon } from 'lucide-react';
 import { request, sessionAction, setToken, streamTurn, token, uploadAttachment, type Session, type State } from './api';
 import './style.css';
 import type { View } from './types';
@@ -12,7 +12,7 @@ type Message = { role: string; content: string };
 const nav: Array<{ view: View; label: string; icon: LucideIcon }> = [
   { view: 'apps', label: 'Apps & MCP', icon: Cable }, { view: 'skills', label: 'Skills', icon: Sparkles },
   { view: 'automations', label: 'Automações', icon: Clock3 }, { view: 'channels', label: 'Canais', icon: MessageSquare },
-  { view: 'models', label: 'Models & Providers', icon: Bot }, { view: 'memory', label: 'Memory & GraphRAG', icon: Layers3 },
+  { view: 'models', label: 'Models & Providers', icon: Bot }, { view: 'agents', label: 'Agents', icon: Users }, { view: 'memory', label: 'Memory & GraphRAG', icon: Layers3 },
   { view: 'files', label: 'Arquivos', icon: Wrench },
   { view: 'runtime', label: 'Runtime', icon: Activity }, { view: 'settings', label: 'Configurações', icon: Settings2 },
 ];

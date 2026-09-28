@@ -159,10 +159,9 @@ func buildMultiAgentManager(cfg *config.Config, deps multiAgentRuntimeDeps) (*mu
 		return loop, nil
 	}
 
+	remotePolicy := netpolicy.Policy{Allowlist: append([]string(nil), cfg.Tools.SSRFWhitelist...)}
 	remote := multiagent.A2AExecutor{
-		Client: netpolicy.NewClient(time.Duration(settings.TaskTimeoutSeconds)*time.Second, netpolicy.Policy{
-			Allowlist: append([]string(nil), cfg.Tools.SSRFWhitelist...),
-		}),
+		Client: netpolicy.NewClient(time.Duration(settings.TaskTimeoutSeconds)*time.Second, remotePolicy),
 		Token: func(profile multiagent.Profile) string {
 			if strings.TrimSpace(profile.TokenEnv) == "" {
 				return ""
@@ -173,6 +172,9 @@ func buildMultiAgentManager(cfg *config.Config, deps multiAgentRuntimeDeps) (*mu
 
 	executor := multiagent.ExecutorFunc(func(ctx context.Context, profile multiagent.Profile, task multiagent.Task) (string, error) {
 		if strings.TrimSpace(profile.Endpoint) != "" {
+			if _, err := netpolicy.ValidateURL(ctx, profile.Endpoint, remotePolicy); err != nil {
+				return "", fmt.Errorf("multiagent %s endpoint blocked: %w", profile.ID, err)
+			}
 			return remote.Execute(ctx, profile, task)
 		}
 		loop, err := getLocalLoop(profile)

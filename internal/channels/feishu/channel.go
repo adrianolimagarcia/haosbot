@@ -114,7 +114,7 @@ func validSignature(body []byte,key,timestamp,nonce,provided string)bool{
 func stripMentions(text string,mentions []struct{Key string `json:"key"`;Name string `json:"name"`})string{for _,m:=range mentions{if m.Key!=""{text=strings.ReplaceAll(text,m.Key," ")}};return strings.Join(strings.Fields(text)," ")}
 
 func(c *Channel)tenantToken(ctx context.Context)(string,error){
-	c.mu.Lock();if c.token!=""&&time.Until(c.tokenExpires)>time.Minute{t:=c.token;c.mu.Unlock();return t};c.mu.Unlock()
+	c.mu.Lock();if c.token!=""&&time.Until(c.tokenExpires)>time.Minute{t:=c.token;c.mu.Unlock();return t,nil};c.mu.Unlock()
 	payload,_:=json.Marshal(map[string]string{"app_id":c.cfg.AppID,"app_secret":c.cfg.AppSecret})
 	req,err:=http.NewRequestWithContext(ctx,http.MethodPost,c.cfg.apiBase()+"/open-apis/auth/v3/tenant_access_token/internal",bytes.NewReader(payload));if err!=nil{return "",err};req.Header.Set("Content-Type","application/json")
 	resp,err:=c.client.Do(req);if err!=nil{return "",err};defer resp.Body.Close();data,_:=io.ReadAll(io.LimitReader(resp.Body,maxPayloadBytes+1))

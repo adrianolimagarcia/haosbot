@@ -5,6 +5,7 @@ package registry
 import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/discord"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/email"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/matrix"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/mattermost"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/napcat"
@@ -45,6 +46,13 @@ func All() []Manifest {
 			Description: "Integração customizada via conexão persistente",
 			Build:       adapt(websocket.New),
 			Setup:       websocket.PublicSetup(),
+		},
+		{
+			ID:          email.ChannelName,
+			Name:        "Email",
+			Description: "IMAP inbox + SMTP replies",
+			Build:       adapt(email.New),
+			Setup:       email.PublicSetup(),
 		},
 		{
 			ID:          matrix.ChannelName,

@@ -141,7 +141,7 @@ func(c *Channel)trustedServiceURL(raw string)bool{
 }
 
 func(c *Channel)accessToken(ctx context.Context)(string,error){
-	c.mu.RLock();if c.token!=""&&time.Until(c.tokenExpires)>time.Minute{t:=c.token;c.mu.RUnlock();return t};c.mu.RUnlock()
+	c.mu.RLock();if c.token!=""&&time.Until(c.tokenExpires)>time.Minute{t:=c.token;c.mu.RUnlock();return t,nil};c.mu.RUnlock()
 	tenant:=c.cfg.TenantID;if tenant==""{tenant="botframework.com"}
 	form:=url.Values{"grant_type":{"client_credentials"},"client_id":{c.cfg.AppID},"client_secret":{c.cfg.AppPassword},"scope":{"https://api.botframework.com/.default"}}
 	req,err:=http.NewRequestWithContext(ctx,http.MethodPost,"https://login.microsoftonline.com/"+url.PathEscape(tenant)+"/oauth2/v2.0/token",strings.NewReader(form.Encode()));if err!=nil{return "",err}

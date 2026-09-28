@@ -4,8 +4,8 @@ import "testing"
 
 func TestBuiltInManifestsHaveRuntimeAndSetup(t *testing.T) {
 	manifests := All()
-	if len(manifests) != 17 {
-		t.Fatalf("registered transports = %d, want 17", len(manifests))
+	if len(manifests) != 18 {
+		t.Fatalf("registered transports = %d, want 18", len(manifests))
 	}
 	seen := make(map[string]bool, len(manifests))
 	for _, manifest := range manifests {

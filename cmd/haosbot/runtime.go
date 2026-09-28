@@ -256,7 +256,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 	if err == nil {
 		multiAgents, err = buildMultiAgentManager(cfg, multiAgentRuntimeDeps{
 			bus: messageBus, store: store, tools: registry,
-			workspace: workspace, metrics: metrics,
+			workspace: workspace, metrics: metrics, provider: prov, model: model,
 		})
 	}
 	if err == nil {

@@ -18,6 +18,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/signal"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/websocket"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/wecom"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/whatsapp"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/weixin"
 )
@@ -143,6 +144,13 @@ func All() []Manifest {
 			Description: "Mensageria privada via signal-cli-rest-api",
 			Build:       adapt(signal.New),
 			Setup:       signal.PublicSetup(),
+		},
+		{
+			ID:          wecom.ChannelName,
+			Name:        "WeCom",
+			Description: "Enterprise WeChat AI Bot WebSocket",
+			Build:       adapt(wecom.New),
+			Setup:       wecom.PublicSetup(),
 		},
 		{
 			ID:          weixin.ChannelName,

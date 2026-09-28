@@ -44,7 +44,10 @@ func New(section channels.Section, publisher channels.InboundPublisher) (*Channe
 	}
 	c := &Channel{
 		cfg:    cfg,
-		client: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		client: &http.Client{
+			Timeout:       30 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		seen:   make(map[string]struct{}),
 	}
 	c.Base = channels.NewBase(c, section, publisher,
@@ -60,7 +63,13 @@ func (c *Channel) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("whatsapp: listen: %w", err)
 	}
-	server := &http.Server{Handler: c.handler(), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{
+		Handler:           c.handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	c.mu.Lock()
 	c.listener, c.server = listener, server
 	c.mu.Unlock()

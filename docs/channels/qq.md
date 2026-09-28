@@ -18,4 +18,4 @@ HAOSbot can connect a QQ bot through an installed OneBot 11 gateway such as Napc
 }
 ```
 
-The OneBot gateway must already be linked to QQ and reachable from HAOSbot. Private messages use HAOSbot's shared pairing policy. Group traffic can be restricted by `allowedGroups`.
+The OneBot gateway must already be linked to QQ and reachable from HAOSbot. Private messages use HAOSbot's shared pairing policy. Group traffic can be restricted by `allowedGroups`. Configure either the `qq` alias or `napcat` against a given gateway, not both, to avoid receiving and replying to the same events twice.

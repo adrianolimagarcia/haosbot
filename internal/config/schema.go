@@ -165,7 +165,9 @@ type AgentProfileConfig struct {
 	Endpoint          string   `json:"endpoint"`
 	TokenEnv          string   `json:"tokenEnv"`
 	ToolAllow         []string `json:"toolAllow"`
+	DelegateTo        []string `json:"delegateTo"`
 	MemoryScope       string   `json:"memoryScope"`
+	MaxParallel       int      `json:"maxParallel"`
 	MaxTokens         int      `json:"maxTokens"`
 	MaxToolIterations int      `json:"maxToolIterations"`
 }
@@ -743,25 +745,26 @@ func DefaultAgentProfiles() map[string]AgentProfileConfig {
 			Enabled: true, Name: "Planner", Role: "planner",
 			Instructions: "Decompose complex requests into an explicit plan, dependencies, risks, and acceptance criteria. Do not implement unless asked by the parent task.",
 			ToolAllow: []string{"memory_search", "read_file", "list_dir", "agents"},
-			MemoryScope: "project",
+			DelegateTo: []string{"researcher", "coder", "reviewer"},
+			MemoryScope: "project", MaxParallel: 2,
 		},
 		"researcher": {
 			Enabled: true, Name: "Researcher", Role: "researcher",
 			Instructions: "Gather and verify evidence for the delegated task. Return concise findings, sources or file evidence, uncertainty, and what the parent agent should do next.",
-			ToolAllow: []string{"memory_search", "read_file", "list_dir", "agents"},
-			MemoryScope: "project",
+			ToolAllow: []string{"memory_search", "read_file", "list_dir"},
+			MemoryScope: "project", MaxParallel: 4,
 		},
 		"coder": {
 			Enabled: true, Name: "Coder", Role: "coder",
 			Instructions: "Implement the delegated engineering task completely. Inspect existing code first, make minimal coherent changes, run available validation, and report exact files changed and remaining risk.",
-			ToolAllow: []string{"*"},
-			MemoryScope: "project",
+			ToolAllow: []string{"*"}, DelegateTo: []string{"reviewer"},
+			MemoryScope: "project", MaxParallel: 1,
 		},
 		"reviewer": {
 			Enabled: true, Name: "Reviewer", Role: "reviewer",
 			Instructions: "Independently review the delegated result for correctness, regressions, concurrency, security, tests, and requirement coverage. Prefer concrete defects and actionable fixes over style commentary.",
-			ToolAllow: []string{"memory_search", "read_file", "list_dir", "exec", "agents"},
-			MemoryScope: "project",
+			ToolAllow: []string{"memory_search", "read_file", "list_dir", "exec"},
+			MemoryScope: "project", MaxParallel: 2,
 		},
 	}
 }

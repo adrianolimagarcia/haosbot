@@ -357,7 +357,7 @@ func TestRegisteredRuntimesImplementDeliveryPolicy(t *testing.T) {
 			"token": "T", "botToken": "T", "appToken": "T",
 			"serverUrl": "https://example.org", "homeserver": "https://example.org",
 			"accessToken": "T", "userId": "@bot:example.org", "websocketUrl": "ws://127.0.0.1:1/ws",
-			"apiBase": "http://127.0.0.1:1", "selfId": "1", "port": 0,
+			"apiBase": "http://127.0.0.1:1", "number": "+15551234567", "selfId": "1", "port": 0,
 		})
 		ch, err := build(section, nil)
 		if err != nil {

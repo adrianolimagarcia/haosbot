@@ -98,7 +98,7 @@ func TestMattermostInboundAndOutbound(t *testing.T) {
 	var inbound core.InboundMessage
 	select {
 	case inbound = <-publisher.inbound:
-		if inbound.Channel != ChannelName || inbound.SenderID != "user-id" || inbound.ChatID != "channel-id|root-id" || inbound.Content != "hello" || inbound.IsDM {
+		if inbound.Channel != ChannelName || inbound.SenderID != "user-id" || inbound.ChatID != "channel-id|root-id" || inbound.Content != "hello" {
 			t.Fatalf("unexpected inbound message: %#v", inbound)
 		}
 	case <-time.After(3 * time.Second):

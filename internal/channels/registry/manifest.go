@@ -9,6 +9,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/mattermost"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/napcat"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/slack"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/signal"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/websocket"
 )
@@ -78,6 +79,13 @@ func All() []Manifest {
 			Description: "Mensageria auto-hospedada com WebSocket",
 			Build:       adapt(mattermost.New),
 			Setup:       mattermost.PublicSetup(),
+		},
+		{
+			ID:          signal.ChannelName,
+			Name:        "Signal",
+			Description: "Mensageria privada via signal-cli-rest-api",
+			Build:       adapt(signal.New),
+			Setup:       signal.PublicSetup(),
 		},
 	}
 }

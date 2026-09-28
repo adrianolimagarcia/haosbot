@@ -47,6 +47,16 @@ func TestWebUIChannelCatalogExposesOnlyImplementedSetup(t *testing.T) {
 		Channels []struct {
 			ID string `json:"id"`
 			Available bool `json:"available"`
+			Probe string `json:"probe"`
+			Capabilities struct {
+				Text bool `json:"text"`
+				Media bool `json:"media"`
+				Threads bool `json:"threads"`
+				Reactions bool `json:"reactions"`
+				Streaming bool `json:"streaming"`
+				Typing bool `json:"typing"`
+				Groups bool `json:"groups"`
+			} `json:"capabilities"`
 			Setup *struct { Fields []struct { Field string `json:"field"` } `json:"fields"`; VerifiesConnection bool `json:"verifies_connection"` } `json:"setup"`
 		} `json:"channels"`
 	}
@@ -71,6 +81,42 @@ func TestWebUIChannelCatalogExposesOnlyImplementedSetup(t *testing.T) {
 		if channel.Available != (channel.Setup != nil) {
 			t.Errorf("%s availability and setup schema disagree", channel.ID)
 		}
+		if channel.Available {
+			if channel.Probe == "" || !channel.Capabilities.Text {
+				t.Errorf("%s missing hardening metadata: probe=%q caps=%+v", channel.ID, channel.Probe, channel.Capabilities)
+			}
+			if channel.Setup == nil || !channel.Setup.VerifiesConnection {
+				t.Errorf("%s should expose the generic setup checker", channel.ID)
+			}
+		}
+	}
+}
+
+func TestWebUIChannelValidateIsGenericAndRejectsBadConfig(t *testing.T) {
+	h := webUIHandler()
+	rr := getWebUI(t, h, "/api/webui/channels/websocket/validate")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("websocket validate status = %d: %s", rr.Code, rr.Body.String())
+	}
+	var payload struct {
+		Name string `json:"name"`
+		Status string `json:"status"`
+		Probe string `json:"probe"`
+		CanEnable bool `json:"can_enable"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil { t.Fatal(err) }
+	if payload.Name != "websocket" || payload.Status != "invalid" || payload.Probe != "config" || payload.CanEnable {
+		t.Fatalf("unexpected websocket validation: %+v body=%s", payload, rr.Body.String())
+	}
+
+	rr = getWebUI(t, h, "/api/webui/channels/not-a-channel/validate")
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown channel validate status = %d, want 404", rr.Code)
+	}
+
+	rr = getWebUI(t, h, "/api/webui/channels/websocket/other")
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unexpected channel action status = %d, want 404", rr.Code)
 	}
 }
 

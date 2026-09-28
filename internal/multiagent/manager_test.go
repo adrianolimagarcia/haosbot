@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
+	"encoding/json"
 	"time"
 )
 
@@ -95,5 +97,43 @@ func TestInvalidProfileID(t *testing.T) {
 	}), "", nil)
 	if err == nil {
 		t.Fatal("expected invalid profile id error")
+	}
+}
+
+
+func TestNestedDelegateWaitYieldsSingleWorkerSlot(t *testing.T) {
+	var manager *Manager
+	var agentTool *Tool
+	exec := ExecutorFunc(func(ctx context.Context, profile Profile, task Task) (string, error) {
+		if profile.ID == "child" {
+			return "child-result", nil
+		}
+		raw := json.RawMessage(`{"action":"delegate","agent":"child","prompt":"child task","wait":true}`)
+		result, err := agentTool.Execute(ctx, raw)
+		if err != nil {
+			return "", err
+		}
+		if result.IsError {
+			return "", errors.New(result.Content)
+		}
+		return result.Content, nil
+	})
+	var err error
+	manager, err = NewManager([]Profile{
+		{ID: "parent", Enabled: true},
+		{ID: "child", Enabled: true},
+	}, Limits{
+		MaxDepth: 3, MaxParallel: 1, MaxChildren: 2, MaxTasks: 16,
+		TaskTimeout: 2 * time.Second, Retention: time.Hour,
+	}, exec, "", nil)
+	if err != nil { t.Fatal(err) }
+	agentTool = NewTool(manager)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	task, err := manager.Delegate(ctx, DelegateRequest{AgentID: "parent", Prompt: "parent task", Wait: true})
+	if err != nil { t.Fatal(err) }
+	if task.Status != TaskCompleted || !strings.Contains(task.Result, "child-result") {
+		t.Fatalf("nested task = %+v", task)
 	}
 }

@@ -5,14 +5,22 @@ package registry
 import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/discord"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/dingtalk"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/email"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/feishu"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/linear"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/matrix"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/mattermost"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/msteams"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/mochat"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/napcat"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/slack"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/signal"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/telegram"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/websocket"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/wecom"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/whatsapp"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/weixin"
 )
 
 // Builder constructs one channel runtime from its decoded configuration.
@@ -47,6 +55,34 @@ func All() []Manifest {
 			Setup:       websocket.PublicSetup(),
 		},
 		{
+			ID:          dingtalk.ChannelName,
+			Name:        "DingTalk",
+			Description: "Stream Mode WebSocket + session webhook replies",
+			Build:       adapt(dingtalk.New),
+			Setup:       dingtalk.PublicSetup(),
+		},
+		{
+			ID:          email.ChannelName,
+			Name:        "Email",
+			Description: "IMAP inbox + SMTP replies",
+			Build:       adapt(email.New),
+			Setup:       email.PublicSetup(),
+		},
+		{
+			ID:          feishu.ChannelName,
+			Name:        "Feishu / Lark",
+			Description: "Official event webhook + OpenAPI replies",
+			Build:       adapt(feishu.New),
+			Setup:       feishu.PublicSetup(),
+		},
+		{
+			ID:          linear.ChannelName,
+			Name:        "Linear",
+			Description: "Issue comments via signed webhooks + GraphQL",
+			Build:       adapt(linear.New),
+			Setup:       linear.PublicSetup(),
+		},
+		{
 			ID:          matrix.ChannelName,
 			Name:        "Matrix",
 			Description: "Mensageria federada",
@@ -66,6 +102,20 @@ func All() []Manifest {
 			Description: "Mensagens e comunidades",
 			Build:       adapt(discord.New),
 			Setup:       discord.PublicSetup(),
+		},
+		{
+			ID:          msteams.ChannelName,
+			Name:        "Microsoft Teams",
+			Description: "Bot Framework webhook + OAuth replies",
+			Build:       adapt(msteams.New),
+			Setup:       msteams.PublicSetup(),
+		},
+		{
+			ID:          mochat.ChannelName,
+			Name:        "MoChat",
+			Description: "Sessions/panels via HTTP watch fallback",
+			Build:       adapt(mochat.New),
+			Setup:       mochat.PublicSetup(),
 		},
 		{
 			ID:          napcat.ChannelName,
@@ -94,6 +144,20 @@ func All() []Manifest {
 			Description: "Mensageria privada via signal-cli-rest-api",
 			Build:       adapt(signal.New),
 			Setup:       signal.PublicSetup(),
+		},
+		{
+			ID:          wecom.ChannelName,
+			Name:        "WeCom",
+			Description: "Enterprise WeChat AI Bot WebSocket",
+			Build:       adapt(wecom.New),
+			Setup:       wecom.PublicSetup(),
+		},
+		{
+			ID:          weixin.ChannelName,
+			Name:        "WeChat / Weixin",
+			Description: "Personal WeChat via iLink HTTP long-poll",
+			Build:       adapt(weixin.New),
+			Setup:       weixin.PublicSetup(),
 		},
 		{
 			ID:          whatsapp.ChannelName,

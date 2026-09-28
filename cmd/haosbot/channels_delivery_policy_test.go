@@ -356,9 +356,10 @@ func TestRegisteredRuntimesImplementDeliveryPolicy(t *testing.T) {
 			// only constructs channels; network connections are opened by Start.
 			"token": "T", "botToken": "T", "appToken": "T",
 			"serverUrl": "https://example.org", "homeserver": "https://example.org",
-			"accessToken": "T", "userId": "@bot:example.org", "websocketUrl": "ws://127.0.0.1:1/ws",
-			"apiBase": "http://127.0.0.1:1", "number": "+15551234567", "selfId": "1", "port": 0,
-			"phoneNumberId": "1", "appSecret": "secret", "verifyToken": "verify", "graphVersion": "v99.0",
+			"accessToken": "T", "userId": "@bot:example.org", "websocketUrl": "wss://ws.example.test/ws",
+			"apiBase": "https://api.example.test", "number": "+15551234567", "selfId": "1", "port": 3978,
+			"phoneNumberId": "1", "appId": "app", "appSecret": "secret", "verifyToken": "verify", "verificationToken": "verify",
+			"apiKey": "key", "webhookSigningSecret": "secret", "clawToken": "claw", "graphVersion": "v99.0",
 		})
 		ch, err := build(section, nil)
 		if err != nil {

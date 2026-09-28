@@ -10,6 +10,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/matrix"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/mattermost"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/msteams"
+	"github.com/adrianolimagarcia/nanobot-go/internal/channels/mochat"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/napcat"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/slack"
 	"github.com/adrianolimagarcia/nanobot-go/internal/channels/signal"
@@ -91,6 +92,13 @@ func All() []Manifest {
 			Description: "Bot Framework webhook + OAuth replies",
 			Build:       adapt(msteams.New),
 			Setup:       msteams.PublicSetup(),
+		},
+		{
+			ID:          mochat.ChannelName,
+			Name:        "MoChat",
+			Description: "Sessions/panels via HTTP watch fallback",
+			Build:       adapt(mochat.New),
+			Setup:       mochat.PublicSetup(),
 		},
 		{
 			ID:          napcat.ChannelName,

@@ -61,6 +61,13 @@ func stringValue(value any, fallback string) string {
 	return fallback
 }
 
+func boolValue(value any, fallback bool) bool {
+	if flag, ok := value.(bool); ok {
+		return flag
+	}
+	return fallback
+}
+
 func intValue(value any, fallback int) int {
 	switch typed := value.(type) {
 	case int:

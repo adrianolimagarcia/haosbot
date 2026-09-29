@@ -124,6 +124,20 @@ func (m *projectionManager) Enqueue(sessionKey, content string) bool {
 	return m.EnqueueWithID(membersafeID(sessionKey, content), sessionKey, content)
 }
 
+func (m *projectionManager) EnqueueScopedWithIDError(jobID, sessionKey string, namespace memoryfabric.Namespace, content string) error {
+	if err := m.fabric.AppendTurnScoped(context.Background(), jobID, sessionKey, namespace, content); err != nil {
+		if m.metrics != nil { m.metrics.IncEnqueueRejected() }
+		return err
+	}
+	if m.metrics != nil { m.metrics.IncEnqueueAccepted() }
+	m.signalWake()
+	return nil
+}
+
+func (m *projectionManager) EnqueueScopedWithID(jobID, sessionKey string, namespace memoryfabric.Namespace, content string) bool {
+	return m.EnqueueScopedWithIDError(jobID, sessionKey, namespace, content) == nil
+}
+
 func (m *projectionManager) worker(projection string, wake <-chan struct{}, process func(context.Context, memoryfabric.Job) error) {
 	defer m.wg.Done()
 	idle := m.poll
@@ -201,12 +215,14 @@ func nextProjectionBackoff(current time.Duration) time.Duration {
 }
 
 func (m *projectionManager) processGraph(ctx context.Context, job memoryfabric.Job) error {
-	store, release, err := m.graphPool.Acquire(ctx, workspaceGraphStoreKey)
+	key, err := graphStoreKey(memoryfabric.Namespace{Scope: job.Scope, Owner: job.Owner})
+	if err != nil { return err }
+	store, release, err := m.graphPool.Acquire(ctx, key)
 	if err != nil { return err }
 	defer release()
 	jobCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	source := "haosbot/session/" + job.SessionKey
+	source := "haosbot/memory/" + job.Scope + "/" + job.Owner + "/session/" + job.SessionKey
 	title := "Agent turn " + job.ID
 	var existing int64
 	lookupErr := store.DB().QueryRowContext(jobCtx, "SELECT id FROM documents WHERE source=? AND title=? LIMIT 1", source, title).Scan(&existing)
@@ -218,7 +234,7 @@ func (m *projectionManager) processGraph(ctx context.Context, job memoryfabric.J
 
 func (m *projectionManager) processObsidian(ctx context.Context, job memoryfabric.Job) error {
 	if err := ctx.Err(); err != nil { return err }
-	dir := filepath.Join(m.obsidianDir, safeSessionPath(job.SessionKey))
+	dir := filepath.Join(m.obsidianDir, safeScopePath(job.Scope, job.Owner), safeSessionPath(job.SessionKey))
 	if err := os.MkdirAll(dir, 0o700); err != nil { return err }
 	path := filepath.Join(dir, job.ID+".md")
 	tmp, err := os.CreateTemp(dir, ".projection-*.tmp")
@@ -226,7 +242,7 @@ func (m *projectionManager) processObsidian(ctx context.Context, job memoryfabri
 	tmpPath := tmp.Name()
 	ok := false
 	defer func() { _ = tmp.Close(); if !ok { _ = os.Remove(tmpPath) } }()
-	if _, err := fmt.Fprintf(tmp, "---\nrecord_id: %s\nsession: %s\nprojection: obsidian\n---\n\n%s\n", job.RecordID, job.SessionKey, job.Content); err != nil { return err }
+	if _, err := fmt.Fprintf(tmp, "---\nrecord_id: %s\nsession: %s\nmemory_scope: %s\nmemory_owner: %s\nprojection: obsidian\n---\n\n%s\n", job.RecordID, job.SessionKey, job.Scope, job.Owner, job.Content); err != nil { return err }
 	if err := tmp.Sync(); err != nil { return err }
 	if err := tmp.Close(); err != nil { return err }
 	if err := os.Rename(tmpPath, path); err != nil { return err }
@@ -246,6 +262,10 @@ func (m *projectionManager) Close(ctx context.Context) {
 }
 
 func safeSessionPath(sessionKey string) string { return membersafeID("session", sessionKey) }
+
+func safeScopePath(scope, owner string) string {
+	return membersafeID("scope:"+scope, owner)
+}
 
 func syncProjectionDir(path string) error {
 	dir, err := os.Open(path)

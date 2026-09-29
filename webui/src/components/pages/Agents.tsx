@@ -4,7 +4,7 @@ import { Panel, Stat } from '../ui';
 
 type AgentProfile = {
   id: string; name: string; role: string; instructions: string; model?: string; provider?: string;
-  endpoint?: string; tool_allow?: string[]; delegate_to?: string[]; memory_scope: string; max_parallel?: number; enabled: boolean;
+  endpoint?: string; tool_allow?: string[]; delegate_to?: string[]; memory_scope: string; memory_owner?: string; max_parallel?: number; enabled: boolean;
 };
 
 type AgentTask = {
@@ -92,7 +92,7 @@ export function Agents({ report }: { report: (error: string) => void }) {
       {state.agents.map(item => <article className="agent-card" key={item.id}>
         <div className="agent-card-head"><div><strong>{item.name || item.id}</strong><span>{item.role || item.id}</span></div><span className={item.enabled ? 'status-pill good' : 'status-pill'}>{item.enabled ? 'ativo' : 'off'}</span></div>
         <p>{item.instructions}</p>
-        <small>{item.endpoint ? 'A2A remoto' : 'Local · in-process'} · memória {item.memory_scope || 'project'} · paralelo {item.max_parallel || state.limits?.max_parallel || 1}{item.delegate_to?.length ? ' · delega → ' + item.delegate_to.join(', ') : ''}{item.model ? ' · ' + item.model : ''}</small>
+        <small>{item.endpoint ? 'A2A remoto' : 'Local · in-process'} · memória {item.memory_scope || 'project'}{item.memory_owner ? ':' + item.memory_owner : ''} · físico · paralelo {item.max_parallel || state.limits?.max_parallel || 1}{item.delegate_to?.length ? ' · delega → ' + item.delegate_to.join(', ') : ''}{item.model ? ' · ' + item.model : ''}</small>
       </article>)}
     </div>
 

@@ -223,7 +223,7 @@ func decodeMultiAgent(c *collector, o *jmap) MultiAgentConfig {
 var agentProfileFields = []fieldDef{
 	{name: "enabled"}, {name: "name"}, {name: "role"}, {name: "instructions"},
 	{name: "model"}, {name: "provider"}, {name: "endpoint"}, {name: "token_env"},
-	{name: "tool_allow"}, {name: "delegate_to"}, {name: "memory_scope"}, {name: "max_parallel"},
+	{name: "tool_allow"}, {name: "delegate_to"}, {name: "memory_scope"}, {name: "memory_owner"}, {name: "max_parallel"},
 	{name: "max_tokens"}, {name: "max_tool_iterations"},
 }
 
@@ -260,9 +260,10 @@ func decodeAgentProfiles(c *collector, v any, path []PathPart) map[string]AgentP
 		d.ToolAllow = c.readStringList(o, agentProfileFields[8], d.ToolAllow)
 		d.DelegateTo = c.readStringList(o, agentProfileFields[9], d.DelegateTo)
 		d.MemoryScope = c.readLiteral(o, agentProfileFields[10], d.MemoryScope, "private", "team", "project", "global")
-		d.MaxParallel = c.readInt(o, agentProfileFields[11], d.MaxParallel, Ge(0), Le(64))
-		d.MaxTokens = c.readInt(o, agentProfileFields[12], d.MaxTokens, Ge(0), intBound{})
-		d.MaxToolIterations = c.readInt(o, agentProfileFields[13], d.MaxToolIterations, Ge(0), intBound{})
+		d.MemoryOwner = c.readString(o, agentProfileFields[11], d.MemoryOwner)
+		d.MaxParallel = c.readInt(o, agentProfileFields[12], d.MaxParallel, Ge(0), Le(64))
+		d.MaxTokens = c.readInt(o, agentProfileFields[13], d.MaxTokens, Ge(0), intBound{})
+		d.MaxToolIterations = c.readInt(o, agentProfileFields[14], d.MaxToolIterations, Ge(0), intBound{})
 		out[id] = d
 	}
 	return out

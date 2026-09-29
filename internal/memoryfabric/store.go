@@ -37,9 +37,47 @@ const (
 	defaultMaxDiskBytes int64 = 200 * 1024 * 1024
 )
 
+type Namespace struct {
+	Scope string `json:"scope"`
+	Owner string `json:"owner"`
+}
+
+const (
+	ScopePrivate = "private"
+	ScopeTeam    = "team"
+	ScopeProject = "project"
+	ScopeGlobal  = "global"
+)
+
+func NormalizeNamespace(ns Namespace) (Namespace, error) {
+	ns.Scope = strings.ToLower(strings.TrimSpace(ns.Scope))
+	ns.Owner = strings.TrimSpace(ns.Owner)
+	if ns.Scope == "" {
+		ns.Scope = ScopeProject
+	}
+	switch ns.Scope {
+	case ScopePrivate, ScopeTeam, ScopeProject, ScopeGlobal:
+	default:
+		return Namespace{}, fmt.Errorf("memoryfabric: invalid scope %q", ns.Scope)
+	}
+	if ns.Owner == "" {
+		if ns.Scope == ScopeGlobal {
+			ns.Owner = ScopeGlobal
+		} else {
+			return Namespace{}, fmt.Errorf("memoryfabric: owner is required for %s scope", ns.Scope)
+		}
+	}
+	return ns, nil
+}
+
+func (n Namespace) Key() string {
+	return n.Scope + ":" + n.Owner
+}
+
 type Config struct {
 	Path        string
 	BusyTimeout time.Duration
+	DefaultNamespace Namespace
 	CacheKB     int
 	MaxPending  int
 	MaxPendingBytes int64
@@ -53,6 +91,8 @@ type Config struct {
 type Record struct {
 	ID         string
 	SessionKey string
+	Scope      string
+	Owner      string
 	Content    string
 	CreatedAt  time.Time
 }
@@ -62,6 +102,8 @@ type Job struct {
 	Projection string
 	RecordID   string
 	SessionKey string
+	Scope      string
+	Owner      string
 	Content    string
 	Attempts   int
 	CreatedAt  time.Time
@@ -79,6 +121,7 @@ type Stats struct {
 type Store struct {
 	db          *sql.DB
 	path        string
+	defaultNamespace Namespace
 	maxPending  int
 	maxPendingBytes int64
 	maxContentBytes int
@@ -117,6 +160,13 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	if cfg.Lease <= 0 {
 		cfg.Lease = defaultLease
 	}
+	if cfg.DefaultNamespace.Scope == "" && cfg.DefaultNamespace.Owner == "" {
+		cfg.DefaultNamespace = Namespace{Scope: ScopeProject, Owner: "default"}
+	}
+	defaultNamespace, err := NormalizeNamespace(cfg.DefaultNamespace)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(cfg.Path), 0o700); err != nil {
 		return nil, fmt.Errorf("memoryfabric: create data directory: %w", err)
 	}
@@ -130,7 +180,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	if len(projections) == 0 {
 		projections = []string{ProjectionGraph, ProjectionObsidian}
 	}
-	s := &Store{db: db, path: cfg.Path, maxPending: cfg.MaxPending, maxPendingBytes: cfg.MaxPendingBytes, maxContentBytes: cfg.MaxContentBytes, maxDiskBytes: cfg.MaxDiskBytes, maxAttempts: cfg.MaxAttempts, lease: cfg.Lease, projections: projections}
+	s := &Store{db: db, path: cfg.Path, defaultNamespace: defaultNamespace, maxPending: cfg.MaxPending, maxPendingBytes: cfg.MaxPendingBytes, maxContentBytes: cfg.MaxContentBytes, maxDiskBytes: cfg.MaxDiskBytes, maxAttempts: cfg.MaxAttempts, lease: cfg.Lease, projections: projections}
 	for _, pragma := range []string{
 		"PRAGMA foreign_keys=ON",
 		fmt.Sprintf("PRAGMA busy_timeout=%d", cfg.BusyTimeout.Milliseconds()),
@@ -149,6 +199,8 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 CREATE TABLE IF NOT EXISTS memory_records (
   record_id TEXT PRIMARY KEY,
   session_key TEXT NOT NULL,
+  memory_scope TEXT NOT NULL DEFAULT 'project',
+  memory_owner TEXT NOT NULL DEFAULT '',
   content TEXT NOT NULL,
   content_hash BLOB NOT NULL,
   created_at INTEGER NOT NULL
@@ -184,6 +236,10 @@ INSERT OR IGNORE INTO memory_queue_counters(singleton) VALUES(1);`); err != nil 
 		_ = db.Close()
 		return nil, fmt.Errorf("memoryfabric: create schema: %w", err)
 	}
+	if err := ensureScopeSchema(ctx, db, defaultNamespace); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if _, err := db.ExecContext(ctx, `
 UPDATE memory_queue_counters SET
   pending_jobs=(SELECT COUNT(*) FROM memory_outbox WHERE state IN (?,?)),
@@ -193,6 +249,49 @@ WHERE singleton=1`, stateQueued, stateRunning, stateQueued, stateRunning); err !
 		return nil, fmt.Errorf("memoryfabric: rebuild queue counters: %w", err)
 	}
 	return s, nil
+}
+
+
+func ensureScopeSchema(ctx context.Context, db *sql.DB, defaultNamespace Namespace) error {
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info(memory_records)")
+	if err != nil {
+		return fmt.Errorf("memoryfabric: inspect scope schema: %w", err)
+	}
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("memoryfabric: scan scope schema: %w", err)
+		}
+		cols[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !cols["memory_scope"] {
+		if _, err := db.ExecContext(ctx, "ALTER TABLE memory_records ADD COLUMN memory_scope TEXT NOT NULL DEFAULT 'project'"); err != nil {
+			return fmt.Errorf("memoryfabric: add memory_scope: %w", err)
+		}
+	}
+	if !cols["memory_owner"] {
+		if _, err := db.ExecContext(ctx, "ALTER TABLE memory_records ADD COLUMN memory_owner TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("memoryfabric: add memory_owner: %w", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE memory_records SET memory_scope=? WHERE TRIM(memory_scope)=''", defaultNamespace.Scope); err != nil {
+		return fmt.Errorf("memoryfabric: backfill memory scope: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE memory_records SET memory_owner=? WHERE TRIM(memory_owner)=''", defaultNamespace.Owner); err != nil {
+		return fmt.Errorf("memoryfabric: backfill memory owner: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS idx_memory_records_namespace ON memory_records(memory_scope,memory_owner,created_at)"); err != nil {
+		return fmt.Errorf("memoryfabric: index memory namespace: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) Close() error {
@@ -205,8 +304,16 @@ func (s *Store) Close() error {
 // jobs. Repeating the same deterministic record is safe and repairs a missing
 // projection row without duplicating the record.
 func (s *Store) AppendTurn(ctx context.Context, recordID, sessionKey, content string) error {
+	return s.AppendTurnScoped(ctx, recordID, sessionKey, s.defaultNamespace, content)
+}
+
+func (s *Store) AppendTurnScoped(ctx context.Context, recordID, sessionKey string, namespace Namespace, content string) error {
+	namespace, err := NormalizeNamespace(namespace)
+	if err != nil {
+		return err
+	}
 	if strings.TrimSpace(recordID) == "" {
-		recordID = DeterministicID(sessionKey, content)
+		recordID = DeterministicID(namespace.Key()+"\x00"+sessionKey, content)
 	}
 	if strings.TrimSpace(sessionKey) == "" {
 		return errors.New("memoryfabric: session key is empty")
@@ -225,10 +332,10 @@ func (s *Store) AppendTurn(ctx context.Context, recordID, sessionKey, content st
 	}
 	defer tx.Rollback()
 	var existingHash []byte
-	var existingSession string
-	err = tx.QueryRowContext(ctx, "SELECT session_key,content_hash FROM memory_records WHERE record_id=?", recordID).Scan(&existingSession, &existingHash)
+	var existingSession, existingScope, existingOwner string
+	err = tx.QueryRowContext(ctx, "SELECT session_key,memory_scope,memory_owner,content_hash FROM memory_records WHERE record_id=?", recordID).Scan(&existingSession, &existingScope, &existingOwner, &existingHash)
 	if err == nil {
-		if existingSession != sessionKey || !sameBytes(existingHash, hash[:]) {
+		if existingSession != sessionKey || existingScope != namespace.Scope || existingOwner != namespace.Owner || !sameBytes(existingHash, hash[:]) {
 			return fmt.Errorf("memoryfabric: record %s already exists with different identity or content", recordID)
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -246,7 +353,7 @@ func (s *Store) AppendTurn(ctx context.Context, recordID, sessionKey, content st
 				return fmt.Errorf("memoryfabric: disk budget reached (%d bytes)", s.maxDiskBytes)
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_records(record_id,session_key,content,content_hash,created_at) VALUES(?,?,?,?,?)`, recordID, sessionKey, content, hash[:], now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_records(record_id,session_key,memory_scope,memory_owner,content,content_hash,created_at) VALUES(?,?,?,?,?,?,?)`, recordID, sessionKey, namespace.Scope, namespace.Owner, content, hash[:], now); err != nil {
 			return fmt.Errorf("memoryfabric: insert record: %w", err)
 		}
 	}
@@ -324,7 +431,7 @@ func (s *Store) Claim(ctx context.Context, projection string) (Job, bool, error)
 	}
 	var job Job
 	var createdAt int64
-	err = tx.QueryRowContext(ctx, `SELECT o.job_id,o.projection,o.record_id,r.session_key,r.content,o.attempts,o.created_at FROM memory_outbox o JOIN memory_records r ON r.record_id=o.record_id WHERE o.job_id=? AND o.projection=?`, jobID, projection).Scan(&job.ID, &job.Projection, &job.RecordID, &job.SessionKey, &job.Content, &job.Attempts, &createdAt)
+	err = tx.QueryRowContext(ctx, `SELECT o.job_id,o.projection,o.record_id,r.session_key,r.memory_scope,r.memory_owner,r.content,o.attempts,o.created_at FROM memory_outbox o JOIN memory_records r ON r.record_id=o.record_id WHERE o.job_id=? AND o.projection=?`, jobID, projection).Scan(&job.ID, &job.Projection, &job.RecordID, &job.SessionKey, &job.Scope, &job.Owner, &job.Content, &job.Attempts, &createdAt)
 	if err != nil {
 		return Job{}, false, err
 	}

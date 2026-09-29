@@ -173,16 +173,18 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("load GraphRAG embedder: %w", err)
 	}
-	graphPool := newGraphStorePoolWithEmbedder(workspaceGraphRoot(config.DefaultDataDir(), workspace), 2, graphEmbedder)
-	// Deep GraphRAG recall is explicit. Keeping it as a tool preserves hybrid
-	// FTS/vector/graph capabilities without making every turn pay retrieval
-	// latency before the provider starts.
-	registry.Register(newMemorySearchTool(graphPool))
+	projectNamespace := projectMemoryNamespace(workspace)
+	globalNamespace := globalMemoryNamespace()
+	graphPool := newGraphStorePoolWithEmbedder(scopedGraphRoot(config.DefaultDataDir()), 2, graphEmbedder)
+	// Deep recall stays explicit. The main agent can read project memory by
+	// default and global memory only when it selects that scope explicitly.
+	registry.Register(newScopedMemorySearchTool(graphPool, []memoryfabric.Namespace{projectNamespace, globalNamespace}, memoryfabric.ScopeProject))
 	metrics := observability.New()
 	metrics.SetVectorEnabled(graphEmbedder != nil)
 	metrics.SetEmbedderLoaded(graphEmbedder != nil)
 	memoryFabric, err := memoryfabric.Open(context.Background(), memoryfabric.Config{
 		Path: filepath.Join(config.DefaultDataDir(), "memory-fabric.db"),
+		DefaultNamespace: projectNamespace,
 		CacheKB: profile.MemoryCacheKB,
 		MaxPending: profile.MemoryMaxPending,
 		MaxPendingBytes: profile.MemoryMaxPendingBytes,
@@ -205,11 +207,11 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("migrate legacy GraphRAG outbox: %w", err)
 	}
-	if err := ensureWorkspaceGraphProjection(context.Background(), config.DefaultDataDir(), workspace, memoryFabric); err != nil {
+	if err := ensureScopedGraphProjection(context.Background(), config.DefaultDataDir(), workspace, memoryFabric); err != nil {
 		_ = memoryFabric.Close()
 		_ = graphPool.Close()
 		messageBus.Close()
-		return nil, fmt.Errorf("prepare workspace GraphRAG projection: %w", err)
+		return nil, fmt.Errorf("prepare scoped GraphRAG projection: %w", err)
 	}
 	projections, err := newProjectionManager(memoryFabric, graphPool, filepath.Join(config.DefaultDataDir(), "obsidian-memory"), profile.ProjectionWorkers, time.Duration(profile.ProjectionPollMs)*time.Millisecond, profile.ObsidianEnabled, metrics)
 	if err != nil {
@@ -218,7 +220,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("start memory projections: %w", err)
 	}
-	memoryMDProjection := newMemoryMDProjector(filepath.Join(workspace, "memory", "MEMORY.md"), graphPool, 2*time.Second)
+	memoryMDProjection := newScopedMemoryMDProjector(filepath.Join(workspace, "memory", "MEMORY.md"), graphPool, projectNamespace, 2*time.Second)
 
 	loop, err := agent.NewLoop(agent.LoopConfig{
 		Bus:                   messageBus,
@@ -257,6 +259,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		multiAgents, err = buildMultiAgentManager(cfg, multiAgentRuntimeDeps{
 			bus: messageBus, store: store, tools: registry,
 			workspace: workspace, metrics: metrics, provider: prov, model: model,
+			graphPool: graphPool, projections: projections,
 		})
 	}
 	if err == nil {

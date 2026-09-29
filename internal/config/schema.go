@@ -167,6 +167,7 @@ type AgentProfileConfig struct {
 	ToolAllow         []string `json:"toolAllow"`
 	DelegateTo        []string `json:"delegateTo"`
 	MemoryScope       string   `json:"memoryScope"`
+	MemoryOwner       string   `json:"memoryOwner"`
 	MaxParallel       int      `json:"maxParallel"`
 	MaxTokens         int      `json:"maxTokens"`
 	MaxToolIterations int      `json:"maxToolIterations"`

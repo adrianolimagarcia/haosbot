@@ -45,7 +45,7 @@ func buildMultiAgentManager(cfg *config.Config, deps multiAgentRuntimeDeps) (*mu
 			Model: raw.Model, Provider: raw.Provider, Endpoint: raw.Endpoint,
 			TokenEnv: raw.TokenEnv, ToolAllow: append([]string(nil), raw.ToolAllow...),
 			DelegateTo: append([]string(nil), raw.DelegateTo...),
-			MemoryScope: raw.MemoryScope, MaxParallel: raw.MaxParallel, MaxTokens: raw.MaxTokens,
+			MemoryScope: raw.MemoryScope, MemoryOwner: raw.MemoryOwner, MaxParallel: raw.MaxParallel, MaxTokens: raw.MaxTokens,
 			MaxToolIterations: raw.MaxToolIterations, Enabled: raw.Enabled,
 		})
 	}

@@ -77,7 +77,7 @@ func TestAgentMemoryNamespaceSemantics(t *testing.T) {
 	if project != projectMemoryNamespace(workspace) {
 		t.Fatalf("project namespace = %+v want %+v", project, projectMemoryNamespace(workspace))
 	}
-	global, err := agentMemoryNamespace(multiagent.Profile{ID: "researcher", MemoryScope: "global"}, workspace)
+	global, err := agentMemoryNamespace(multiagent.Profile{ID: "researcher", MemoryScope: "global", MemoryOwner: "must-be-ignored"}, workspace)
 	if err != nil { t.Fatal(err) }
 	if global != globalMemoryNamespace() {
 		t.Fatalf("global namespace = %+v want %+v", global, globalMemoryNamespace())

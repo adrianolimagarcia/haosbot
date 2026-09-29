@@ -41,11 +41,10 @@ func agentMemoryNamespace(profile multiagent.Profile, workspace string) (memoryf
 	case memoryfabric.ScopeProject:
 		return memoryfabric.Namespace{Scope: scope, Owner: project}, nil
 	case memoryfabric.ScopeGlobal:
-		owner := strings.TrimSpace(profile.MemoryOwner)
-		if owner == "" {
-			owner = memoryfabric.ScopeGlobal
-		}
-		return memoryfabric.Namespace{Scope: scope, Owner: owner}, nil
+		// Global is deliberately singular. memoryOwner partitions team scope,
+		// but allowing it here would create a nominally-global island that the
+		// commander and other global agents could not see.
+		return globalMemoryNamespace(), nil
 	default:
 		return memoryfabric.Namespace{}, fmt.Errorf("unsupported memory scope %q for agent %s", scope, profile.ID)
 	}

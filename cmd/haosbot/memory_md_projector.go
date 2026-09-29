@@ -28,10 +28,6 @@ type memoryMDProjector struct {
 	wg     sync.WaitGroup
 }
 
-func newMemoryMDProjector(path string, pool *graphStorePool, poll time.Duration) *memoryMDProjector {
-	return newScopedMemoryMDProjector(path, pool, memoryfabric.Namespace{Scope: memoryfabric.ScopeProject, Owner: "default"}, poll)
-}
-
 func newScopedMemoryMDProjector(path string, pool *graphStorePool, namespace memoryfabric.Namespace, poll time.Duration) *memoryMDProjector {
 	if poll <= 0 {
 		poll = 2 * time.Second

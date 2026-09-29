@@ -503,16 +503,21 @@ func (m *Manager) finish(id string, status TaskStatus, result string, err error)
 		task.Error = err.Error()
 	}
 	snapshot := *cloneTask(task)
-	if ch := m.done[id]; ch != nil {
-		select {
-		case <-ch:
-		default:
-			close(ch)
-		}
-	}
+	done := m.done[id]
 	m.mu.Unlock()
+
+	// A terminal task becomes observable only after its durable snapshot is
+	// written. Closing done first lets Wait return and a process restart race
+	// with persistence, recovering a completed/canceled task as interrupted.
 	m.persist()
 	m.emit(string(status), snapshot)
+	if done != nil {
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+	}
 }
 
 func (m *Manager) Wait(ctx context.Context, id string) (*Task, error) {

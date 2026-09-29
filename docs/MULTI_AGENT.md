@@ -4,7 +4,7 @@ HAOSbot can delegate work to specialized local workers inside the same Go proces
 
 ## Architecture
 
-Local workers reuse the gateway provider client by default, tool implementations, project workspace and read-only GraphRAG search. Each worker has its own lightweight agent profile under `.haosbot/agents/<id>` and uses transient conversation state. Worker chatter is not projected independently into canonical long-term memory; the worker result returns through the parent turn.
+Local workers reuse the gateway provider client by default, tool implementations and project workspace. Each worker has its own lightweight agent profile under `.haosbot/agents/<id>` and uses transient conversation state. Long-term recall is bound to the worker's physical Memory Fabric namespace; completed worker results are projected into that same namespace while transient reasoning/tool chatter remains outside canonical memory.
 
 Remote workers use A2A JSON-RPC `message/send`. Configure the full A2A endpoint URL and keep bearer tokens in an environment variable referenced by `tokenEnv`. Remote URLs use the same outbound SSRF policy as the rest of HAOSbot; private/loopback destinations require an explicit `tools.ssrfWhitelist` entry.
 
@@ -35,7 +35,8 @@ The built-in profiles are `planner`, `researcher`, `coder` and `reviewer`. They 
         "instructions": "Implement delegated engineering work completely.",
         "toolAllow": ["*"],
         "delegateTo": ["reviewer"],
-        "memoryScope": "project",
+        "memoryScope": "team",
+        "memoryOwner": "engineering",
         "maxParallel": 1
       },
       "remote-reviewer": {
@@ -54,7 +55,7 @@ The built-in profiles are `planner`, `researcher`, `coder` and `reviewer`. They 
 
 A profile can override `model` and `provider`. `maxParallel` limits concurrent executions for that profile, while `delegateTo` is the worker-to-worker RBAC allowlist. An empty `delegateTo` forbids that worker from creating child tasks; `["*"]` allows any enabled target. When only `model` is specified, a provider prefix such as `deepseek/model-name` is resolved using the normal `auto` provider routing.
 
-`memoryScope=private` is enforced by removing shared `memory_search` access from that local worker. `team`, `project` and `global` currently share the workspace-derived GraphRAG visibility; they are retained as forward-compatible policy labels until Memory Fabric gains separate physical indexes for those scopes.
+Memory scopes are physically isolated, not query-filtered. Each namespace maps to a separate derived GraphRAG SQLite store, while canonical Memory Fabric records carry `memory_scope` and `memory_owner`. `private` resolves to workspace + agent id; `team` resolves to workspace + `memoryOwner` (default `default`); `project` resolves to the workspace identity; and `global` resolves to a shared global namespace. A worker's `memory_search` tool is bound to exactly its namespace, so it cannot select another scope. The commander can search project memory by default and global memory only when explicitly requested.
 
 ## Task safety
 
@@ -71,3 +72,8 @@ The single `agents` tool supports `list`, `delegate`, `status`, `wait`, `result`
 ## WebUI
 
 The **Agents** page shows the roster, local versus A2A execution, runtime limits and the live task board. Operators can manually delegate background work and cancel active tasks.
+
+
+## Scope migration
+
+Existing canonical records are migrated in place with scope metadata and requeued into the scoped GraphRAG projection. Derived legacy GraphRAG databases are left untouched for rollback. The new derived stores live under the shared scoped graph root and are keyed by scope/owner, so project, team, private and global data never share one SQLite index.

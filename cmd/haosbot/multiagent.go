@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/bus"
 	"github.com/adrianolimagarcia/nanobot-go/internal/config"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
+	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
 	"github.com/adrianolimagarcia/nanobot-go/internal/multiagent"
 	"github.com/adrianolimagarcia/nanobot-go/internal/netpolicy"
 	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
@@ -30,6 +32,8 @@ type multiAgentRuntimeDeps struct {
 	metrics   *observability.Registry
 	provider  provider.Provider
 	model     string
+	graphPool *graphStorePool
+	projections *projectionManager
 }
 
 func buildMultiAgentManager(cfg *config.Config, deps multiAgentRuntimeDeps) (*multiagent.Manager, error) {
@@ -111,14 +115,18 @@ func buildMultiAgentManager(cfg *config.Config, deps multiAgentRuntimeDeps) (*mu
 			"\n\nYou are a delegated HAOS worker. Work only on the delegated task. " +
 			"Return evidence and a concise result to the parent agent. " +
 			"Do not claim work was completed unless tool results support it.\n\n" +
-			"Memory scope: " + profile.MemoryScope + ".\n"
+			"Memory scope: " + profile.MemoryScope + ". Long-term recall is physically isolated to this namespace.\n"
 		if err := os.WriteFile(filepath.Join(agentWorkspace, "SOUL.md"), []byte(roleDoc), 0o600); err != nil {
 			return nil, fmt.Errorf("multiagent %s role profile: %w", profile.ID, err)
 		}
 
 		workerTools := subsetToolRegistry(deps.tools, profile.ToolAllow)
-		if strings.EqualFold(strings.TrimSpace(profile.MemoryScope), "private") {
-			workerTools = withoutTool(workerTools, "memory_search")
+		if _, allowed := workerTools.Get("memory_search"); allowed && deps.graphPool != nil {
+			namespace, nsErr := agentMemoryNamespace(profile, deps.workspace)
+			if nsErr != nil {
+				return nil, nsErr
+			}
+			workerTools.Register(newScopedMemorySearchTool(deps.graphPool, []memoryfabric.Namespace{namespace}, namespace.Scope))
 		}
 		builder := prompt.New(agentWorkspace)
 		builder.DisabledSkills = append([]string(nil), workerCfg.Agents.Defaults.DisabledSkills...)
@@ -172,37 +180,55 @@ func buildMultiAgentManager(cfg *config.Config, deps multiAgentRuntimeDeps) (*mu
 	}
 
 	executor := multiagent.ExecutorFunc(func(ctx context.Context, profile multiagent.Profile, task multiagent.Task) (string, error) {
+		var result string
 		if strings.TrimSpace(profile.Endpoint) != "" {
 			if _, err := netpolicy.ValidateURL(ctx, profile.Endpoint, remotePolicy); err != nil {
 				return "", fmt.Errorf("multiagent %s endpoint blocked: %w", profile.ID, err)
 			}
-			return remote.Execute(ctx, profile, task)
-		}
-		loop, err := getLocalLoop(profile)
-		if err != nil {
-			return "", err
-		}
-		sessionKey := "webui:tmp_agent_" + profile.ID + "_" + task.ID
-		msg := core.InboundMessage{
-			Channel: "multiagent", SenderID: task.RequestedBy, ChatID: task.RootTaskID,
-			Content: task.Prompt,
-			Metadata: map[string]any{
-				"_multiagent": map[string]any{
-					"task_id": task.ID, "root_task_id": task.RootTaskID,
-					"parent_task_id": task.ParentTaskID, "trace_id": task.TraceID,
-					"agent_id": task.AgentID, "depth": task.Depth,
+			remoteResult, err := remote.Execute(ctx, profile, task)
+			if err != nil {
+				return "", err
+			}
+			result = remoteResult
+		} else {
+			loop, err := getLocalLoop(profile)
+			if err != nil {
+				return "", err
+			}
+			sessionKey := "webui:tmp_agent_" + profile.ID + "_" + task.ID
+			msg := core.InboundMessage{
+				Channel: "multiagent", SenderID: task.RequestedBy, ChatID: task.RootTaskID,
+				Content: task.Prompt,
+				Metadata: map[string]any{
+					"_multiagent": map[string]any{
+						"task_id": task.ID, "root_task_id": task.RootTaskID,
+						"parent_task_id": task.ParentTaskID, "trace_id": task.TraceID,
+						"agent_id": task.AgentID, "depth": task.Depth,
+					},
 				},
-			},
-			SessionKeyOverride: &sessionKey,
+				SessionKeyOverride: &sessionKey,
+			}
+			out, err := loop.ProcessMessage(ctx, msg)
+			if err != nil {
+				return "", err
+			}
+			if out == nil {
+				return "", fmt.Errorf("multiagent %s returned no outbound message", profile.ID)
+			}
+			result = out.Content
 		}
-		out, err := loop.ProcessMessage(ctx, msg)
-		if err != nil {
-			return "", err
+
+		if deps.projections != nil && strings.TrimSpace(result) != "" {
+			namespace, nsErr := agentMemoryNamespace(profile, deps.workspace)
+			if nsErr != nil {
+				return "", nsErr
+			}
+			memoryContent := "Delegated task:\n" + task.Prompt + "\n\nWorker result:\n" + result
+			if err := deps.projections.EnqueueScopedWithIDError("agent-memory-"+task.ID, "multiagent:"+task.RootTaskID, namespace, memoryContent); err != nil {
+				slog.Warn("multiagent: scoped memory enqueue failed", "task_id", task.ID, "agent", profile.ID, "scope", namespace.Scope, "error", err)
+			}
 		}
-		if out == nil {
-			return "", fmt.Errorf("multiagent %s returned no outbound message", profile.ID)
-		}
-		return out.Content, nil
+		return result, nil
 	})
 
 	persistPath := ""
@@ -218,10 +244,7 @@ func buildMultiAgentManager(cfg *config.Config, deps multiAgentRuntimeDeps) (*mu
 }
 
 func subsetToolRegistry(base *tools.Registry, allow []string) *tools.Registry {
-	if len(allow) == 0 {
-		return base
-	}
-	all := false
+	all := len(allow) == 0
 	set := make(map[string]bool, len(allow))
 	for _, name := range allow {
 		name = strings.TrimSpace(name)
@@ -233,12 +256,11 @@ func subsetToolRegistry(base *tools.Registry, allow []string) *tools.Registry {
 			set[name] = true
 		}
 	}
-	if all {
-		return base
-	}
+	// Always clone. Workers may replace memory_search with a namespace-bound
+	// implementation; returning the shared registry would mutate the commander.
 	out := tools.NewRegistry()
 	for _, name := range base.Names() {
-		if !set[name] {
+		if !all && !set[name] {
 			continue
 		}
 		if tool, ok := base.Get(name); ok {

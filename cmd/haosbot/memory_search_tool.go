@@ -12,19 +12,11 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
 )
 
-const workspaceGraphStoreKey = "__haosbot_workspace_v1__"
-
 type memorySearchTool struct {
 	tools.ReadOnlyBase
 	pool         *graphStorePool
 	namespaces   map[string]memoryfabric.Namespace
 	defaultScope string
-}
-
-func newMemorySearchTool(pool *graphStorePool) *memorySearchTool {
-	return newScopedMemorySearchTool(pool, []memoryfabric.Namespace{
-		{Scope: memoryfabric.ScopeProject, Owner: "default"},
-	}, memoryfabric.ScopeProject)
 }
 
 func newScopedMemorySearchTool(pool *graphStorePool, namespaces []memoryfabric.Namespace, defaultScope string) *memorySearchTool {

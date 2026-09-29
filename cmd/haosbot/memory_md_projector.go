@@ -13,6 +13,7 @@ import (
 	"time"
 
 	micrographrag "github.com/adrianolimagarcia/micrographrag-go"
+	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
 )
 
 const canonicalMemorySource = "haosbot/memory/MEMORY.md"
@@ -20,6 +21,7 @@ const canonicalMemorySource = "haosbot/memory/MEMORY.md"
 type memoryMDProjector struct {
 	path   string
 	pool   *graphStorePool
+	namespace memoryfabric.Namespace
 	poll   time.Duration
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -27,11 +29,15 @@ type memoryMDProjector struct {
 }
 
 func newMemoryMDProjector(path string, pool *graphStorePool, poll time.Duration) *memoryMDProjector {
+	return newScopedMemoryMDProjector(path, pool, memoryfabric.Namespace{Scope: memoryfabric.ScopeProject, Owner: "default"}, poll)
+}
+
+func newScopedMemoryMDProjector(path string, pool *graphStorePool, namespace memoryfabric.Namespace, poll time.Duration) *memoryMDProjector {
 	if poll <= 0 {
 		poll = 2 * time.Second
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &memoryMDProjector{path: path, pool: pool, poll: poll, ctx: ctx, cancel: cancel}
+	p := &memoryMDProjector{path: path, pool: pool, namespace: namespace, poll: poll, ctx: ctx, cancel: cancel}
 	p.wg.Add(1)
 	go p.run()
 	return p
@@ -78,7 +84,9 @@ func (p *memoryMDProjector) syncOnce(ctx context.Context) error {
 	hash := sha256.Sum256(raw)
 	title := "MEMORY.md@" + hex.EncodeToString(hash[:12])
 
-	store, release, err := p.pool.Acquire(ctx, workspaceGraphStoreKey)
+	key, err := graphStoreKey(p.namespace)
+	if err != nil { return err }
+	store, release, err := p.pool.Acquire(ctx, key)
 	if err != nil {
 		return err
 	}

@@ -83,3 +83,43 @@ func TestAgentMemoryNamespaceSemantics(t *testing.T) {
 		t.Fatalf("global namespace = %+v want %+v", global, globalMemoryNamespace())
 	}
 }
+
+
+func TestProjectionManagerRoutesJobsToScopedStores(t *testing.T) {
+	pool := newTestPool(t, 4)
+	defer pool.Close()
+	manager := &projectionManager{graphPool: pool}
+	project := memoryfabric.Namespace{Scope: memoryfabric.ScopeProject, Owner: "project-a"}
+	private := memoryfabric.Namespace{Scope: memoryfabric.ScopePrivate, Owner: "project-a:agent:coder"}
+
+	projectJob := memoryfabric.Job{
+		ID: "project-task", RecordID: "project-task", SessionKey: "session-a",
+		Scope: project.Scope, Owner: project.Owner, Content: "project result",
+	}
+	privateJob := memoryfabric.Job{
+		ID: "private-task", RecordID: "private-task", SessionKey: "session-b",
+		Scope: private.Scope, Owner: private.Owner, Content: "private result",
+	}
+	if err := manager.processGraph(context.Background(), projectJob); err != nil { t.Fatal(err) }
+	if err := manager.processGraph(context.Background(), privateJob); err != nil { t.Fatal(err) }
+
+	projectKey, _ := graphStoreKey(project)
+	privateKey, _ := graphStoreKey(private)
+	projectStore, releaseProject, err := pool.Acquire(context.Background(), projectKey)
+	if err != nil { t.Fatal(err) }
+	defer releaseProject()
+	privateStore, releasePrivate, err := pool.Acquire(context.Background(), privateKey)
+	if err != nil { t.Fatal(err) }
+	defer releasePrivate()
+
+	projectSource := "haosbot/memory/" + project.Scope + "/" + project.Owner + "/session/" + projectJob.SessionKey
+	privateSource := "haosbot/memory/" + private.Scope + "/" + private.Owner + "/session/" + privateJob.SessionKey
+	var projectOwn, projectLeak, privateOwn, privateLeak int
+	if err := projectStore.DB().QueryRow("SELECT COUNT(*) FROM documents WHERE source=?", projectSource).Scan(&projectOwn); err != nil { t.Fatal(err) }
+	if err := projectStore.DB().QueryRow("SELECT COUNT(*) FROM documents WHERE source=?", privateSource).Scan(&projectLeak); err != nil { t.Fatal(err) }
+	if err := privateStore.DB().QueryRow("SELECT COUNT(*) FROM documents WHERE source=?", privateSource).Scan(&privateOwn); err != nil { t.Fatal(err) }
+	if err := privateStore.DB().QueryRow("SELECT COUNT(*) FROM documents WHERE source=?", projectSource).Scan(&privateLeak); err != nil { t.Fatal(err) }
+	if projectOwn != 1 || privateOwn != 1 || projectLeak != 0 || privateLeak != 0 {
+		t.Fatalf("scope routing counts projectOwn=%d privateOwn=%d projectLeak=%d privateLeak=%d", projectOwn, privateOwn, projectLeak, privateLeak)
+	}
+}

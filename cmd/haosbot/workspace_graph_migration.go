@@ -12,7 +12,10 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
 )
 
-const workspaceGraphMigrationMarker = "graph-workspace-v1.migrated"
+const (
+	workspaceGraphMigrationMarker = "graph-workspace-v1.migrated"
+	scopedGraphMigrationMarker = "graph-scopes-v1.migrated"
+)
 
 func workspaceGraphNamespace(workspace string) string {
 	clean := filepath.Clean(workspace)
@@ -47,6 +50,36 @@ func ensureWorkspaceGraphProjection(ctx context.Context, dataDir, workspace stri
 		if !ok { _ = os.Remove(tmpPath) }
 	}()
 	if _, err := fmt.Fprintln(tmp, "workspace GraphRAG projection queued"); err != nil { return err }
+	if err := tmp.Sync(); err != nil { return err }
+	if err := tmp.Close(); err != nil { return err }
+	if err := os.Rename(tmpPath, marker); err != nil { return err }
+	ok = true
+	return nil
+}
+
+
+func ensureScopedGraphProjection(ctx context.Context, dataDir, workspace string, fabric *memoryfabric.Store) error {
+	marker := filepath.Join(dataDir, workspaceGraphNamespace(workspace)+"."+scopedGraphMigrationMarker)
+	if _, err := os.Stat(marker); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	// Rebuild only derived GraphRAG data. Canonical Memory Fabric records have
+	// already been migrated with scope/owner columns by memoryfabric.Open.
+	if err := fabric.RequeueProjection(ctx, memoryfabric.ProjectionGraph); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dataDir, ".graph-scopes-v1-*.tmp")
+	if err != nil { return err }
+	tmpPath := tmp.Name()
+	ok := false
+	defer func() {
+		_ = tmp.Close()
+		if !ok { _ = os.Remove(tmpPath) }
+	}()
+	if _, err := fmt.Fprintln(tmp, "scoped GraphRAG projection queued"); err != nil { return err }
 	if err := tmp.Sync(); err != nil { return err }
 	if err := tmp.Close(); err != nil { return err }
 	if err := os.Rename(tmpPath, marker); err != nil { return err }

@@ -6,6 +6,7 @@ import { Apps } from './Apps';
 import { Skills } from './Skills';
 import { Automations } from './Automations';
 import { Models } from './Models';
+import { Agents } from './Agents';
 import { Memory } from './Memory';
 import { Files } from './Files';
 import { Runtime } from './Runtime';
@@ -19,6 +20,7 @@ export function Workspace({ view, state, refresh, report }: { view: View; state:
     case 'skills': return <Skills state={state} refresh={refresh} report={report}/>;
     case 'automations': return <Automations report={report}/>;
     case 'models': return <Models state={state} refresh={refresh} report={report}/>;
+    case 'agents': return <Agents report={report}/>;
     case 'memory': return <Memory state={state} report={report}/>;
     case 'files': return <Files/>;
     case 'runtime': return <Runtime state={state}/>;

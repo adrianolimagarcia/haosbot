@@ -177,14 +177,93 @@ func decodeConfig(raw map[string]any) (*Config, []Issue) {
 // agents
 // ---------------------------------------------------------------------------
 
-var agentsFields = []fieldDef{{name: "defaults"}}
+var agentsFields = []fieldDef{
+	{name: "defaults"},
+	{name: "multi_agent"},
+	{name: "profiles"},
+}
 
 func decodeAgents(c *collector, o *jmap) AgentsConfig {
-	out := AgentsConfig{Defaults: DefaultAgentDefaults()}
+	out := DefaultAgentsConfig()
 	if v, key, ok := agentsFields[0].get(o); ok {
 		if sub, ok2 := c.asObject(v, o.child(key).path, "AgentDefaults"); ok2 {
 			out.Defaults = decodeAgentDefaults(c, sub)
 		}
+	}
+	if v, key, ok := agentsFields[1].get(o); ok {
+		if sub, ok2 := c.asObject(v, o.child(key).path, "MultiAgentConfig"); ok2 {
+			out.MultiAgent = decodeMultiAgent(c, sub)
+		}
+	}
+	if v, key, ok := agentsFields[2].get(o); ok {
+		out.Profiles = decodeAgentProfiles(c, v, o.child(key).path)
+	}
+	return out
+}
+
+var multiAgentFields = []fieldDef{
+	{name: "enabled"}, {name: "max_depth"}, {name: "max_parallel"},
+	{name: "max_children"}, {name: "max_tasks"}, {name: "task_timeout_seconds"},
+	{name: "retention_minutes"}, {name: "persist_tasks"},
+}
+
+func decodeMultiAgent(c *collector, o *jmap) MultiAgentConfig {
+	d := DefaultAgentsConfig().MultiAgent
+	d.Enabled = c.readBool(o, multiAgentFields[0], d.Enabled)
+	d.MaxDepth = c.readInt(o, multiAgentFields[1], d.MaxDepth, Ge(1), Le(16))
+	d.MaxParallel = c.readInt(o, multiAgentFields[2], d.MaxParallel, Ge(1), Le(64))
+	d.MaxChildren = c.readInt(o, multiAgentFields[3], d.MaxChildren, Ge(1), Le(64))
+	d.MaxTasks = c.readInt(o, multiAgentFields[4], d.MaxTasks, Ge(16), Le(65536))
+	d.TaskTimeoutSeconds = c.readInt(o, multiAgentFields[5], d.TaskTimeoutSeconds, Ge(1), Le(86400))
+	d.RetentionMinutes = c.readInt(o, multiAgentFields[6], d.RetentionMinutes, Ge(1), Le(10080))
+	d.PersistTasks = c.readBool(o, multiAgentFields[7], d.PersistTasks)
+	return d
+}
+
+var agentProfileFields = []fieldDef{
+	{name: "enabled"}, {name: "name"}, {name: "role"}, {name: "instructions"},
+	{name: "model"}, {name: "provider"}, {name: "endpoint"}, {name: "token_env"},
+	{name: "tool_allow"}, {name: "delegate_to"}, {name: "memory_scope"}, {name: "max_parallel"},
+	{name: "max_tokens"}, {name: "max_tool_iterations"},
+}
+
+func decodeAgentProfiles(c *collector, v any, path []PathPart) map[string]AgentProfileConfig {
+	m, ok := v.(map[string]any)
+	if !ok {
+		c.add(path, "dict_type", "Input should be a valid dictionary")
+		return DefaultAgentProfiles()
+	}
+	defaults := DefaultAgentProfiles()
+	out := make(map[string]AgentProfileConfig, len(m))
+	keys := make([]string, 0, len(m))
+	for id := range m { keys = append(keys, id) }
+	sort.Strings(keys)
+	for _, id := range keys {
+		item, ok := m[id].(map[string]any)
+		if !ok {
+			c.add(appendPath(path, Field(id)), "model_type", "Input should be a valid dictionary or instance of AgentProfileConfig")
+			continue
+		}
+		d, exists := defaults[id]
+		if !exists {
+			d = AgentProfileConfig{Enabled: true, Name: id, Role: id, ToolAllow: []string{"*"}, MemoryScope: "project"}
+		}
+		o := &jmap{m: item, path: appendPath(path, Field(id))}
+		d.Enabled = c.readBool(o, agentProfileFields[0], d.Enabled)
+		d.Name = c.readString(o, agentProfileFields[1], d.Name)
+		d.Role = c.readString(o, agentProfileFields[2], d.Role)
+		d.Instructions = c.readString(o, agentProfileFields[3], d.Instructions)
+		d.Model = c.readString(o, agentProfileFields[4], d.Model)
+		d.Provider = c.readString(o, agentProfileFields[5], d.Provider)
+		d.Endpoint = c.readString(o, agentProfileFields[6], d.Endpoint)
+		d.TokenEnv = c.readString(o, agentProfileFields[7], d.TokenEnv)
+		d.ToolAllow = c.readStringList(o, agentProfileFields[8], d.ToolAllow)
+		d.DelegateTo = c.readStringList(o, agentProfileFields[9], d.DelegateTo)
+		d.MemoryScope = c.readLiteral(o, agentProfileFields[10], d.MemoryScope, "private", "team", "project", "global")
+		d.MaxParallel = c.readInt(o, agentProfileFields[11], d.MaxParallel, Ge(0), Le(64))
+		d.MaxTokens = c.readInt(o, agentProfileFields[12], d.MaxTokens, Ge(0), intBound{})
+		d.MaxToolIterations = c.readInt(o, agentProfileFields[13], d.MaxToolIterations, Ge(0), intBound{})
+		out[id] = d
 	}
 	return out
 }

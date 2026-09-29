@@ -133,7 +133,43 @@ func (c *Config) ResolvePreset(name *string) (ModelPresetConfig, error) {
 
 // AgentsConfig mirrors schema.py:187-190.
 type AgentsConfig struct {
-	Defaults AgentDefaults `json:"defaults"`
+	Defaults   AgentDefaults                  `json:"defaults"`
+	MultiAgent MultiAgentConfig               `json:"multiAgent"`
+	Profiles   map[string]AgentProfileConfig  `json:"profiles"`
+}
+
+// MultiAgentConfig is the HAOS-native orchestration policy. It is intentionally
+// nested under agents so upstream nanobot, whose Base models ignore unknown
+// nested fields, can still read the same config file.
+type MultiAgentConfig struct {
+	Enabled            bool `json:"enabled"`
+	MaxDepth           int  `json:"maxDepth"`
+	MaxParallel        int  `json:"maxParallel"`
+	MaxChildren        int  `json:"maxChildren"`
+	MaxTasks           int  `json:"maxTasks"`
+	TaskTimeoutSeconds int  `json:"taskTimeoutSeconds"`
+	RetentionMinutes   int  `json:"retentionMinutes"`
+	PersistTasks       bool `json:"persistTasks"`
+}
+
+// AgentProfileConfig declares one local worker or remote A2A peer. Endpoint is
+// empty for in-process workers. TokenEnv names an environment variable and
+// deliberately avoids storing remote bearer tokens in config.json.
+type AgentProfileConfig struct {
+	Enabled           bool     `json:"enabled"`
+	Name              string   `json:"name"`
+	Role              string   `json:"role"`
+	Instructions      string   `json:"instructions"`
+	Model             string   `json:"model"`
+	Provider          string   `json:"provider"`
+	Endpoint          string   `json:"endpoint"`
+	TokenEnv          string   `json:"tokenEnv"`
+	ToolAllow         []string `json:"toolAllow"`
+	DelegateTo        []string `json:"delegateTo"`
+	MemoryScope       string   `json:"memoryScope"`
+	MaxParallel       int      `json:"maxParallel"`
+	MaxTokens         int      `json:"maxTokens"`
+	MaxToolIterations int      `json:"maxToolIterations"`
 }
 
 // AgentDefaults mirrors schema.py:116-184.
@@ -670,7 +706,7 @@ func DefaultConfig() *Config {
 // report "UTC" where the reference reports the host zone.
 func defaultConfigSkeleton() *Config {
 	return &Config{
-		Agents:        AgentsConfig{Defaults: defaultAgentDefaultsResolved()},
+		Agents:        DefaultAgentsConfig(),
 		Channels:      DefaultChannelsConfig(),
 		Transcription: DefaultTranscriptionConfig(),
 		Providers:     DefaultProvidersConfig(),
@@ -685,6 +721,51 @@ func defaultConfigSkeleton() *Config {
 		},
 		Tools:        DefaultToolsConfig(),
 		ModelPresets: map[string]ModelPresetConfig{},
+	}
+}
+
+// DefaultAgentsConfig returns the HAOS agent defaults plus a small built-in
+// squad. The feature is enabled without inserting an extra manager LLM in the
+// request path; normal chat remains single-agent until the model calls agents.
+func DefaultAgentsConfig() AgentsConfig {
+	return AgentsConfig{
+		Defaults: defaultAgentDefaultsResolved(),
+		MultiAgent: MultiAgentConfig{
+			Enabled: true, MaxDepth: 3, MaxParallel: 4, MaxChildren: 8,
+			MaxTasks: 1024, TaskTimeoutSeconds: 300, RetentionMinutes: 60,
+			PersistTasks: true,
+		},
+		Profiles: DefaultAgentProfiles(),
+	}
+}
+
+func DefaultAgentProfiles() map[string]AgentProfileConfig {
+	return map[string]AgentProfileConfig{
+		"planner": {
+			Enabled: true, Name: "Planner", Role: "planner",
+			Instructions: "Decompose complex requests into an explicit plan, dependencies, risks, and acceptance criteria. Do not implement unless asked by the parent task.",
+			ToolAllow: []string{"memory_search", "read_file", "list_dir", "agents"},
+			DelegateTo: []string{"researcher", "coder", "reviewer"},
+			MemoryScope: "project", MaxParallel: 2,
+		},
+		"researcher": {
+			Enabled: true, Name: "Researcher", Role: "researcher",
+			Instructions: "Gather and verify evidence for the delegated task. Return concise findings, sources or file evidence, uncertainty, and what the parent agent should do next.",
+			ToolAllow: []string{"memory_search", "read_file", "list_dir"}, DelegateTo: []string{},
+			MemoryScope: "project", MaxParallel: 4,
+		},
+		"coder": {
+			Enabled: true, Name: "Coder", Role: "coder",
+			Instructions: "Implement the delegated engineering task completely. Inspect existing code first, make minimal coherent changes, run available validation, and report exact files changed and remaining risk.",
+			ToolAllow: []string{"*"}, DelegateTo: []string{"reviewer"},
+			MemoryScope: "project", MaxParallel: 1,
+		},
+		"reviewer": {
+			Enabled: true, Name: "Reviewer", Role: "reviewer",
+			Instructions: "Independently review the delegated result for correctness, regressions, concurrency, security, tests, and requirement coverage. Prefer concrete defects and actionable fixes over style commentary.",
+			ToolAllow: []string{"memory_search", "read_file", "list_dir", "exec"}, DelegateTo: []string{},
+			MemoryScope: "project", MaxParallel: 2,
+		},
 	}
 }
 

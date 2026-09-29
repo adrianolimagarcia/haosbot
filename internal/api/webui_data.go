@@ -19,6 +19,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
 	"github.com/adrianolimagarcia/nanobot-go/internal/mcp"
 	"github.com/adrianolimagarcia/nanobot-go/internal/mcpruntime"
+	"github.com/adrianolimagarcia/nanobot-go/internal/multiagent"
 	"github.com/adrianolimagarcia/nanobot-go/internal/skills"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
 )
@@ -75,6 +76,89 @@ func (s *Server) registerWebUIData(mux *http.ServeMux) {
 	mux.HandleFunc("/api/webui/triggers", s.handleWebUITriggers)
 	mux.HandleFunc("/api/webui/trigger", s.handleWebUITrigger)
 	mux.HandleFunc("/api/webui/trigger/fire", s.handleWebUITriggerFire)
+	mux.HandleFunc("/api/webui/agents", s.handleWebUIAgents)
+	mux.HandleFunc("/api/webui/agent-tasks", s.handleWebUIAgentTasks)
+	mux.HandleFunc("/api/webui/agent-task", s.handleWebUIAgentTask)
+}
+
+func (s *Server) handleWebUIAgents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.multiAgents.Load()
+	if manager == nil {
+		writeWebUIJSON(w, map[string]any{"enabled": false, "agents": []any{}, "limits": nil})
+		return
+	}
+	writeWebUIJSON(w, map[string]any{
+		"enabled": true,
+		"agents": manager.Profiles(),
+		"limits": manager.Limits(),
+	})
+}
+
+func (s *Server) handleWebUIAgentTasks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.multiAgents.Load()
+	if manager == nil {
+		writeWebUIJSON(w, map[string]any{"tasks": []any{}})
+		return
+	}
+	writeWebUIJSON(w, map[string]any{"tasks": manager.List(200)})
+}
+
+func (s *Server) handleWebUIAgentTask(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.multiAgents.Load()
+	if manager == nil {
+		http.Error(w, "multi-agent runtime is disabled", http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		Action string `json:"action"`
+		Agent string `json:"agent"`
+		Prompt string `json:"prompt"`
+		TaskID string `json:"task_id"`
+		TimeoutSeconds int `json:"timeout_seconds"`
+	}
+	dec := json.NewDecoder(io.LimitReader(r.Body, 256<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(req.Action)) {
+	case "delegate":
+		task, err := manager.Delegate(r.Context(), multiagent.DelegateRequest{
+			AgentID: req.Agent, Prompt: req.Prompt, Wait: false, Detach: true,
+			Timeout: time.Duration(req.TimeoutSeconds) * time.Second,
+			RequestedBy: "webui",
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeWebUIJSON(w, map[string]any{"task": task})
+	case "cancel":
+		task, err := manager.Cancel(strings.TrimSpace(req.TaskID))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeWebUIJSON(w, map[string]any{"task": task})
+	default:
+		http.Error(w, "unsupported action", http.StatusBadRequest)
+	}
 }
 
 func (s *Server) handleWebUIMCPTest(w http.ResponseWriter, r *http.Request) {

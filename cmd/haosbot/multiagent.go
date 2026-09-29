@@ -270,16 +270,3 @@ func subsetToolRegistry(base *tools.Registry, allow []string) *tools.Registry {
 	return out
 }
 
-
-func withoutTool(base *tools.Registry, denied string) *tools.Registry {
-	out := tools.NewRegistry()
-	for _, name := range base.Names() {
-		if name == denied {
-			continue
-		}
-		if tool, ok := base.Get(name); ok {
-			out.Register(tool)
-		}
-	}
-	return out
-}

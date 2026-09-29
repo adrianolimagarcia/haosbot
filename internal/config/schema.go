@@ -751,7 +751,7 @@ func DefaultAgentProfiles() map[string]AgentProfileConfig {
 		"researcher": {
 			Enabled: true, Name: "Researcher", Role: "researcher",
 			Instructions: "Gather and verify evidence for the delegated task. Return concise findings, sources or file evidence, uncertainty, and what the parent agent should do next.",
-			ToolAllow: []string{"memory_search", "read_file", "list_dir"},
+			ToolAllow: []string{"memory_search", "read_file", "list_dir"}, DelegateTo: []string{},
 			MemoryScope: "project", MaxParallel: 4,
 		},
 		"coder": {
@@ -763,7 +763,7 @@ func DefaultAgentProfiles() map[string]AgentProfileConfig {
 		"reviewer": {
 			Enabled: true, Name: "Reviewer", Role: "reviewer",
 			Instructions: "Independently review the delegated result for correctness, regressions, concurrency, security, tests, and requirement coverage. Prefer concrete defects and actionable fixes over style commentary.",
-			ToolAllow: []string{"memory_search", "read_file", "list_dir", "exec"},
+			ToolAllow: []string{"memory_search", "read_file", "list_dir", "exec"}, DelegateTo: []string{},
 			MemoryScope: "project", MaxParallel: 2,
 		},
 	}

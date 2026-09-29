@@ -37,6 +37,7 @@ type Profile struct {
 	ToolAllow         []string `json:"tool_allow,omitempty"`
 	DelegateTo        []string `json:"delegate_to,omitempty"`
 	MemoryScope       string   `json:"memory_scope"`
+	MemoryOwner       string   `json:"memory_owner,omitempty"`
 	MaxParallel       int      `json:"max_parallel,omitempty"`
 	MaxTokens         int      `json:"max_tokens,omitempty"`
 	MaxToolIterations int      `json:"max_tool_iterations,omitempty"`

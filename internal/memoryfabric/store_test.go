@@ -42,10 +42,10 @@ func TestAppendTurnIsAtomicAndIdempotent(t *testing.T) {
 	if err := s.AppendTurn(context.Background(), "turn-1", "session-1", "hello"); err != nil { t.Fatal(err) }
 	job, ok, err := s.Claim(context.Background(), ProjectionGraph)
 	if err != nil || !ok { t.Fatalf("claim: ok=%v err=%v", ok, err) }
-	if job.ID != "turn-1" || job.Content != "hello" { t.Fatalf("job=%+v", job) }
+	if job.ID != ScopedRecordID(s.defaultNamespace, "turn-1") || job.Content != "hello" { t.Fatalf("job=%+v", job) }
 	if _, ok, err := s.Claim(context.Background(), ProjectionGraph); err != nil || ok { t.Fatalf("duplicate claim: ok=%v err=%v", ok, err) }
-	if err := s.Ack(context.Background(), ProjectionGraph, "turn-1"); err != nil { t.Fatal(err) }
-	if err := s.Ack(context.Background(), ProjectionObsidian, "turn-1"); err != nil { t.Fatal(err) }
+	if err := s.Ack(context.Background(), ProjectionGraph, job.ID); err != nil { t.Fatal(err) }
+	if err := s.Ack(context.Background(), ProjectionObsidian, job.ID); err != nil { t.Fatal(err) }
 	stats, err = s.Stats(context.Background())
 	if err != nil { t.Fatal(err) }
 	if stats.Pending != 0 || stats.PendingBytes != 0 || stats.Succeeded != 2 { t.Fatalf("stats=%+v", stats) }
@@ -61,7 +61,7 @@ func TestPendingCountersTrackRetriesAndDeadJobs(t *testing.T) {
 	stats, err := s.Stats(context.Background())
 	if err != nil { t.Fatal(err) }
 	if stats.Pending != 1 || stats.PendingBytes != 5 || stats.Dead != 1 { t.Fatalf("after dead graph stats=%+v", stats) }
-	if err := s.Ack(context.Background(), ProjectionObsidian, "turn-counter"); err != nil { t.Fatal(err) }
+	if err := s.Ack(context.Background(), ProjectionObsidian, ScopedRecordID(s.defaultNamespace, "turn-counter")); err != nil { t.Fatal(err) }
 	stats, err = s.Stats(context.Background())
 	if err != nil { t.Fatal(err) }
 	if stats.Pending != 0 || stats.PendingBytes != 0 || stats.Dead != 1 { t.Fatalf("after ack stats=%+v", stats) }

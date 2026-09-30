@@ -87,7 +87,9 @@ func TestScopedRecordIDDiffersByNamespace(t *testing.T) {
 	if ScopedRecordID(a, "turn-1") == ScopedRecordID(b, "turn-1") {
 		t.Fatal("same external id collided across namespaces")
 	}
-	if ScopedRecordID(a, "turn-1") != ScopedRecordID(a, "turn-1") {
+	first := ScopedRecordID(a, "turn-1")
+	second := ScopedRecordID(a, "turn-1")
+	if first != second {
 		t.Fatal("scoped id is not deterministic")
 	}
 }

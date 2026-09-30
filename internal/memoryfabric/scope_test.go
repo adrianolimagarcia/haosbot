@@ -34,14 +34,21 @@ func TestAppendTurnScopedKeepsNamespaceIdentity(t *testing.T) {
 		seen[job.ID] = job
 		if err := s.Ack(context.Background(), ProjectionGraph, job.ID); err != nil { t.Fatal(err) }
 	}
-	if got := seen["project-turn"]; got.Scope != ScopeProject || got.Owner != "project-a" {
+	projectID := ScopedRecordID(project, "project-turn")
+	privateID := ScopedRecordID(private, "private-turn")
+	if got := seen[projectID]; got.Scope != ScopeProject || got.Owner != "project-a" {
 		t.Fatalf("project job namespace = %+v", got)
 	}
-	if got := seen["private-turn"]; got.Scope != ScopePrivate || got.Owner != private.Owner {
+	if got := seen[privateID]; got.Scope != ScopePrivate || got.Owner != private.Owner {
 		t.Fatalf("private job namespace = %+v", got)
 	}
-	if err := s.AppendTurnScoped(context.Background(), "project-turn", "session", private, "project memory"); err == nil {
-		t.Fatal("expected record identity conflict across namespaces")
+	// The same external ID is valid in another namespace and resolves to a
+	// different canonical record ID.
+	if err := s.AppendTurnScoped(context.Background(), "project-turn", "session", private, "project memory"); err != nil {
+		t.Fatalf("cross-namespace external id should coexist: %v", err)
+	}
+	if ScopedRecordID(project, "project-turn") == ScopedRecordID(private, "project-turn") {
+		t.Fatal("scoped record IDs collided")
 	}
 }
 
@@ -75,8 +82,8 @@ func TestOpenMigratesLegacyRecordsIntoDefaultProjectNamespace(t *testing.T) {
 	if err := s.db.QueryRow("SELECT memory_scope,memory_owner FROM memory_records WHERE record_id='legacy'").Scan(&scope, &owner); err != nil {
 		t.Fatal(err)
 	}
-	if scope != ScopeProject || owner != ns.Owner {
-		t.Fatalf("legacy namespace = %s/%s, want %s/%s", scope, owner, ns.Scope, ns.Owner)
+	if scope != ScopeProject || owner != LegacyUnassignedOwner {
+		t.Fatalf("legacy namespace = %s/%s, want %s/%s", scope, owner, ScopeProject, LegacyUnassignedOwner)
 	}
 }
 

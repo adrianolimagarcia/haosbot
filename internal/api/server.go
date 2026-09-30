@@ -21,6 +21,7 @@ import (
 	cronruntime "github.com/adrianolimagarcia/nanobot-go/internal/cron"
 	triggersruntime "github.com/adrianolimagarcia/nanobot-go/internal/triggers"
 	"github.com/adrianolimagarcia/nanobot-go/internal/marketplace"
+	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
 	"github.com/adrianolimagarcia/nanobot-go/internal/multiagent"
 	"github.com/adrianolimagarcia/nanobot-go/internal/netpolicy"
 	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
@@ -50,6 +51,7 @@ type Server struct {
 	scheduler atomic.Pointer[cronruntime.Service]
 	triggers atomic.Pointer[triggersruntime.Service]
 	multiAgents atomic.Pointer[multiagent.Manager]
+	memoryFabric atomic.Pointer[memoryfabric.Store]
 	// marketplaceSvc is built once per server. The catalogue client owns a
 	// transport with its own connection pool, so rebuilding it per request
 	// would force a fresh TLS handshake against every upstream on every call.
@@ -105,6 +107,12 @@ func (s *Server) SetTriggerService(service *triggersruntime.Service) { s.trigger
 func (s *Server) SetMultiAgentManager(manager *multiagent.Manager) {
 	if manager != nil {
 		s.multiAgents.Store(manager)
+	}
+}
+
+func (s *Server) SetMemoryFabric(store *memoryfabric.Store) {
+	if store != nil {
+		s.memoryFabric.Store(store)
 	}
 }
 

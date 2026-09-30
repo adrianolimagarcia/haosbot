@@ -81,9 +81,9 @@ func ensureSafeLegacyScopeMigration(ctx context.Context, dataDir, workspace stri
 			key, keyErr := graphStoreKey(project)
 			if keyErr != nil { return keyErr }
 			if err := removeScopedGraphDB(scopedGraphRoot(dataDir), key); err != nil { return err }
-			if obsidianEnabled {
-				_ = os.RemoveAll(filepath.Join(dataDir, "obsidian-memory", safeScopePath(project.Scope, project.Owner)))
-			}
+			// Remove potentially leaked derived Obsidian data even when the current
+			// profile has Obsidian disabled; a previous run may have enabled it.
+			_ = os.RemoveAll(filepath.Join(dataDir, "obsidian-memory", safeScopePath(project.Scope, project.Owner)))
 			if err := fabric.RequeueProjection(ctx, memoryfabric.ProjectionGraph); err != nil { return err }
 			if obsidianEnabled {
 				if err := fabric.RequeueProjection(ctx, memoryfabric.ProjectionObsidian); err != nil { return err }

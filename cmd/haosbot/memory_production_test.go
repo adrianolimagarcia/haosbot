@@ -108,7 +108,7 @@ func TestRemoteA2ARecallReadsOnlyBoundNamespace(t *testing.T) {
 	release()
 	if err != nil { t.Fatal(err) }
 
-	task := multiagent.Task{ID: "remote-task", Prompt: "What is the SQLite durability decision?"}
+	task := multiagent.Task{ID: "remote-task", Prompt: "SQLite WAL canonical memory"}
 	out, err := remoteTaskWithScopedRecall(ctx, multiAgentRuntimeDeps{workspace: workspace, graphPool: pool}, profile, task)
 	if err != nil { t.Fatal(err) }
 	if !strings.Contains(out.Prompt, "SQLite WAL") || !strings.Contains(out.Prompt, "trust=untrusted") {

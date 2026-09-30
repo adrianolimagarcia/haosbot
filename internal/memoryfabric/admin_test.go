@@ -2,6 +2,7 @@ package memoryfabric
 
 import (
 	"context"
+	"crypto/sha256"
 	"path/filepath"
 	"testing"
 	"time"
@@ -88,5 +89,31 @@ func TestScopedRecordIDDiffersByNamespace(t *testing.T) {
 	}
 	if ScopedRecordID(a, "turn-1") != ScopedRecordID(a, "turn-1") {
 		t.Fatal("scoped id is not deterministic")
+	}
+}
+
+
+func TestLegacyRawIDKeepsSameNamespaceIdempotency(t *testing.T) {
+	ctx := context.Background()
+	ns := Namespace{Scope: ScopeProject, Owner: "workspace-a"}
+	s, err := Open(ctx, Config{
+		Path: filepath.Join(t.TempDir(), "memory-fabric.db"), DefaultNamespace: ns,
+		MaxPending: 32, MaxPendingBytes: 1 << 20, MaxContentBytes: 1 << 10,
+		MaxDiskBytes: 50 << 20, Projections: []string{ProjectionGraph},
+	})
+	if err != nil { t.Fatal(err) }
+	defer s.Close()
+
+	content := "legacy payload"
+	hash := sha256.Sum256([]byte(content))
+	if _, err := s.db.Exec(`INSERT INTO memory_records(record_id,session_key,memory_scope,memory_owner,content,content_hash,created_at)
+VALUES(?,?,?,?,?,?,?)`, "legacy-raw", "session", ns.Scope, ns.Owner, content, hash[:], time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendTurnScoped(ctx, "legacy-raw", "session", ns, content); err != nil {
+		t.Fatalf("matching raw legacy retry failed: %v", err)
+	}
+	if err := s.AppendTurnScoped(ctx, "legacy-raw", "session", ns, "changed payload"); err == nil {
+		t.Fatal("expected same-namespace legacy ID conflict")
 	}
 }

@@ -119,3 +119,47 @@ VALUES(?,?,?,?,?,?,?)`, "legacy-raw", "session", ns.Scope, ns.Owner, content, ha
 		t.Fatal("expected same-namespace legacy ID conflict")
 	}
 }
+
+
+func TestRetryDeadRespectsPendingJobBudget(t *testing.T) {
+	ctx := context.Background()
+	ns := Namespace{Scope: ScopeProject, Owner: "project-budget"}
+	s, err := Open(ctx, Config{
+		Path: filepath.Join(t.TempDir(), "memory-fabric.db"), DefaultNamespace: ns,
+		MaxPending: 1, MaxPendingBytes: 1 << 20, MaxContentBytes: 1 << 10,
+		MaxDiskBytes: 50 << 20, MaxAttempts: 1, Projections: []string{ProjectionGraph},
+	})
+	if err != nil { t.Fatal(err) }
+	defer s.Close()
+
+	if err := s.AppendTurnScoped(ctx, "dead", "s1", ns, "dead"); err != nil { t.Fatal(err) }
+	dead, ok, err := s.Claim(ctx, ProjectionGraph)
+	if err != nil || !ok { t.Fatalf("claim dead ok=%v err=%v", ok, err) }
+	if err := s.Retry(ctx, ProjectionGraph, dead.ID, context.Canceled); err != nil { t.Fatal(err) }
+	if err := s.AppendTurnScoped(ctx, "live", "s2", ns, "live"); err != nil { t.Fatal(err) }
+	if err := s.RetryDead(ctx, ProjectionGraph, dead.ID); err == nil {
+		t.Fatal("expected DLQ retry to respect maxPending")
+	}
+}
+
+func TestPruneKeepsCanonicalRecordWithoutProjectionHistory(t *testing.T) {
+	ctx := context.Background()
+	ns := Namespace{Scope: ScopeProject, Owner: "project-unprojected"}
+	s, err := Open(ctx, Config{
+		Path: filepath.Join(t.TempDir(), "memory-fabric.db"), DefaultNamespace: ns,
+		MaxPending: 8, MaxPendingBytes: 1 << 20, MaxContentBytes: 1 << 10,
+		MaxDiskBytes: 50 << 20, Projections: []string{ProjectionGraph},
+	})
+	if err != nil { t.Fatal(err) }
+	defer s.Close()
+
+	content := "unprojected"
+	hash := sha256.Sum256([]byte(content))
+	if _, err := s.db.Exec(`INSERT INTO memory_records(record_id,session_key,memory_scope,memory_owner,content,content_hash,created_at)
+VALUES(?,?,?,?,?,?,?)`, "raw-unprojected", "session", ns.Scope, ns.Owner, content, hash[:], time.Now().Add(-time.Hour).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := s.PruneSucceeded(ctx, time.Now(), &ns, 100)
+	if err != nil { t.Fatal(err) }
+	if deleted != 0 { t.Fatalf("deleted=%d want 0", deleted) }
+}

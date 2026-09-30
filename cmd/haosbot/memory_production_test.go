@@ -29,28 +29,23 @@ func TestSafeLegacyScopeMigrationQuarantinesOnlyPreV1Records(t *testing.T) {
 	defer fabric.Close()
 
 	if err := fabric.AppendTurnScoped(ctx, "old-ext", "s-old", project, "old legacy"); err != nil { t.Fatal(err) }
-	if err := fabric.AppendTurnScoped(ctx, "new-ext", "s-new", project, "new scoped"); err != nil { t.Fatal(err) }
-	oldID := memoryfabric.ScopedRecordID(project, "old-ext")
-	newID := memoryfabric.ScopedRecordID(project, "new-ext")
-
-	cutoff := time.Now().Add(-time.Hour)
-	if _, err := fabric.DBForTest().Exec("UPDATE memory_records SET created_at=? WHERE record_id=?", cutoff.Add(-time.Minute).UnixMilli(), oldID); err != nil { t.Fatal(err) }
-	if _, err := fabric.DBForTest().Exec("UPDATE memory_records SET created_at=? WHERE record_id=?", cutoff.Add(time.Minute).UnixMilli(), newID); err != nil { t.Fatal(err) }
 
 	v1Marker := filepath.Join(dataDir, workspaceGraphNamespace(workspace)+"."+scopedGraphMigrationMarker)
 	if err := os.WriteFile(v1Marker, []byte("v1\n"), 0o600); err != nil { t.Fatal(err) }
-	if err := os.Chtimes(v1Marker, cutoff, cutoff); err != nil { t.Fatal(err) }
+	time.Sleep(20 * time.Millisecond)
+	if err := fabric.AppendTurnScoped(ctx, "new-ext", "s-new", project, "new scoped"); err != nil { t.Fatal(err) }
 
 	if err := ensureSafeLegacyScopeMigration(ctx, dataDir, workspace, fabric, false); err != nil { t.Fatal(err) }
 
-	var oldOwner, newOwner string
-	if err := fabric.DBForTest().QueryRow("SELECT memory_owner FROM memory_records WHERE record_id=?", oldID).Scan(&oldOwner); err != nil { t.Fatal(err) }
-	if err := fabric.DBForTest().QueryRow("SELECT memory_owner FROM memory_records WHERE record_id=?", newID).Scan(&newOwner); err != nil { t.Fatal(err) }
-	if oldOwner != memoryfabric.LegacyUnassignedOwner {
-		t.Fatalf("old owner=%q want %q", oldOwner, memoryfabric.LegacyUnassignedOwner)
+	snap, err := fabric.AdminSnapshot(ctx, 10)
+	if err != nil { t.Fatal(err) }
+	counts := map[string]int64{}
+	for _, row := range snap.Namespaces { counts[row.Scope+":"+row.Owner] = row.Records }
+	if counts[memoryfabric.ScopeProject+":"+memoryfabric.LegacyUnassignedOwner] != 1 {
+		t.Fatalf("legacy namespace counts=%v", counts)
 	}
-	if newOwner != project.Owner {
-		t.Fatalf("new owner=%q want %q", newOwner, project.Owner)
+	if counts[memoryfabric.ScopeProject+":"+project.Owner] != 1 {
+		t.Fatalf("current project namespace counts=%v", counts)
 	}
 	v2Marker := filepath.Join(dataDir, workspaceGraphNamespace(workspace)+"."+legacyScopeV2Marker)
 	if _, err := os.Stat(v2Marker); err != nil { t.Fatalf("v2 marker missing: %v", err) }

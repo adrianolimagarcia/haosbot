@@ -14,6 +14,15 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   if (!response.ok) throw new Error(`${response.status}: ${(await response.text()).slice(0, 250)}`);
   return response.json() as Promise<T>;
 }
+export type MemoryNamespaceStats = { scope: string; owner: string; records: number; bytes: number };
+export type MemoryDeadJob = { id: string; projection: string; record_id: string; scope: string; owner: string; attempts: number; last_error: string; updated_at: string };
+export type MemoryAdminSnapshot = {
+  stats: { pending: number; pending_bytes: number; running: number; succeeded: number; dead: number; oldest_age_seconds: number };
+  disk_bytes: number; namespaces: MemoryNamespaceStats[]; dead_jobs: MemoryDeadJob[];
+};
+export const memoryAdmin = () => request<MemoryAdminSnapshot>('/api/webui/memory/admin');
+export const memoryAction = (body: Record<string, unknown>) => request<{ ok: boolean; deleted?: number; snapshot?: MemoryAdminSnapshot }>('/api/webui/memory/admin', { method: 'POST', body: JSON.stringify(body) });
+
 export const patchConfig = (patch: object) => request<{ restartRequired: boolean }>('/api/config', { method: 'POST', body: JSON.stringify(patch) });
 export const sessionAction = (key: string, action: string, value?: unknown) => request('/api/webui/session/action', { method: 'POST', body: JSON.stringify({ key, action, value }) });
 

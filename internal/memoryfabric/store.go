@@ -378,11 +378,18 @@ func (s *Store) AppendTurnScoped(ctx context.Context, recordID, sessionKey strin
 	// content identity match. A raw ID owned by another namespace never blocks a
 	// new namespaced record.
 	if errors.Is(err, sql.ErrNoRows) && externalID != recordID {
-		if legacyErr := checkID(externalID); legacyErr == nil &&
-			existingSession == sessionKey && existingScope == namespace.Scope &&
-			existingOwner == namespace.Owner && sameBytes(existingHash, hash[:]) {
-			recordID, err = externalID, nil
-		} else if legacyErr != nil && !errors.Is(legacyErr, sql.ErrNoRows) {
+		legacyErr := checkID(externalID)
+		if legacyErr == nil {
+			if existingScope == namespace.Scope && existingOwner == namespace.Owner {
+				if existingSession != sessionKey || !sameBytes(existingHash, hash[:]) {
+					return fmt.Errorf("memoryfabric: legacy record %s already exists with different identity or content", externalID)
+				}
+				recordID, err = externalID, nil
+			} else {
+				// Same external ID in another namespace is not a collision in v2.
+				err = sql.ErrNoRows
+			}
+		} else if !errors.Is(legacyErr, sql.ErrNoRows) {
 			return fmt.Errorf("memoryfabric: check legacy record: %w", legacyErr)
 		}
 	}

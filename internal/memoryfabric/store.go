@@ -749,12 +749,22 @@ WHERE o.job_id=? AND o.projection=?`, jobID, projection).Scan(&recordID,&state,&
 	var recordPending bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_outbox WHERE record_id=? AND state IN (?,?))`,
 		recordID,stateQueued,stateRunning).Scan(&recordPending); err != nil { return err }
+	var pendingJobs, pendingBytes int64
+	if err := tx.QueryRowContext(ctx, "SELECT pending_jobs,pending_bytes FROM memory_queue_counters WHERE singleton=1").Scan(&pendingJobs,&pendingBytes); err != nil { return err }
+	if pendingJobs+1 > int64(s.maxPending) {
+		return fmt.Errorf("memoryfabric: outbox capacity reached (%d jobs)", s.maxPending)
+	}
+	byteDelta := int64(0)
+	if !recordPending {
+		byteDelta = contentBytes
+		if pendingBytes+contentBytes > s.maxPendingBytes {
+			return fmt.Errorf("memoryfabric: outbox byte budget reached (%d bytes)", s.maxPendingBytes)
+		}
+	}
 	now := time.Now().UnixMilli()
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_outbox SET state=?,attempts=0,lease_until=0,next_attempt_at=0,last_error='',updated_at=?
 WHERE job_id=? AND projection=?`, stateQueued,now,jobID,projection); err != nil { return err }
-	byteDelta := int64(0)
-	if !recordPending { byteDelta = contentBytes }
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_queue_counters SET pending_jobs=pending_jobs+1,pending_bytes=pending_bytes+? WHERE singleton=1`, byteDelta); err != nil { return err }
 	return tx.Commit()
@@ -765,7 +775,7 @@ func (s *Store) PruneSucceeded(ctx context.Context, before time.Time, namespace 
 	if maxRecords <= 0 { maxRecords = 1000 }
 	if maxRecords > 10000 { maxRecords = 10000 }
 	args := []any{before.UnixMilli(), stateSucceeded}
-	where := "r.created_at<? AND NOT EXISTS(SELECT 1 FROM memory_outbox o WHERE o.record_id=r.record_id AND o.state<>?)"
+	where := "r.created_at<? AND EXISTS(SELECT 1 FROM memory_outbox o0 WHERE o0.record_id=r.record_id) AND NOT EXISTS(SELECT 1 FROM memory_outbox o WHERE o.record_id=r.record_id AND o.state<>?)"
 	if namespace != nil {
 		ns, err := NormalizeNamespace(*namespace)
 		if err != nil { return 0, err }

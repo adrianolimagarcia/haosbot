@@ -49,6 +49,7 @@ type agentRuntime struct {
 	scheduler *cronruntime.Service
 	triggers  *triggersruntime.Service
 	multiAgents *multiagent.Manager
+	memoryFabric *memoryfabric.Store
 	closeF    func()
 }
 
@@ -213,6 +214,12 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("prepare scoped GraphRAG projection: %w", err)
 	}
+	if err := ensureSafeLegacyScopeMigration(context.Background(), config.DefaultDataDir(), workspace, memoryFabric, profile.ObsidianEnabled); err != nil {
+		_ = memoryFabric.Close()
+		_ = graphPool.Close()
+		messageBus.Close()
+		return nil, fmt.Errorf("prepare safe legacy memory scope migration: %w", err)
+	}
 	projections, err := newProjectionManager(memoryFabric, graphPool, filepath.Join(config.DefaultDataDir(), "obsidian-memory"), profile.ProjectionWorkers, time.Duration(profile.ProjectionPollMs)*time.Millisecond, profile.ObsidianEnabled, metrics)
 	if err != nil {
 		_ = memoryFabric.Close()
@@ -375,6 +382,7 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		scheduler: scheduler,
 		triggers: triggerSvc,
 		multiAgents: multiAgents,
+		memoryFabric: memoryFabric,
 		closeF: func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			_ = triggerSvc.Close(shutdownCtx)
@@ -621,6 +629,7 @@ func cmdGateway(args []string) error {
 	apiServer.SetScheduler(rt.scheduler)
 	apiServer.SetTriggerService(rt.triggers)
 	apiServer.SetMultiAgentManager(rt.multiAgents)
+	apiServer.SetMemoryFabric(rt.memoryFabric)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

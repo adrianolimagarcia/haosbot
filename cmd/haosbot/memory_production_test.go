@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	micrographrag "github.com/adrianolimagarcia/micrographrag-go"
 	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
 	"github.com/adrianolimagarcia/nanobot-go/internal/multiagent"
 )
@@ -83,5 +84,34 @@ func TestGraphPoolResetAllRefusesPinnedStore(t *testing.T) {
 	}
 	if got := openStoreCount(pool); got != 0 {
 		t.Fatalf("open stores after reset=%d", got)
+	}
+}
+
+
+func TestRemoteA2ARecallReadsOnlyBoundNamespace(t *testing.T) {
+	if !sqliteFTS5Compiled(t) { t.Skip("requires sqlite_fts5 production tag") }
+	ctx := context.Background()
+	pool := newTestPool(t, 2)
+	defer pool.Close()
+	workspace := filepath.Join(t.TempDir(), "project")
+	profile := multiagent.Profile{ID: "remote-reviewer", MemoryScope: "project", ToolAllow: []string{"memory_search"}}
+	ns, err := agentMemoryNamespace(profile, workspace)
+	if err != nil { t.Fatal(err) }
+	key, err := graphStoreKey(ns)
+	if err != nil { t.Fatal(err) }
+	store, release, err := pool.Acquire(ctx, key)
+	if err != nil { t.Fatal(err) }
+	_, err = store.AddMemory(ctx, micrographrag.MemoryInput{
+		Kind: 1, Source: "test/a2a", Title: "durability decision",
+		Content: "The project durability decision is to use SQLite WAL for canonical memory.",
+	})
+	release()
+	if err != nil { t.Fatal(err) }
+
+	task := multiagent.Task{ID: "remote-task", Prompt: "What is the SQLite durability decision?"}
+	out, err := remoteTaskWithScopedRecall(ctx, multiAgentRuntimeDeps{workspace: workspace, graphPool: pool}, profile, task)
+	if err != nil { t.Fatal(err) }
+	if !strings.Contains(out.Prompt, "SQLite WAL") || !strings.Contains(out.Prompt, "trust=untrusted") {
+		t.Fatalf("remote prompt missing scoped recall: %s", out.Prompt)
 	}
 }

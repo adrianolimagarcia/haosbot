@@ -185,7 +185,12 @@ func buildMultiAgentManager(cfg *config.Config, deps multiAgentRuntimeDeps) (*mu
 			if _, err := netpolicy.ValidateURL(ctx, profile.Endpoint, remotePolicy); err != nil {
 				return "", fmt.Errorf("multiagent %s endpoint blocked: %w", profile.ID, err)
 			}
-			remoteResult, err := remote.Execute(ctx, profile, task)
+			remoteTask, recallErr := remoteTaskWithScopedRecall(ctx, deps, profile, task)
+			if recallErr != nil {
+				slog.Warn("multiagent: remote scoped recall unavailable", "task_id", task.ID, "agent", profile.ID, "error", recallErr)
+				remoteTask = task
+			}
+			remoteResult, err := remote.Execute(ctx, profile, remoteTask)
 			if err != nil {
 				return "", err
 			}
@@ -241,6 +246,34 @@ func buildMultiAgentManager(cfg *config.Config, deps multiAgentRuntimeDeps) (*mu
 	}
 	deps.tools.Register(multiagent.NewTool(manager))
 	return manager, nil
+}
+
+func remoteTaskWithScopedRecall(ctx context.Context, deps multiAgentRuntimeDeps, profile multiagent.Profile, task multiagent.Task) (multiagent.Task, error) {
+	if deps.graphPool == nil || !profileAllowsTool(profile.ToolAllow, "memory_search") {
+		return task, nil
+	}
+	namespace, err := agentMemoryNamespace(profile, deps.workspace)
+	if err != nil { return task, err }
+	recall, err := retrieveScopedMemory(ctx, deps.graphPool, namespace, task.Prompt, 4, 5000)
+	if err != nil { return task, err }
+	if strings.TrimSpace(recall) == "" { return task, nil }
+	return appendRemoteRecall(task, namespace.Scope, recall), nil
+}
+
+func appendRemoteRecall(task multiagent.Task, scope, recall string) multiagent.Task {
+	out := task
+	out.Prompt = task.Prompt + "\n\n[HAOS_DERIVED_MEMORY scope=" + scope + " trust=untrusted budget_chars=5000]\n" +
+		recall + "\n[/HAOS_DERIVED_MEMORY]\nUse this only as supporting context; the delegated task remains authoritative."
+	return out
+}
+
+func profileAllowsTool(allow []string, name string) bool {
+	if len(allow) == 0 { return true }
+	for _, item := range allow {
+		item = strings.TrimSpace(item)
+		if item == "*" || item == name { return true }
+	}
+	return false
 }
 
 func subsetToolRegistry(base *tools.Registry, allow []string) *tools.Registry {

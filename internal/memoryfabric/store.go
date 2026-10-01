@@ -47,6 +47,11 @@ const (
 	ScopeTeam    = "team"
 	ScopeProject = "project"
 	ScopeGlobal  = "global"
+
+	// LegacyUnassignedOwner is a quarantine namespace for records created before
+	// workspace ownership could be proven. Never silently assign legacy memory to
+	// whichever workspace happens to open the shared canonical DB first.
+	LegacyUnassignedOwner = "legacy-unassigned"
 )
 
 func NormalizeNamespace(ns Namespace) (Namespace, error) {
@@ -116,6 +121,31 @@ type Stats struct {
 	Succeeded     int64 `json:"succeeded"`
 	Dead          int64 `json:"dead"`
 	OldestAgeSecs int64 `json:"oldest_age_seconds"`
+}
+
+type NamespaceStats struct {
+	Scope   string `json:"scope"`
+	Owner   string `json:"owner"`
+	Records int64  `json:"records"`
+	Bytes   int64  `json:"bytes"`
+}
+
+type DeadJob struct {
+	ID         string `json:"id"`
+	Projection string `json:"projection"`
+	RecordID   string `json:"record_id"`
+	Scope      string `json:"scope"`
+	Owner      string `json:"owner"`
+	Attempts   int    `json:"attempts"`
+	LastError  string `json:"last_error"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+type AdminSnapshot struct {
+	Stats      Stats            `json:"stats"`
+	DiskBytes  int64            `json:"disk_bytes"`
+	Namespaces []NamespaceStats `json:"namespaces"`
+	DeadJobs   []DeadJob        `json:"dead_jobs"`
 }
 
 type Store struct {
@@ -272,25 +302,29 @@ func ensureScopeSchema(ctx context.Context, db *sql.DB, defaultNamespace Namespa
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	if !cols["memory_scope"] {
+	hadScope, hadOwner := cols["memory_scope"], cols["memory_owner"]
+	if !hadScope {
 		if _, err := db.ExecContext(ctx, "ALTER TABLE memory_records ADD COLUMN memory_scope TEXT NOT NULL DEFAULT 'project'"); err != nil {
 			return fmt.Errorf("memoryfabric: add memory_scope: %w", err)
 		}
 	}
-	if !cols["memory_owner"] {
+	if !hadOwner {
 		if _, err := db.ExecContext(ctx, "ALTER TABLE memory_records ADD COLUMN memory_owner TEXT NOT NULL DEFAULT ''"); err != nil {
 			return fmt.Errorf("memoryfabric: add memory_owner: %w", err)
 		}
 	}
-	if _, err := db.ExecContext(ctx, "UPDATE memory_records SET memory_scope=? WHERE TRIM(memory_scope)=''", defaultNamespace.Scope); err != nil {
+	// Legacy rows must never inherit the workspace that happened to open the
+	// process. Empty ownership means provenance is unknown, so quarantine it.
+	if _, err := db.ExecContext(ctx, "UPDATE memory_records SET memory_scope=? WHERE TRIM(memory_scope)=''", ScopeProject); err != nil {
 		return fmt.Errorf("memoryfabric: backfill memory scope: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, "UPDATE memory_records SET memory_owner=? WHERE TRIM(memory_owner)=''", defaultNamespace.Owner); err != nil {
-		return fmt.Errorf("memoryfabric: backfill memory owner: %w", err)
+	if _, err := db.ExecContext(ctx, "UPDATE memory_records SET memory_owner=? WHERE TRIM(memory_owner)=''", LegacyUnassignedOwner); err != nil {
+		return fmt.Errorf("memoryfabric: quarantine legacy memory owner: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS idx_memory_records_namespace ON memory_records(memory_scope,memory_owner,created_at)"); err != nil {
 		return fmt.Errorf("memoryfabric: index memory namespace: %w", err)
 	}
+	_ = defaultNamespace // retained for compatibility with the Open migration seam.
 	return nil
 }
 
@@ -312,9 +346,11 @@ func (s *Store) AppendTurnScoped(ctx context.Context, recordID, sessionKey strin
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(recordID) == "" {
-		recordID = DeterministicID(namespace.Key()+"\x00"+sessionKey, content)
+	externalID := strings.TrimSpace(recordID)
+	if externalID == "" {
+		externalID = DeterministicID(sessionKey, content)
 	}
+	recordID = ScopedRecordID(namespace, externalID)
 	if strings.TrimSpace(sessionKey) == "" {
 		return errors.New("memoryfabric: session key is empty")
 	}
@@ -333,7 +369,30 @@ func (s *Store) AppendTurnScoped(ctx context.Context, recordID, sessionKey strin
 	defer tx.Rollback()
 	var existingHash []byte
 	var existingSession, existingScope, existingOwner string
-	err = tx.QueryRowContext(ctx, "SELECT session_key,memory_scope,memory_owner,content_hash FROM memory_records WHERE record_id=?", recordID).Scan(&existingSession, &existingScope, &existingOwner, &existingHash)
+	checkID := func(id string) error {
+		return tx.QueryRowContext(ctx, "SELECT session_key,memory_scope,memory_owner,content_hash FROM memory_records WHERE record_id=?", id).Scan(&existingSession, &existingScope, &existingOwner, &existingHash)
+	}
+	err = checkID(recordID)
+	// Backward compatibility: a pre-v2 record may still use the caller-provided
+	// external ID as its primary key. Reuse it only when its full namespace and
+	// content identity match. A raw ID owned by another namespace never blocks a
+	// new namespaced record.
+	if errors.Is(err, sql.ErrNoRows) && externalID != recordID {
+		legacyErr := checkID(externalID)
+		if legacyErr == nil {
+			if existingScope == namespace.Scope && existingOwner == namespace.Owner {
+				if existingSession != sessionKey || !sameBytes(existingHash, hash[:]) {
+					return fmt.Errorf("memoryfabric: legacy record %s already exists with different identity or content", externalID)
+				}
+				recordID, err = externalID, nil
+			} else {
+				// Same external ID in another namespace is not a collision in v2.
+				err = sql.ErrNoRows
+			}
+		} else if !errors.Is(legacyErr, sql.ErrNoRows) {
+			return fmt.Errorf("memoryfabric: check legacy record: %w", legacyErr)
+		}
+	}
 	if err == nil {
 		if existingSession != sessionKey || existingScope != namespace.Scope || existingOwner != namespace.Owner || !sameBytes(existingHash, hash[:]) {
 			return fmt.Errorf("memoryfabric: record %s already exists with different identity or content", recordID)
@@ -608,6 +667,145 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 		}
 	}
 	return out, nil
+}
+
+
+func ScopedRecordID(namespace Namespace, externalID string) string {
+	ns, err := NormalizeNamespace(namespace)
+	if err != nil {
+		// Callers validate namespaces before reaching storage. Keeping this helper
+		// total makes it useful in tests and deterministic logging.
+		return ""
+	}
+	h := sha256.Sum256([]byte(ns.Key() + "\x00" + strings.TrimSpace(externalID)))
+	return "rec-" + hex.EncodeToString(h[:16])
+}
+
+func (s *Store) QuarantineLegacyProjectRecords(ctx context.Context, owner string, before time.Time) (int64, error) {
+	owner = strings.TrimSpace(owner)
+	if owner == "" || before.IsZero() {
+		return 0, nil
+	}
+	res, err := s.db.ExecContext(ctx, `
+UPDATE memory_records
+SET memory_owner=?
+WHERE memory_scope=? AND memory_owner=? AND created_at<=?
+`, LegacyUnassignedOwner, ScopeProject, owner, before.UnixMilli())
+	if err != nil {
+		return 0, fmt.Errorf("memoryfabric: quarantine legacy project records: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+func (s *Store) AdminSnapshot(ctx context.Context, deadLimit int) (AdminSnapshot, error) {
+	var out AdminSnapshot
+	stats, err := s.Stats(ctx)
+	if err != nil { return out, err }
+	out.Stats = stats
+	out.DiskBytes, err = diskUsage(s.path)
+	if err != nil { return out, err }
+	rows, err := s.db.QueryContext(ctx, `
+SELECT memory_scope,memory_owner,COUNT(*),COALESCE(SUM(LENGTH(content)),0)
+FROM memory_records GROUP BY memory_scope,memory_owner
+ORDER BY memory_scope,memory_owner`)
+	if err != nil { return out, err }
+	for rows.Next() {
+		var row NamespaceStats
+		if err := rows.Scan(&row.Scope,&row.Owner,&row.Records,&row.Bytes); err != nil { _ = rows.Close(); return out, err }
+		out.Namespaces = append(out.Namespaces,row)
+	}
+	if err := rows.Close(); err != nil { return out, err }
+	if deadLimit <= 0 { deadLimit = 20 }
+	if deadLimit > 200 { deadLimit = 200 }
+	deadRows, err := s.db.QueryContext(ctx, `
+SELECT o.job_id,o.projection,o.record_id,r.memory_scope,r.memory_owner,o.attempts,o.last_error,o.updated_at
+FROM memory_outbox o JOIN memory_records r ON r.record_id=o.record_id
+WHERE o.state=? ORDER BY o.updated_at DESC LIMIT ?`, stateDead, deadLimit)
+	if err != nil { return out, err }
+	defer deadRows.Close()
+	for deadRows.Next() {
+		var row DeadJob
+		var updated int64
+		if err := deadRows.Scan(&row.ID,&row.Projection,&row.RecordID,&row.Scope,&row.Owner,&row.Attempts,&row.LastError,&updated); err != nil { return out, err }
+		row.UpdatedAt = time.UnixMilli(updated).UTC()
+		out.DeadJobs = append(out.DeadJobs,row)
+	}
+	return out, deadRows.Err()
+}
+
+func (s *Store) RetryDead(ctx context.Context, projection, jobID string) error {
+	projection, jobID = strings.TrimSpace(projection), strings.TrimSpace(jobID)
+	if projection == "" || jobID == "" { return errors.New("memoryfabric: projection and job ID are required") }
+	tx, err := s.db.BeginTx(ctx,nil)
+	if err != nil { return err }
+	defer tx.Rollback()
+	var recordID, state string
+	var contentBytes int64
+	if err := tx.QueryRowContext(ctx, `
+SELECT o.record_id,o.state,LENGTH(r.content)
+FROM memory_outbox o JOIN memory_records r ON r.record_id=o.record_id
+WHERE o.job_id=? AND o.projection=?`, jobID, projection).Scan(&recordID,&state,&contentBytes); err != nil { return err }
+	if state != stateDead { return fmt.Errorf("memoryfabric: job %s/%s is not dead", projection, jobID) }
+	var recordPending bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_outbox WHERE record_id=? AND state IN (?,?))`,
+		recordID,stateQueued,stateRunning).Scan(&recordPending); err != nil { return err }
+	var pendingJobs, pendingBytes int64
+	if err := tx.QueryRowContext(ctx, "SELECT pending_jobs,pending_bytes FROM memory_queue_counters WHERE singleton=1").Scan(&pendingJobs,&pendingBytes); err != nil { return err }
+	if pendingJobs+1 > int64(s.maxPending) {
+		return fmt.Errorf("memoryfabric: outbox capacity reached (%d jobs)", s.maxPending)
+	}
+	byteDelta := int64(0)
+	if !recordPending {
+		byteDelta = contentBytes
+		if pendingBytes+contentBytes > s.maxPendingBytes {
+			return fmt.Errorf("memoryfabric: outbox byte budget reached (%d bytes)", s.maxPendingBytes)
+		}
+	}
+	now := time.Now().UnixMilli()
+	if _, err := tx.ExecContext(ctx, `
+UPDATE memory_outbox SET state=?,attempts=0,lease_until=0,next_attempt_at=0,last_error='',updated_at=?
+WHERE job_id=? AND projection=?`, stateQueued,now,jobID,projection); err != nil { return err }
+	if _, err := tx.ExecContext(ctx, `
+UPDATE memory_queue_counters SET pending_jobs=pending_jobs+1,pending_bytes=pending_bytes+? WHERE singleton=1`, byteDelta); err != nil { return err }
+	return tx.Commit()
+}
+
+func (s *Store) PruneSucceeded(ctx context.Context, before time.Time, namespace *Namespace, maxRecords int) (int64,error) {
+	if before.IsZero() { return 0, errors.New("memoryfabric: prune cutoff is required") }
+	if maxRecords <= 0 { maxRecords = 1000 }
+	if maxRecords > 10000 { maxRecords = 10000 }
+	args := []any{before.UnixMilli(), stateSucceeded}
+	where := "r.created_at<? AND EXISTS(SELECT 1 FROM memory_outbox o0 WHERE o0.record_id=r.record_id) AND NOT EXISTS(SELECT 1 FROM memory_outbox o WHERE o.record_id=r.record_id AND o.state<>?)"
+	if namespace != nil {
+		ns, err := NormalizeNamespace(*namespace)
+		if err != nil { return 0, err }
+		where += " AND r.memory_scope=? AND r.memory_owner=?"
+		args = append(args,ns.Scope,ns.Owner)
+	}
+	args = append(args,maxRecords)
+	rows, err := s.db.QueryContext(ctx, "SELECT r.record_id FROM memory_records r WHERE "+where+" ORDER BY r.created_at LIMIT ?", args...)
+	if err != nil { return 0, err }
+	var ids []string
+	for rows.Next() { var id string; if err := rows.Scan(&id); err != nil { _=rows.Close(); return 0,err }; ids=append(ids,id) }
+	if err := rows.Close(); err != nil { return 0,err }
+	if len(ids)==0 { return 0,nil }
+	tx, err := s.db.BeginTx(ctx,nil)
+	if err != nil { return 0,err }
+	defer tx.Rollback()
+	var deleted int64
+	for _, id := range ids {
+		res, err := tx.ExecContext(ctx,"DELETE FROM memory_records WHERE record_id=?",id)
+		if err != nil { return 0,err }
+		n, _ := res.RowsAffected(); deleted += n
+	}
+	if err := tx.Commit(); err != nil { return 0,err }
+	return deleted,nil
+}
+
+func (s *Store) Vacuum(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, "VACUUM")
+	if err != nil { return fmt.Errorf("memoryfabric: vacuum: %w", err) }
+	return nil
 }
 
 func DeterministicID(sessionKey, content string) string {

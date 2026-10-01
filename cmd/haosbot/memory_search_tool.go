@@ -77,6 +77,37 @@ func (t *memorySearchTool) Parameters() json.RawMessage {
 	return raw
 }
 
+func retrieveScopedMemory(ctx context.Context, pool *graphStorePool, namespace memoryfabric.Namespace, query string, limit, maxChars int) (string, error) {
+	query = strings.TrimSpace(query)
+	if pool == nil || query == "" { return "", nil }
+	if limit <= 0 { limit = 4 }
+	if limit > 12 { limit = 12 }
+	if maxChars <= 0 { maxChars = 5000 }
+	key, err := graphStoreKey(namespace)
+	if err != nil { return "", err }
+	searchCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	store, release, err := pool.Acquire(searchCtx, key)
+	if err != nil { return "", err }
+	defer release()
+	opts := store.DefaultSearchOptions()
+	opts.Limit = limit
+	results, err := store.Search(searchCtx, query, opts)
+	if err != nil { return "", err }
+	var out strings.Builder
+	for _, result := range results {
+		content := strings.TrimSpace(result.Content)
+		if content == "" { continue }
+		if out.Len() > 0 { out.WriteString("\n\n---\n") }
+		if len(content) > 1800 { content = content[:1800] + "... [truncated]" }
+		fmt.Fprintf(&out, "score=%.4f\n%s", result.Score, content)
+		if out.Len() >= maxChars { break }
+	}
+	text := out.String()
+	if len(text) > maxChars { text = text[:maxChars] + "... [budget truncated]" }
+	return text, nil
+}
+
 func (t *memorySearchTool) Execute(ctx context.Context, raw json.RawMessage) (tools.Result, error) {
 	var args struct {
 		Query string `json:"query"`

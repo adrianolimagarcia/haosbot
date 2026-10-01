@@ -49,6 +49,8 @@ type agentRuntime struct {
 	scheduler *cronruntime.Service
 	triggers  *triggersruntime.Service
 	multiAgents *multiagent.Manager
+	memoryFabric *memoryfabric.Store
+	memoryAdmin api.MemoryAdmin
 	closeF    func()
 }
 
@@ -213,12 +215,22 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		messageBus.Close()
 		return nil, fmt.Errorf("prepare scoped GraphRAG projection: %w", err)
 	}
+	if err := ensureSafeLegacyScopeMigration(context.Background(), config.DefaultDataDir(), workspace, memoryFabric, profile.ObsidianEnabled); err != nil {
+		_ = memoryFabric.Close()
+		_ = graphPool.Close()
+		messageBus.Close()
+		return nil, fmt.Errorf("prepare safe legacy memory scope migration: %w", err)
+	}
 	projections, err := newProjectionManager(memoryFabric, graphPool, filepath.Join(config.DefaultDataDir(), "obsidian-memory"), profile.ProjectionWorkers, time.Duration(profile.ProjectionPollMs)*time.Millisecond, profile.ObsidianEnabled, metrics)
 	if err != nil {
 		_ = memoryFabric.Close()
 		_ = graphPool.Close()
 		messageBus.Close()
 		return nil, fmt.Errorf("start memory projections: %w", err)
+	}
+	memoryAdmin := &runtimeMemoryAdmin{
+		fabric: memoryFabric, graphPool: graphPool, projections: projections,
+		dataDir: config.DefaultDataDir(), obsidian: profile.ObsidianEnabled,
 	}
 	memoryMDProjection := newScopedMemoryMDProjector(filepath.Join(workspace, "memory", "MEMORY.md"), graphPool, projectNamespace, 2*time.Second)
 
@@ -375,6 +387,8 @@ func buildRuntime(cfg *config.Config) (*agentRuntime, error) {
 		scheduler: scheduler,
 		triggers: triggerSvc,
 		multiAgents: multiAgents,
+		memoryFabric: memoryFabric,
+		memoryAdmin: memoryAdmin,
 		closeF: func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			_ = triggerSvc.Close(shutdownCtx)
@@ -621,6 +635,7 @@ func cmdGateway(args []string) error {
 	apiServer.SetScheduler(rt.scheduler)
 	apiServer.SetTriggerService(rt.triggers)
 	apiServer.SetMultiAgentManager(rt.multiAgents)
+	apiServer.SetMemoryAdmin(rt.memoryAdmin)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

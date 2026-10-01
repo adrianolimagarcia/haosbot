@@ -21,12 +21,21 @@ import (
 	cronruntime "github.com/adrianolimagarcia/nanobot-go/internal/cron"
 	triggersruntime "github.com/adrianolimagarcia/nanobot-go/internal/triggers"
 	"github.com/adrianolimagarcia/nanobot-go/internal/marketplace"
+	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
 	"github.com/adrianolimagarcia/nanobot-go/internal/multiagent"
 	"github.com/adrianolimagarcia/nanobot-go/internal/netpolicy"
 	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
 	"github.com/adrianolimagarcia/nanobot-go/internal/provider"
 	"github.com/adrianolimagarcia/nanobot-go/internal/session"
 )
+
+type MemoryAdmin interface {
+	Snapshot(context.Context, int) (memoryfabric.AdminSnapshot, error)
+	RetryDead(context.Context, string, string) error
+	Rebuild(context.Context, string) error
+	Prune(context.Context, time.Time, *memoryfabric.Namespace, int) (int64, error)
+	Vacuum(context.Context) error
+}
 
 type Server struct {
 	cfg       *config.Config
@@ -50,6 +59,7 @@ type Server struct {
 	scheduler atomic.Pointer[cronruntime.Service]
 	triggers atomic.Pointer[triggersruntime.Service]
 	multiAgents atomic.Pointer[multiagent.Manager]
+	memoryAdmin MemoryAdmin
 	// marketplaceSvc is built once per server. The catalogue client owns a
 	// transport with its own connection pool, so rebuilding it per request
 	// would force a fresh TLS handshake against every upstream on every call.
@@ -106,6 +116,10 @@ func (s *Server) SetMultiAgentManager(manager *multiagent.Manager) {
 	if manager != nil {
 		s.multiAgents.Store(manager)
 	}
+}
+
+func (s *Server) SetMemoryAdmin(admin MemoryAdmin) {
+	s.memoryAdmin = admin
 }
 
 func (s *Server) checkAuth(r *http.Request) bool {

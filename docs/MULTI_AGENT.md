@@ -6,7 +6,7 @@ HAOSbot can delegate work to specialized local workers inside the same Go proces
 
 Local workers reuse the gateway provider client by default, tool implementations and project workspace. Each worker has its own lightweight agent profile under `.haosbot/agents/<id>` and uses transient conversation state. Long-term recall is bound to the worker's physical Memory Fabric namespace; completed worker results are projected into that same namespace while transient reasoning/tool chatter remains outside canonical memory.
 
-Remote workers use A2A JSON-RPC `message/send`. Configure the full A2A endpoint URL and keep bearer tokens in an environment variable referenced by `tokenEnv`. Remote URLs use the same outbound SSRF policy as the rest of HAOSbot; private/loopback destinations require an explicit `tools.ssrfWhitelist` entry.
+Remote workers use A2A JSON-RPC `message/send`. Configure the full A2A endpoint URL and keep bearer tokens in an environment variable referenced by `tokenEnv`. Remote URLs use the same outbound SSRF policy as the rest of HAOSbot; private/loopback destinations require an explicit `tools.ssrfWhitelist` entry. When the remote profile allows `memory_search`, HAOSBOT performs scoped hybrid recall locally first and appends at most 5,000 characters to the delegated prompt inside an explicit `HAOS_DERIVED_MEMORY` envelope marked `trust=untrusted`. This gives A2A workers recall without giving the remote peer direct access to another namespace or to the canonical database.
 
 ## Default squad
 
@@ -76,4 +76,12 @@ The **Agents** page shows the roster, local versus A2A execution, runtime limits
 
 ## Scope migration
 
-Existing canonical records are migrated in place with scope metadata and requeued into the scoped GraphRAG projection. Derived legacy GraphRAG databases are left untouched for rollback. The new derived stores live under the shared scoped graph root and are keyed by scope/owner, so project, team, private and global data never share one SQLite index.
+Existing canonical records with unknown provenance are never assigned to the workspace that happens to boot first. Direct legacy upgrades are quarantined as `project:legacy-unassigned`. Installations that already ran the older v1 scoped migration are repaired using the v1 marker timestamp: only records created before that marker and assigned to that workspace are quarantined, while newer scoped records remain untouched. Any derived project GraphRAG/Obsidian data that may contain the quarantined records is removed and rebuilt from the repaired canonical store. The new derived stores live under the shared scoped graph root and are keyed by scope/owner, so project, team, private and global data never share one SQLite index.
+
+New canonical IDs are namespace-safe: the storage ID is derived from `scope + owner + external id`. Retries of pre-v2 records remain backward-compatible when the legacy raw ID matches the same namespace, session and content.
+
+## Operations
+
+The **Memory & GraphRAG** WebUI page exposes canonical counts/bytes by namespace, projection backlog, dead-letter jobs and disk usage. Operators can retry an individual dead job, rebuild GraphRAG or all derived projections, prune old fully-succeeded canonical records, and run SQLite `VACUUM`.
+
+Prune is intentionally conservative: records with queued/running/dead projection state are preserved. Before canonical deletion HAOSBOT must drain the GraphRAG pool; if any namespace store is pinned by an in-flight search, prune aborts without deleting anything. After a successful prune the derived stores are rebuilt from surviving canonical records.

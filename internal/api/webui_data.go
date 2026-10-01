@@ -19,6 +19,7 @@ import (
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
 	"github.com/adrianolimagarcia/nanobot-go/internal/mcp"
 	"github.com/adrianolimagarcia/nanobot-go/internal/mcpruntime"
+	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
 	"github.com/adrianolimagarcia/nanobot-go/internal/multiagent"
 	"github.com/adrianolimagarcia/nanobot-go/internal/skills"
 	"github.com/adrianolimagarcia/nanobot-go/internal/tools"
@@ -63,6 +64,7 @@ func (s *Server) registerWebUIData(mux *http.ServeMux) {
 	mux.HandleFunc("/api/webui/session/action", s.handleWebUISessionAction)
 	mux.HandleFunc("/api/webui/search", s.handleWebUISearch)
 	mux.HandleFunc("/api/webui/memory", s.handleWebUIMemory)
+	mux.HandleFunc("/api/webui/memory/admin", s.handleWebUIMemoryAdmin)
 	mux.HandleFunc("/api/webui/skill", s.handleWebUISkill)
 	mux.HandleFunc("/api/webui/file-preview", s.handleWebUIFilePreview)
 	mux.HandleFunc("/api/webui/attachment", s.handleWebUIAttachment)
@@ -480,6 +482,79 @@ func (s *Server) handleWebUISearch(w http.ResponseWriter, r *http.Request) {
 		if len(results) >= maxWebUISearchResults { break }
 	}
 	writeWebUIJSON(w, map[string]any{"results": results})
+}
+
+func (s *Server) handleWebUIMemoryAdmin(w http.ResponseWriter, r *http.Request) {
+	admin := s.memoryAdmin
+	if admin == nil {
+		http.Error(w, "memory admin unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method == http.MethodGet {
+		snapshot, err := admin.Snapshot(r.Context(), 50)
+		if err != nil { http.Error(w, err.Error(), http.StatusInternalServerError); return }
+		writeWebUIJSON(w, snapshot)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Action     string `json:"action"`
+		Projection string `json:"projection"`
+		JobID      string `json:"job_id"`
+		BeforeDays int    `json:"before_days"`
+		Scope      string `json:"scope"`
+		Owner      string `json:"owner"`
+		MaxRecords int    `json:"max_records"`
+	}
+	dec := json.NewDecoder(io.LimitReader(r.Body, 32<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil { http.Error(w, "invalid request", http.StatusBadRequest); return }
+	req.Action = strings.ToLower(strings.TrimSpace(req.Action))
+	var result map[string]any
+	switch req.Action {
+	case "retry_dead":
+		if err := admin.RetryDead(r.Context(), strings.TrimSpace(req.Projection), strings.TrimSpace(req.JobID)); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict); return
+		}
+		result = map[string]any{"ok": true, "action": req.Action}
+	case "rebuild":
+		projection := strings.ToLower(strings.TrimSpace(req.Projection))
+		if projection == "" { projection = "all" }
+		if err := admin.Rebuild(r.Context(), projection); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict); return
+		}
+		result = map[string]any{"ok": true, "action": req.Action, "projection": projection}
+	case "prune":
+		if req.BeforeDays <= 0 { req.BeforeDays = 30 }
+		if req.BeforeDays > 36500 { http.Error(w, "before_days too large", http.StatusBadRequest); return }
+		if req.MaxRecords <= 0 { req.MaxRecords = 1000 }
+		var namespace *memoryfabric.Namespace
+		if strings.TrimSpace(req.Scope) != "" {
+			ns := memoryfabric.Namespace{Scope: req.Scope, Owner: req.Owner}
+			if strings.EqualFold(strings.TrimSpace(req.Scope), memoryfabric.ScopeGlobal) && strings.TrimSpace(req.Owner) == "" {
+				ns.Owner = memoryfabric.ScopeGlobal
+			}
+			if _, err := memoryfabric.NormalizeNamespace(ns); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest); return
+			}
+			namespace = &ns
+		}
+		deleted, err := admin.Prune(r.Context(), time.Now().Add(-time.Duration(req.BeforeDays)*24*time.Hour), namespace, req.MaxRecords)
+		if err != nil { http.Error(w, err.Error(), http.StatusConflict); return }
+		result = map[string]any{"ok": true, "action": req.Action, "deleted": deleted}
+	case "vacuum":
+		if err := admin.Vacuum(r.Context()); err != nil { http.Error(w, err.Error(), http.StatusConflict); return }
+		result = map[string]any{"ok": true, "action": req.Action}
+	default:
+		http.Error(w, "unsupported memory action", http.StatusBadRequest); return
+	}
+	snapshot, err := admin.Snapshot(r.Context(), 50)
+	if err == nil { result["snapshot"] = snapshot }
+	writeWebUIJSON(w, result)
 }
 
 func (s *Server) handleWebUIMemory(w http.ResponseWriter, r *http.Request) {

@@ -23,6 +23,9 @@ func TestMigrateLegacyGraphOutboxIsRestartSafe(t *testing.T) {
 	if err := migrateLegacyGraphOutbox(legacy, fabric); err != nil { t.Fatal(err) }
 	job, ok, err := fabric.Claim(context.Background(), memoryfabric.ProjectionGraph)
 	if err != nil || !ok { t.Fatalf("claim: ok=%v err=%v", ok, err) }
-	if job.ID != "old-1" { t.Fatalf("job=%+v", job) }
+	wantID := memoryfabric.ScopedRecordID(memoryfabric.Namespace{Scope: memoryfabric.ScopeProject, Owner: "default"}, "old-1")
+	if job.ID != wantID || job.RecordID != wantID || job.SessionKey != "s" || job.Content != "hello" {
+		t.Fatalf("job=%+v want id=%s session=s content=hello", job, wantID)
+	}
 	if _, ok, err := fabric.Claim(context.Background(), memoryfabric.ProjectionGraph); err != nil || ok { t.Fatalf("acked legacy record leaked: ok=%v err=%v", ok, err) }
 }

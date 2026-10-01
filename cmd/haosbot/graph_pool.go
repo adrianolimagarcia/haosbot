@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -245,6 +246,39 @@ func (p *graphStorePool) open(ctx context.Context, sessionKey string) (*microgra
 // releaser returns the idempotent release function handed to the caller of
 // Acquire. Dropping the last pin re-runs eviction so the pool converges back to
 // maxOpen as soon as the operation that needed the store has finished.
+func (p *graphStorePool) ResetAll() error {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return errors.New("graph store pool is closed")
+	}
+	for el := p.order.Front(); el != nil; el = el.Next() {
+		if entry := el.Value.(*graphStoreEntry); entry.pins > 0 {
+			p.mu.Unlock()
+			return fmt.Errorf("graph store pool busy: namespace %s is pinned", entry.key)
+		}
+	}
+	entries := make([]*micrographrag.Store, 0, len(p.stores))
+	for el := p.order.Front(); el != nil; el = el.Next() {
+		entries = append(entries, el.Value.(*graphStoreEntry).store)
+	}
+	p.stores = map[string]*list.Element{}
+	p.order.Init()
+	p.overLimit = false
+	dir := p.dir
+	p.mu.Unlock()
+
+	for _, store := range entries {
+		if err := store.Close(); err != nil {
+			return err
+		}
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("reset graph store pool: %w", err)
+	}
+	return os.MkdirAll(dir, 0o700)
+}
+
 func (p *graphStorePool) releaser(entry *graphStoreEntry) func() {
 	var once sync.Once
 	return func() {

@@ -30,10 +30,14 @@ func TestSafeLegacyScopeMigrationQuarantinesOnlyPreV1Records(t *testing.T) {
 	defer fabric.Close()
 
 	if err := fabric.AppendTurnScoped(ctx, "old-ext", "s-old", project, "old legacy"); err != nil { t.Fatal(err) }
+	// Keep the three moments on distinct millisecond boundaries. The production
+	// migration intentionally uses the real v1 marker timestamp; this test must
+	// not depend on filesystem timestamp rounding.
+	time.Sleep(25 * time.Millisecond)
 
 	v1Marker := filepath.Join(dataDir, workspaceGraphNamespace(workspace)+"."+scopedGraphMigrationMarker)
 	if err := os.WriteFile(v1Marker, []byte("v1\n"), 0o600); err != nil { t.Fatal(err) }
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(25 * time.Millisecond)
 	if err := fabric.AppendTurnScoped(ctx, "new-ext", "s-new", project, "new scoped"); err != nil { t.Fatal(err) }
 
 	if err := ensureSafeLegacyScopeMigration(ctx, dataDir, workspace, fabric, false); err != nil { t.Fatal(err) }

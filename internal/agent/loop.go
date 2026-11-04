@@ -19,6 +19,7 @@ import (
 
 	"github.com/adrianolimagarcia/nanobot-go/internal/bus"
 	"github.com/adrianolimagarcia/nanobot-go/internal/core"
+	"github.com/adrianolimagarcia/nanobot-go/internal/memoryfabric"
 	"github.com/adrianolimagarcia/nanobot-go/internal/observability"
 	"github.com/adrianolimagarcia/nanobot-go/internal/prompt"
 	"github.com/adrianolimagarcia/nanobot-go/internal/provider"
@@ -170,6 +171,20 @@ func (l *Loop) reconcilePendingGraphMemory(transcript Transcript) error {
 			return errors.New("agent: pending GraphRAG job is missing identity")
 		}
 		if err := l.cfg.GraphMemoryEnqueueWithIDError(pending.TurnID, pending.SessionKey, pending.Content); err != nil {
+			if errors.Is(err, memoryfabric.ErrRecordConflict) {
+				// A conflicting re-append is permanent: the first version of
+				// the record is immutable, so retrying can never succeed.
+				// Drop the marker with a warning (mirroring the runtime
+				// path, which only warns) instead of aborting the boot.
+				slog.Warn("agent: skipping conflicting GraphRAG job during recovery; marker dropped",
+					"turn_id", pending.TurnID, "session", pending.SessionKey, "error", err)
+				messages[i].DeleteExtra(graphMemoryPendingExtra)
+				if err := mutator.SetMessage(i, messages[i]); err != nil {
+					return fmt.Errorf("agent: clear skipped GraphRAG marker: %w", err)
+				}
+				changed = true
+				continue
+			}
 			return fmt.Errorf("agent: recover GraphRAG job %s: %w", pending.TurnID, err)
 		}
 		messages[i].DeleteExtra(graphMemoryPendingExtra)

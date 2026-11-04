@@ -37,6 +37,13 @@ const (
 	defaultMaxDiskBytes int64 = 200 * 1024 * 1024
 )
 
+// ErrRecordConflict is returned when a record ID already exists with a
+// different identity or content. A conflicting re-append is permanent: the
+// first version of the record is immutable, so retrying can never succeed.
+// Callers that recover pending work (notably boot-time GraphRAG recovery)
+// must treat this as skippable, not fatal.
+var ErrRecordConflict = errors.New("memoryfabric: record already exists with different identity or content")
+
 type Namespace struct {
 	Scope string `json:"scope"`
 	Owner string `json:"owner"`
@@ -382,7 +389,7 @@ func (s *Store) AppendTurnScoped(ctx context.Context, recordID, sessionKey strin
 		if legacyErr == nil {
 			if existingScope == namespace.Scope && existingOwner == namespace.Owner {
 				if existingSession != sessionKey || !sameBytes(existingHash, hash[:]) {
-					return fmt.Errorf("memoryfabric: legacy record %s already exists with different identity or content", externalID)
+					return fmt.Errorf("memoryfabric: legacy record %s already exists with different identity or content: %w", externalID, ErrRecordConflict)
 				}
 				recordID, err = externalID, nil
 			} else {
@@ -395,7 +402,7 @@ func (s *Store) AppendTurnScoped(ctx context.Context, recordID, sessionKey strin
 	}
 	if err == nil {
 		if existingSession != sessionKey || existingScope != namespace.Scope || existingOwner != namespace.Owner || !sameBytes(existingHash, hash[:]) {
-			return fmt.Errorf("memoryfabric: record %s already exists with different identity or content", recordID)
+			return fmt.Errorf("memoryfabric: record %s already exists with different identity or content: %w", recordID, ErrRecordConflict)
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("memoryfabric: check record: %w", err)

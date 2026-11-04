@@ -2,6 +2,7 @@ package memoryfabric
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -75,7 +76,11 @@ func TestAppendTurnRepairsMissingProjectionAndRejectsConflict(t *testing.T) {
 	if err := s.Ack(context.Background(), ProjectionGraph, job.ID); err != nil { t.Fatal(err) }
 	if err := s.AppendTurn(context.Background(), "turn-2", "session-1", "hello"); err != nil { t.Fatal(err) }
 	if _, ok, err := s.Claim(context.Background(), ProjectionGraph); err != nil || ok { t.Fatalf("acked graph projection was recreated: ok=%v err=%v", ok, err) }
-	if err := s.AppendTurn(context.Background(), "turn-2", "session-1", "changed"); err == nil { t.Fatal("expected deterministic id conflict") }
+	if err := s.AppendTurn(context.Background(), "turn-2", "session-1", "changed"); err == nil {
+		t.Fatal("expected deterministic id conflict")
+	} else if !errors.Is(err, ErrRecordConflict) {
+		t.Fatalf("conflict must wrap ErrRecordConflict, got: %v", err)
+	}
 }
 
 func TestClaimReclaimsExpiredLease(t *testing.T) {
